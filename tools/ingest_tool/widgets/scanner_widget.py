@@ -1,5 +1,6 @@
 import os
 from Qt import QtWidgets, QtCore, QtGui
+from tools.qt_compat import ALIGN_CENTER
 
 class ScannerWidget(QtWidgets.QWidget):
     """Widget for selecting/drag-dropping incoming media folder."""
@@ -20,19 +21,19 @@ class ScannerWidget(QtWidgets.QWidget):
         self.drop_zone.setObjectName("DropZone")
         
         card_layout = QtWidgets.QVBoxLayout(self.drop_zone)
-        card_layout.setAlignment(QtCore.Qt.AlignCenter)
+        card_layout.setAlignment(ALIGN_CENTER)
 
         self.label_icon = QtWidgets.QLabel("📁")
         self.label_icon.setStyleSheet("font-size: 32px;")
-        self.label_icon.setAlignment(QtCore.Qt.AlignCenter)
+        self.label_icon.setAlignment(ALIGN_CENTER)
 
         self.label_text = QtWidgets.QLabel("Drag and Drop Incoming Plate Folder Here")
         self.label_text.setStyleSheet("font-size: 15px; font-weight: bold; color: #60A5FA;")
-        self.label_text.setAlignment(QtCore.Qt.AlignCenter)
+        self.label_text.setAlignment(ALIGN_CENTER)
 
         self.label_subtext = QtWidgets.QLabel("Supports EXR, DPX, PNG, JPG, MOV, MP4 sequences")
         self.label_subtext.setStyleSheet("font-size: 12px; color: #94A3B8;")
-        self.label_subtext.setAlignment(QtCore.Qt.AlignCenter)
+        self.label_subtext.setAlignment(ALIGN_CENTER)
 
         # Path Selection controls
         browse_layout = QtWidgets.QHBoxLayout()

@@ -1,4 +1,5 @@
 from Qt import QtWidgets, QtCore, QtGui
+from tools.qt_compat import ITEM_IS_SELECTABLE, ITEM_IS_ENABLED, HEADER_RESIZE_INTERACTIVE, SELECT_ROWS
 
 class IngestTableWidget(QtWidgets.QTableWidget):
     """Table widget for reviewing and editing discovered plate sequences."""
@@ -25,9 +26,9 @@ class IngestTableWidget(QtWidgets.QTableWidget):
     def setup_ui(self):
         self.setColumnCount(len(self.HEADERS))
         self.setHorizontalHeaderLabels(self.HEADERS)
-        self.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        self.horizontalHeader().setSectionResizeMode(HEADER_RESIZE_INTERACTIVE)
         self.horizontalHeader().setStretchLastSection(True)
-        self.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
+        self.setSelectionBehavior(SELECT_ROWS)
         self.setAlternatingRowColors(True)
 
     def populate_items(self, items):
@@ -40,7 +41,7 @@ class IngestTableWidget(QtWidgets.QTableWidget):
 
             # Name (Non-editable)
             name_item = QtWidgets.QTableWidgetItem(item.name)
-            name_item.setFlags(QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled)
+            name_item.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
             self.setItem(row_idx, self.COL_NAME, name_item)
 
             # Sequence (Editable)
@@ -57,7 +58,7 @@ class IngestTableWidget(QtWidgets.QTableWidget):
 
             # Frame Range (Non-editable)
             range_item = QtWidgets.QTableWidgetItem(item.frame_range_str)
-            range_item.setFlags(QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled)
+            range_item.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
             self.setItem(row_idx, self.COL_FRAMES, range_item)
 
             # FPS (Combo/Spin)
@@ -77,7 +78,7 @@ class IngestTableWidget(QtWidgets.QTableWidget):
                 status_item = QtWidgets.QTableWidgetItem("Ready")
                 status_item.setForeground(QtGui.QColor("#10B981"))
 
-            status_item.setFlags(QtCore.Qt.ItemIsSelectable | QtCore.Qt.ItemIsEnabled)
+            status_item.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
             self.setItem(row_idx, self.COL_STATUS, status_item)
 
         self.resizeColumnsToContents()

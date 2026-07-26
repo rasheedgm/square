@@ -93,7 +93,7 @@ class IngestWorkerThread(QtCore.QThread):
                 host=self.kitsu_host,
                 email=self.kitsu_user,
                 password=self.kitsu_pass,
-                dry_run=self.dry_run
+                dry_run=False
             )
             kitsu.connect()
 

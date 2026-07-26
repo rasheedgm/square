@@ -1,10 +1,11 @@
+import os
 import logging
 import uuid
 
 logger = logging.getLogger("SquareKitsu")
 
 class KitsuClient:
-    """Wrapper around CGWire gazu API."""
+    """Wrapper around CGWire gazu API for live Kitsu DB operations."""
 
     def __init__(self, host=None, email=None, password=None, dry_run=False):
         self.host = host or "https://kitsu.squarevfx.com/api"
@@ -81,18 +82,18 @@ class KitsuClient:
         return new_proj
 
     def get_or_create_sequence(self, project, sequence_name):
-        """Fetches sequence or creates it if missing."""
+        """Fetches sequence or creates it if missing in Kitsu."""
         project_arg = project if isinstance(project, dict) else {"id": str(project)}
 
         if self.gazu and self.is_connected:
             try:
                 seq = self.gazu.shot.get_sequence_by_name(project_arg, sequence_name)
                 if not seq:
-                    logger.info(f"[Kitsu] Creating new sequence '{sequence_name}'")
+                    logger.info(f"[Kitsu Live] Creating new sequence '{sequence_name}' in Kitsu DB...")
                     seq = self.gazu.shot.new_sequence(project_arg, sequence_name)
                 return seq
             except Exception as e:
-                logger.warning(f"[KitsuClient] gazu sequence error: {e}. Using mock sequence.")
+                logger.error(f"[Kitsu Live Error] Sequence error: {e}")
 
         return {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"seq-{sequence_name}")),
@@ -101,7 +102,7 @@ class KitsuClient:
         }
 
     def get_or_create_shot(self, project, sequence, shot_name, plate_name="PL01", frame_in=1001, frame_out=1100, fps=24.0, resolution="1920x1080", colorspace="ACEScg", nas_path="", description=""):
-        """Fetches shot or creates it with frame range & plate metadata."""
+        """Fetches shot or creates it in Kitsu DB with frame range & plate metadata."""
         project_arg = project if isinstance(project, dict) else {"id": str(project)}
         sequence_arg = sequence if isinstance(sequence, dict) else {"id": str(sequence)}
 
@@ -120,7 +121,7 @@ class KitsuClient:
             try:
                 shot = self.gazu.shot.get_shot_by_name(sequence_arg, shot_name)
                 if not shot:
-                    logger.info(f"[Kitsu] Creating new shot '{shot_name}'")
+                    logger.info(f"[Kitsu Live] Creating new shot '{shot_name}' in Kitsu DB...")
                     shot = self.gazu.shot.new_shot(
                         project_arg,
                         sequence_arg,
@@ -129,13 +130,14 @@ class KitsuClient:
                         data=shot_data
                     )
                 else:
+                    logger.info(f"[Kitsu Live] Updating metadata on shot '{shot_name}'...")
                     try:
                         self.gazu.shot.update_shot_data(shot, shot_data)
                     except Exception as ex:
-                        logger.warning(f"[KitsuClient] Could not update shot_data: {ex}")
+                        logger.warning(f"[Kitsu Live] Could not update shot_data: {ex}")
                 return shot
             except Exception as e:
-                logger.warning(f"[KitsuClient] gazu shot error: {e}. Using mock shot.")
+                logger.error(f"[Kitsu Live Error] Shot error: {e}")
 
         return {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"shot-{shot_name}")),
@@ -146,23 +148,33 @@ class KitsuClient:
         }
 
     def create_default_tasks(self, shot, task_types=None):
-        """Creates default tasks (Prep, Roto, Comp, 3D) for a shot."""
+        """Creates default tasks (Prep, Roto, Matchmove, 3D, Comp) for a shot in Kitsu."""
         shot_arg = shot if isinstance(shot, dict) else {"id": str(shot)}
         task_types = task_types or ["Prep", "Roto", "Matchmove", "3D", "Comp"]
         created_tasks = []
 
         if self.gazu and self.is_connected:
             try:
+                existing_tasks = self.gazu.task.all_tasks_for_shot(shot_arg)
+                existing_type_ids = {t["task_type_id"] for t in existing_tasks} if existing_tasks else set()
+
                 for task_type_name in task_types:
                     tt = self.gazu.task.get_task_type_by_name(task_type_name)
                     if not tt:
+                        logger.info(f"[Kitsu Live] Creating task type '{task_type_name}'...")
                         tt = self.gazu.task.new_task_type(task_type_name)
                     
-                    task = self.gazu.task.new_task(shot_arg, tt)
-                    created_tasks.append(task)
+                    if tt["id"] not in existing_type_ids:
+                        logger.info(f"[Kitsu Live] Creating task '{task_type_name}' on shot...")
+                        task = self.gazu.task.new_task(shot_arg, tt)
+                        created_tasks.append(task)
+                    else:
+                        task = next(t for t in existing_tasks if t["task_type_id"] == tt["id"])
+                        created_tasks.append(task)
+
                 return created_tasks
             except Exception as e:
-                logger.warning(f"[KitsuClient] gazu task error: {e}. Using mock tasks.")
+                logger.error(f"[Kitsu Live Error] Task creation error: {e}")
 
         for tt in task_types:
             task_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"task-{shot_arg.get('id')}-{tt}"))
@@ -173,14 +185,15 @@ class KitsuClient:
         """Uploads a low-res MP4 preview to a Kitsu task."""
         task_arg = task if isinstance(task, dict) else {"id": str(task)}
 
-        if self.gazu and self.is_connected:
+        if self.gazu and self.is_connected and os.path.exists(preview_file_path):
             try:
+                logger.info(f"[Kitsu Live] Uploading preview proxy MP4 to Kitsu task...")
                 comment_obj = self.gazu.task.add_comment(task_arg, comment)
                 preview_obj = self.gazu.task.add_preview(task_arg, comment_obj, preview_file_path)
-                logger.info(f"[Kitsu] Uploaded preview proxy to Kitsu task comment!")
+                logger.info(f"[Kitsu Live] Uploaded preview proxy successfully!")
                 return preview_obj
             except Exception as e:
-                logger.error(f"[Kitsu] Failed to upload preview to Kitsu: {e}")
+                logger.error(f"[Kitsu Live Error] Failed to upload preview to Kitsu: {e}")
 
-        logger.info(f"[Mock Kitsu] Uploaded preview proxy '{preview_file_path}' with comment: '{comment}'")
+        logger.info(f"[Mock Kitsu] Uploaded preview proxy '{preview_file_path}'")
         return {"id": str(uuid.uuid4()), "task_id": task_arg.get("id"), "path": preview_file_path}

@@ -13,6 +13,11 @@ class KitsuClient:
         self.dry_run = dry_run
         self.is_connected = False
         self.gazu = None
+        self._mock_projects = [
+            {"id": "11111111-1111-1111-1111-111111111111", "name": "Feature Film Alpha", "code": "FFA"},
+            {"id": "22222222-2222-2222-2222-222222222222", "name": "Commercial Brand X", "code": "CBX"},
+            {"id": "33333333-3333-3333-3333-333333333333", "name": "VFX Demo Showreel", "code": "DEMO"}
+        ]
 
     def connect(self):
         """Attempts to connect to Kitsu via gazu API using configured host and credentials."""
@@ -48,11 +53,7 @@ class KitsuClient:
                 logger.error(f"[KitsuClient] Error fetching projects from Kitsu: {e}")
 
         # Fallback preset projects if Kitsu server is unreachable or in mock mode
-        return [
-            {"id": "11111111-1111-1111-1111-111111111111", "name": "Feature Film Alpha", "code": "FFA"},
-            {"id": "22222222-2222-2222-2222-222222222222", "name": "Commercial Brand X", "code": "CBX"},
-            {"id": "33333333-3333-3333-3333-333333333333", "name": "VFX Demo Showreel", "code": "DEMO"}
-        ]
+        return self._mock_projects
 
     def create_project(self, project_name, project_code):
         """Creates a new project in Kitsu."""
@@ -62,19 +63,22 @@ class KitsuClient:
                 proj["code"] = project_code
                 try:
                     self.gazu.project.update_project(proj)
-                except Exception:
-                    pass
-                logger.info(f"[KitsuClient] Created new Kitsu project: '{project_name}' ({project_code})")
+                except Exception as e:
+                    logger.warning(f"[KitsuClient] update_project code note: {e}")
+                logger.info(f"[KitsuClient] Created new Kitsu project on server: '{project_name}' ({project_code})")
                 return proj
             except Exception as e:
-                logger.error(f"[KitsuClient] Failed to create Kitsu project: {e}")
+                logger.error(f"[KitsuClient] Failed to create Kitsu project on server: {e}")
 
         # Mock fallback return
-        return {
+        new_proj = {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"proj-{project_code}")),
             "name": project_name,
             "code": project_code
         }
+        self._mock_projects.append(new_proj)
+        logger.info(f"[Mock Kitsu] Created mock project: '{project_name}' ({project_code})")
+        return new_proj
 
     def get_or_create_sequence(self, project, sequence_name):
         """Fetches sequence or creates it if missing."""

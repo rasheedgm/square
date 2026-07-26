@@ -258,15 +258,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_create_new_project(self):
         dialog = CreateProjectDialog(self.kitsu, self)
-        if (hasattr(dialog, "exec") and dialog.exec()) or getattr(dialog, "exec_", lambda: False)():
-            if dialog.created_project:
-                self.load_projects()
-                # Select the newly created project
-                for i in range(self.project_combo.count()):
-                    data = self.project_combo.itemData(i)
-                    if data and data.get("id") == dialog.created_project.get("id"):
-                        self.project_combo.setCurrentIndex(i)
-                        break
+        res = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
+        if res == QtWidgets.QDialog.Accepted and dialog.created_project:
+            self.load_projects()
+            # Select the newly created project in dropdown
+            target_id = dialog.created_project.get("id")
+            target_name = dialog.created_project.get("name")
+            for i in range(self.project_combo.count()):
+                data = self.project_combo.itemData(i)
+                if data and (data.get("id") == target_id or data.get("name") == target_name):
+                    self.project_combo.setCurrentIndex(i)
+                    break
 
     def on_open_settings(self):
         dialog = SettingsDialog(self)

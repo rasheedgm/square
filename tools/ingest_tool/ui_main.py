@@ -17,6 +17,53 @@ from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
 logger = logging.getLogger("IngestMainUI")
 
 
+class CreateProjectDialog(QtWidgets.QDialog):
+    """Dialog to create a new project in Kitsu."""
+
+    def __init__(self, kitsu_client, parent=None):
+        super(CreateProjectDialog, self).__init__(parent)
+        self.setWindowTitle("Create New Kitsu Project")
+        self.setMinimumWidth(380)
+        self.kitsu = kitsu_client
+        self.created_project = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        layout = QtWidgets.QVBoxLayout(self)
+
+        form = QtWidgets.QFormLayout()
+        self.name_edit = QtWidgets.QLineEdit()
+        self.name_edit.setPlaceholderText("e.g. Feature Film Avatar")
+
+        self.code_edit = QtWidgets.QLineEdit()
+        self.code_edit.setPlaceholderText("e.g. AVT")
+
+        form.addRow("Project Name:", self.name_edit)
+        form.addRow("Project Code:", self.code_edit)
+
+        layout.addLayout(form)
+
+        btn_box = QtWidgets.QHBoxLayout()
+        self.create_btn = QtWidgets.QPushButton("Create Project")
+        self.create_btn.setStyleSheet("background-color: #059669; font-weight: bold;")
+        self.create_btn.clicked.connect(self.on_create)
+
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+
+        btn_box.addStretch()
+        btn_box.addWidget(self.cancel_btn)
+        btn_box.addWidget(self.create_btn)
+        layout.addLayout(btn_box)
+
+    def on_create(self):
+        name = self.name_edit.text().strip()
+        code = self.code_edit.text().strip().upper()
+        if name and code:
+            self.created_project = self.kitsu.create_project(name, code)
+            self.accept()
+
+
 class IngestWorkerThread(QtCore.QThread):
     """Background worker for non-blocking ingestion execution."""
 
@@ -110,9 +157,9 @@ class MainWindow(QtWidgets.QMainWindow):
             host=self.config.kitsu_url,
             email=self.config.kitsu_user,
             password=self.config.kitsu_password,
-            dry_run=self.config.dry_run
+            dry_run=False
         )
-        self.kitsu.connect()
+        self.is_kitsu_live = self.kitsu.connect()
 
         self.discovered_items = []
         self.setup_ui()
@@ -133,12 +180,14 @@ class MainWindow(QtWidgets.QMainWindow):
         title_layout = QtWidgets.QVBoxLayout()
         lbl_title = QtWidgets.QLabel("SQUARE VFX - INGEST PIPELINE")
         lbl_title.setObjectName("HeaderTitle")
-        lbl_sub = QtWidgets.QLabel("Smart Plate Ingestion • Kitsu DB Sync • NAS Structure Setup")
+        
+        status_str = f"🟢 Connected to Kitsu ({self.config.kitsu_url})" if self.is_kitsu_live else f"🟡 Kitsu Offline / Unreachable ({self.config.kitsu_url})"
+        lbl_sub = QtWidgets.QLabel(f"Smart Plate Ingestion • {status_str}")
         lbl_sub.setObjectName("HeaderSubtitle")
         title_layout.addWidget(lbl_title)
         title_layout.addWidget(lbl_sub)
 
-        self.dry_run_check = QtWidgets.QCheckBox("Dry-Run / Mock Mode")
+        self.dry_run_check = QtWidgets.QCheckBox("Dry-Run NAS Files")
         self.dry_run_check.setChecked(self.config.dry_run)
         self.dry_run_check.setStyleSheet("font-weight: bold; color: #F59E0B;")
 
@@ -160,6 +209,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_combo = QtWidgets.QComboBox()
         self.project_combo.setMinimumWidth(220)
         settings_layout.addWidget(self.project_combo)
+
+        self.new_proj_btn = QtWidgets.QPushButton("➕ New Project")
+        self.new_proj_btn.setStyleSheet("background-color: #059669; font-weight: bold;")
+        self.new_proj_btn.clicked.connect(self.on_create_new_project)
+        settings_layout.addWidget(self.new_proj_btn)
 
         settings_layout.addSpacing(20)
 
@@ -202,6 +256,18 @@ class MainWindow(QtWidgets.QMainWindow):
         for p in projects:
             self.project_combo.addItem(f"{p['name']} ({p.get('code', 'PRJ')})", p)
 
+    def on_create_new_project(self):
+        dialog = CreateProjectDialog(self.kitsu, self)
+        if (hasattr(dialog, "exec") and dialog.exec()) or getattr(dialog, "exec_", lambda: False)():
+            if dialog.created_project:
+                self.load_projects()
+                # Select the newly created project
+                for i in range(self.project_combo.count()):
+                    data = self.project_combo.itemData(i)
+                    if data and data.get("id") == dialog.created_project.get("id"):
+                        self.project_combo.setCurrentIndex(i)
+                        break
+
     def on_open_settings(self):
         dialog = SettingsDialog(self)
         dialog.config_saved.connect(self.on_config_updated)
@@ -215,14 +281,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.nas_root_edit.setText(self.config.nas_root)
         self.dry_run_check.setChecked(self.config.dry_run)
         
-        # Re-connect Kitsu client with new credentials
+        # Re-connect Kitsu client with updated URL/credentials
         self.kitsu = KitsuClient(
             host=self.config.kitsu_url,
             email=self.config.kitsu_user,
             password=self.config.kitsu_password,
-            dry_run=self.config.dry_run
+            dry_run=False
         )
-        self.kitsu.connect()
+        self.is_kitsu_live = self.kitsu.connect()
         self.load_projects()
 
     def on_scan_requested(self, folder_path):

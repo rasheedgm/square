@@ -12,6 +12,7 @@ from square_core.proxy_generator import ProxyGenerator
 from tools.ingest_tool.widgets.scanner_widget import ScannerWidget
 from tools.ingest_tool.widgets.table_widget import IngestTableWidget
 from tools.ingest_tool.widgets.progress_dialog import IngestProgressDialog
+from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
 
 logger = logging.getLogger("IngestMainUI")
 
@@ -22,12 +23,15 @@ class IngestWorkerThread(QtCore.QThread):
     progress_signal = QtCore.Signal(int, str)
     finished_signal = QtCore.Signal(bool, str)
 
-    def __init__(self, items, project_data, nas_root, dry_run=True):
+    def __init__(self, items, project_data, nas_root, dry_run=True, kitsu_host=None, kitsu_user=None, kitsu_pass=None):
         super(IngestWorkerThread, self).__init__()
         self.items = items
         self.project_data = project_data
         self.nas_root = nas_root
         self.dry_run = dry_run
+        self.kitsu_host = kitsu_host
+        self.kitsu_user = kitsu_user
+        self.kitsu_pass = kitsu_pass
 
     def run(self):
         try:
@@ -36,7 +40,12 @@ class IngestWorkerThread(QtCore.QThread):
                 self.finished_signal.emit(True, "No items to ingest.")
                 return
 
-            kitsu = KitsuClient(dry_run=self.dry_run)
+            kitsu = KitsuClient(
+                host=self.kitsu_host,
+                email=self.kitsu_user,
+                password=self.kitsu_pass,
+                dry_run=self.dry_run
+            )
             kitsu.connect()
 
             nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
@@ -97,7 +106,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1100, 750)
 
         self.config = StudioConfig()
-        self.kitsu = KitsuClient(dry_run=self.config.dry_run)
+        self.kitsu = KitsuClient(
+            host=self.config.kitsu_url,
+            email=self.config.kitsu_user,
+            password=self.config.kitsu_password,
+            dry_run=self.config.dry_run
+        )
         self.kitsu.connect()
 
         self.discovered_items = []
@@ -128,9 +142,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dry_run_check.setChecked(self.config.dry_run)
         self.dry_run_check.setStyleSheet("font-weight: bold; color: #F59E0B;")
 
+        self.settings_btn = QtWidgets.QPushButton("⚙️ Settings")
+        self.settings_btn.setStyleSheet("background-color: #374151; font-weight: bold;")
+        self.settings_btn.clicked.connect(self.on_open_settings)
+
         header_layout.addLayout(title_layout)
         header_layout.addStretch()
         header_layout.addWidget(self.dry_run_check)
+        header_layout.addWidget(self.settings_btn)
         layout.addWidget(header)
 
         # Project & NAS Settings Card
@@ -183,6 +202,26 @@ class MainWindow(QtWidgets.QMainWindow):
         for p in projects:
             self.project_combo.addItem(f"{p['name']} ({p.get('code', 'PRJ')})", p)
 
+    def on_open_settings(self):
+        dialog = SettingsDialog(self)
+        dialog.config_saved.connect(self.on_config_updated)
+        dialog.exec_()
+
+    def on_config_updated(self):
+        self.config.load()
+        self.nas_root_edit.setText(self.config.nas_root)
+        self.dry_run_check.setChecked(self.config.dry_run)
+        
+        # Re-connect Kitsu client with new credentials
+        self.kitsu = KitsuClient(
+            host=self.config.kitsu_url,
+            email=self.config.kitsu_user,
+            password=self.config.kitsu_password,
+            dry_run=self.config.dry_run
+        )
+        self.kitsu.connect()
+        self.load_projects()
+
     def on_scan_requested(self, folder_path):
         scanner = PlateScanner(folder_path)
         items = scanner.scan()
@@ -207,7 +246,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.progress_dialog.show()
 
         # Launch background worker thread
-        self.worker = IngestWorkerThread(items, proj_data, nas_root, dry_run=dry_run)
+        self.worker = IngestWorkerThread(
+            items, proj_data, nas_root,
+            dry_run=dry_run,
+            kitsu_host=self.config.kitsu_url,
+            kitsu_user=self.config.kitsu_user,
+            kitsu_pass=self.config.kitsu_password
+        )
         self.worker.progress_signal.connect(self.progress_dialog.update_progress)
         self.worker.finished_signal.connect(self.progress_dialog.finish)
         self.worker.start()

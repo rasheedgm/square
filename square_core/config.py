@@ -73,6 +73,7 @@ class StudioConfig:
                     data = json.load(f)
                     self.kitsu_url = data.get("kitsu_url", self.kitsu_url)
                     self.kitsu_user = data.get("kitsu_user", self.kitsu_user)
+                    self.kitsu_password = data.get("kitsu_password", self.kitsu_password)
                     self.nas_root = data.get("nas_root", self.nas_root)
                     self.cache_root = data.get("cache_root", self.cache_root)
                     self.dry_run = data.get("dry_run", self.dry_run)
@@ -83,6 +84,7 @@ class StudioConfig:
         data = {
             "kitsu_url": self.kitsu_url,
             "kitsu_user": self.kitsu_user,
+            "kitsu_password": self.kitsu_password,
             "nas_root": self.nas_root,
             "cache_root": self.cache_root,
             "dry_run": self.dry_run

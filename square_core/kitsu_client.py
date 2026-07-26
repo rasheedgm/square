@@ -16,6 +16,11 @@ class KitsuClient:
 
     def connect(self):
         """Attempts to connect to Kitsu via gazu API using configured host and credentials."""
+        if self.dry_run:
+            logger.info("[KitsuClient] Operating in DRY-RUN / MOCK mode.")
+            self.is_connected = True
+            return True
+
         try:
             import gazu
             self.gazu = gazu
@@ -25,7 +30,7 @@ class KitsuClient:
             logger.info(f"[KitsuClient] Successfully connected to Kitsu at {self.host}")
             return True
         except Exception as e:
-            logger.warning(f"[KitsuClient] Could not connect to live Kitsu server ({self.host}): {e}. Using offline mock mode.")
+            logger.warning(f"[KitsuClient] Could not connect to live Kitsu server ({self.host}): {e}. Operating in offline mock mode.")
             self.is_connected = False
             return False
 
@@ -35,11 +40,14 @@ class KitsuClient:
             try:
                 projects = self.gazu.project.all_open_projects()
                 if projects:
+                    for p in projects:
+                        if "code" not in p or not p["code"]:
+                            p["code"] = "".join([w[0] for w in p["name"].split()]).upper()[:4]
                     return projects
             except Exception as e:
                 logger.error(f"[KitsuClient] Error fetching projects from Kitsu: {e}")
 
-        # Fallback preset projects if Kitsu server is unreachable
+        # Fallback preset projects if Kitsu server is unreachable or in mock mode
         return [
             {"id": "11111111-1111-1111-1111-111111111111", "name": "Feature Film Alpha", "code": "FFA"},
             {"id": "22222222-2222-2222-2222-222222222222", "name": "Commercial Brand X", "code": "CBX"},
@@ -50,7 +58,12 @@ class KitsuClient:
         """Creates a new project in Kitsu."""
         if self.gazu and self.is_connected:
             try:
-                proj = self.gazu.project.new_project(project_name, code=project_code)
+                proj = self.gazu.project.new_project(project_name)
+                proj["code"] = project_code
+                try:
+                    self.gazu.project.update_project(proj)
+                except Exception:
+                    pass
                 logger.info(f"[KitsuClient] Created new Kitsu project: '{project_name}' ({project_code})")
                 return proj
             except Exception as e:

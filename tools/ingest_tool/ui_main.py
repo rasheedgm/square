@@ -205,7 +205,10 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_open_settings(self):
         dialog = SettingsDialog(self)
         dialog.config_saved.connect(self.on_config_updated)
-        dialog.exec_()
+        if hasattr(dialog, "exec"):
+            dialog.exec()
+        else:
+            dialog.exec_()
 
     def on_config_updated(self):
         self.config.load()

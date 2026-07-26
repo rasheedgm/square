@@ -7,24 +7,41 @@ if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
 from Qt import QtWidgets
-from tools.ingest_tool.ui_main import MainWindow
+from tools.ingest_tool.ui_main import MainWindow, CreateProjectDialog
 from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
+from tools.qt_compat import DIALOG_ACCEPTED
 
-def test_gui_instantiation():
+def test_full_gui_flow():
     app = QtWidgets.QApplication.instance()
     if not app:
         app = QtWidgets.QApplication(sys.argv)
 
+    # 1. Instantiate Main Window
     window = MainWindow()
-    print("[GUI Test] MainWindow instantiated successfully with Qt.py!")
+    print("[GUI Test] MainWindow instantiated successfully.")
 
+    # 2. Instantiate Settings Dialog
     settings_dlg = SettingsDialog(window)
-    print("[GUI Test] SettingsDialog instantiated successfully with Qt.py!")
+    print("[GUI Test] SettingsDialog instantiated successfully.")
+
+    # 3. Instantiate and test Create Project Dialog
+    proj_dlg = CreateProjectDialog(window.kitsu, window)
+    proj_dlg.name_edit.setText("Test Feature Matrix")
+    proj_dlg.code_edit.setText("MTX")
+    proj_dlg.on_create()
     
-    assert window is not None
-    assert settings_dlg is not None
+    print(f"[GUI Test] Created Project Result: {proj_dlg.created_project}")
+    assert proj_dlg.created_project is not None
+    assert proj_dlg.created_project.get("name") == "Test Feature Matrix"
+
+    # Reload projects into main window
+    window.load_projects()
+    print(f"[GUI Test] Reloaded Projects Count: {window.project_combo.count()}")
+
+    proj_dlg.close()
     settings_dlg.close()
     window.close()
+    print("[GUI Test] ALL GUI TESTS PASSED 100% CLEANLY!")
 
 if __name__ == "__main__":
-    test_gui_instantiation()
+    test_full_gui_flow()

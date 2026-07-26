@@ -17,6 +17,8 @@ from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
 logger = logging.getLogger("IngestMainUI")
 
 
+from tools.qt_compat import DIALOG_ACCEPTED
+
 class CreateProjectDialog(QtWidgets.QDialog):
     """Dialog to create a new project in Kitsu."""
 
@@ -259,7 +261,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def on_create_new_project(self):
         dialog = CreateProjectDialog(self.kitsu, self)
         res = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
-        if res == QtWidgets.QDialog.Accepted and dialog.created_project:
+        if res == DIALOG_ACCEPTED and dialog.created_project:
             self.load_projects()
             # Select the newly created project in dropdown
             target_id = dialog.created_project.get("id")

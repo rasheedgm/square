@@ -1,5 +1,5 @@
 {
-    "kitsu_url": "http://localhost//api",
+    "kitsu_url": "http://localhost/api",
     "kitsu_user": "admin@example.com",
     "kitsu_password": "12345678",
     "nas_root": "D:/NAS_test",

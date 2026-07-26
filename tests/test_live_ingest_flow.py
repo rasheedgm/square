@@ -28,8 +28,8 @@ class TestLiveIngestFlow(unittest.TestCase):
         tasks1 = self.kitsu.create_default_tasks(shot)
         tasks2 = self.kitsu.create_default_tasks(shot)
         
-        self.assertEqual(len(tasks1), 5)
-        self.assertEqual(len(tasks2), 5)
+        self.assertEqual(len(tasks1), 6)
+        self.assertEqual(len(tasks2), 6)
 
     def test_02_proxy_slate_generation_and_upload(self):
         """Test fallback slate MP4 generation and preview upload formatting."""

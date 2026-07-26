@@ -51,7 +51,7 @@ class TestIngestPipeline(unittest.TestCase):
         self.assertEqual(shot["name"], "SH0100")
         
         tasks = client.create_default_tasks(shot["id"])
-        self.assertEqual(len(tasks), 5)
+        self.assertEqual(len(tasks), 6)
 
     def test_03_nas_manager_dry_run(self):
         nas = NASManager(nas_root=str(self.test_nas_dir), dry_run=True)

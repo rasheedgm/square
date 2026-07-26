@@ -102,19 +102,17 @@ class KitsuClient:
         }
 
     def get_or_create_shot(self, project, sequence, shot_name, plate_name="PL01", frame_in=1001, frame_out=1100, fps=24.0, resolution="1920x1080", colorspace="ACEScg", nas_path="", description=""):
-        """Fetches shot or creates it in Kitsu DB with frame range & plate metadata."""
+        """Fetches shot or creates it in Kitsu DB with frame range & structured plate metadata."""
         project_arg = project if isinstance(project, dict) else {"id": str(project)}
         sequence_arg = sequence if isinstance(sequence, dict) else {"id": str(sequence)}
 
-        shot_data = {
-            "frame_in": frame_in,
-            "frame_out": frame_out,
-            "fps": fps,
+        new_plate_info = {
             "plate_name": plate_name,
-            "resolution": resolution,
-            "colorspace": colorspace,
             "nas_path": nas_path,
-            "description": description
+            "frame_range": f"{frame_in}-{frame_out}",
+            "fps": fps,
+            "resolution": resolution,
+            "colorspace": colorspace
         }
 
         if self.gazu and self.is_connected:
@@ -122,6 +120,17 @@ class KitsuClient:
                 shot = self.gazu.shot.get_shot_by_name(sequence_arg, shot_name)
                 if not shot:
                     logger.info(f"[Kitsu Live] Creating new shot '{shot_name}' in Kitsu DB...")
+                    shot_data = {
+                        "frame_in": frame_in,
+                        "frame_out": frame_out,
+                        "fps": fps,
+                        "plate_name": plate_name,
+                        "resolution": resolution,
+                        "colorspace": colorspace,
+                        "nas_path": nas_path,
+                        "description": description,
+                        "plates": {plate_name: new_plate_info}
+                    }
                     shot = self.gazu.shot.new_shot(
                         project_arg,
                         sequence_arg,
@@ -131,35 +140,60 @@ class KitsuClient:
                     )
                 else:
                     logger.info(f"[Kitsu Live] Updating metadata on shot '{shot_name}'...")
+                    existing_data = shot.get("data") or {}
+                    existing_plates = existing_data.get("plates") or {}
+                    existing_plates[plate_name] = new_plate_info
+                    
+                    updated_data = {
+                        **existing_data,
+                        "frame_in": frame_in,
+                        "frame_out": frame_out,
+                        "fps": fps,
+                        "plate_name": plate_name,
+                        "resolution": resolution,
+                        "colorspace": colorspace,
+                        "nas_path": nas_path,
+                        "description": description,
+                        "plates": existing_plates
+                    }
                     try:
-                        self.gazu.shot.update_shot_data(shot, shot_data)
+                        shot = self.gazu.shot.update_shot_data(shot, updated_data)
                     except Exception as ex:
                         logger.warning(f"[Kitsu Live] Could not update shot_data: {ex}")
                 return shot
             except Exception as e:
                 logger.error(f"[Kitsu Live Error] Shot error: {e}")
 
+        mock_data = {
+            "frame_in": frame_in,
+            "frame_out": frame_out,
+            "fps": fps,
+            "plate_name": plate_name,
+            "resolution": resolution,
+            "colorspace": colorspace,
+            "nas_path": nas_path,
+            "description": description,
+            "plates": {plate_name: new_plate_info}
+        }
         return {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"shot-{shot_name}")),
             "name": shot_name,
             "sequence_id": sequence_arg.get("id"),
             "nb_frames": frame_out - frame_in + 1,
-            "data": shot_data
+            "data": mock_data
         }
 
     def create_default_tasks(self, shot, task_types=None):
-        """Creates default tasks (Prep, Roto, Matchmove, 3D, Comp) for a shot in Kitsu."""
+        """Creates default tasks (Ingest, Prep, Roto, Matchmove, 3D, Comp) for a shot in Kitsu."""
         shot_arg = shot if isinstance(shot, dict) else {"id": str(shot)}
-        task_types = task_types or ["Prep", "Roto", "Matchmove", "3D", "Comp"]
+        task_types = task_types or ["Ingest", "Prep", "Roto", "Matchmove", "3D", "Comp"]
         created_tasks = []
 
         if self.gazu and self.is_connected:
             try:
-                # 1. Fetch task types defined on server
                 all_tts = self.gazu.task.all_task_types()
                 tt_by_name = {t["name"].lower(): t for t in all_tts} if all_tts else {}
 
-                # 2. Fetch existing tasks for this shot to avoid duplicate task creation
                 existing_tasks = self.gazu.task.all_tasks_for_shot(shot_arg)
                 existing_type_ids = {t["task_type_id"]: t for t in existing_tasks} if existing_tasks else {}
 
@@ -167,7 +201,6 @@ class KitsuClient:
                     lower_name = task_type_name.lower()
                     if lower_name in tt_by_name:
                         tt = tt_by_name[lower_name]
-                        # Ensure task type is scoped for Shot entity so task creation succeeds
                         if tt.get("for_entity") != "Shot":
                             try:
                                 tt["for_entity"] = "Shot"
@@ -202,7 +235,7 @@ class KitsuClient:
         return created_tasks
 
     def upload_preview_proxy(self, task, preview_file_path, comment="Plate Ingest Preview v001"):
-        """Uploads a low-res MP4 preview to a Kitsu task."""
+        """Uploads a low-res MP4 preview to a Kitsu task and registers it as the main Shot Thumbnail."""
         task_arg = task if isinstance(task, dict) else {"id": str(task)}
 
         if self.gazu and self.is_connected and os.path.exists(preview_file_path):
@@ -214,7 +247,6 @@ class KitsuClient:
 
                 logger.info(f"[Kitsu Live] Uploading preview proxy file to Kitsu task...")
                 
-                # Fetch valid task status object or default status
                 status = task_arg.get("task_status_id") or self.gazu.task.get_default_task_status()
                 if not status:
                     statuses = self.gazu.task.all_task_statuses()
@@ -222,7 +254,14 @@ class KitsuClient:
 
                 comment_obj = self.gazu.task.add_comment(task_arg, status, comment=comment)
                 preview_obj = self.gazu.task.add_preview(task_arg, comment_obj, preview_file_path)
-                logger.info(f"[Kitsu Live] Uploaded preview proxy successfully!")
+                
+                # Register preview as main Shot Thumbnail in Kitsu
+                try:
+                    self.gazu.task.set_main_preview(preview_obj)
+                    logger.info(f"[Kitsu Live] Set main preview thumbnail for Shot!")
+                except Exception as ex_thumb:
+                    logger.warning(f"[Kitsu Live] Could not set main preview thumbnail: {ex_thumb}")
+
                 return preview_obj
             except Exception as e:
                 logger.error(f"[Kitsu Live Error] Failed to upload preview to Kitsu: {e}")

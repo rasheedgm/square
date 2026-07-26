@@ -2,16 +2,17 @@ import os
 import json
 from pathlib import Path
 
-DEFAULT_KITSU_URL = os.getenv("KITSU_URL", "https://kitsu.squarevfx.com/api")
-DEFAULT_KITSU_USER = os.getenv("KITSU_USER", "pipeline@squarevfx.com")
-DEFAULT_KITSU_PASSWORD = os.getenv("KITSU_PASSWORD", "secret")
+DEFAULT_KITSU_URL = os.getenv("KITSU_URL", "http://localhost/api")
+DEFAULT_KITSU_USER = os.getenv("KITSU_USER", "admin@example.com")
+DEFAULT_KITSU_PASSWORD = os.getenv("KITSU_PASSWORD", "12345678")
 
 # NAS Storage Settings
 DEFAULT_NAS_ROOT = os.getenv("SQUARE_NAS_ROOT", "X:/projects")
 DEFAULT_LOCAL_CACHE_ROOT = os.getenv("SQUARE_CACHE_ROOT", "C:/cache/square")
 
-# Default Tasks created for new shots
+# Default Tasks created for new shots (Ingest first)
 DEFAULT_SHOT_TASKS = [
+    "Ingest",
     "Prep",
     "Roto",
     "Matchmove",
@@ -62,16 +63,27 @@ class StudioConfig:
         self.nas_root = DEFAULT_NAS_ROOT
         self.cache_root = DEFAULT_LOCAL_CACHE_ROOT
         self.tasks = DEFAULT_SHOT_TASKS
-        self.dry_run = True  # Default to dry-run mode for safety
+        self.dry_run = True
         
         self.load()
+
+    def clean_url(self, url):
+        """Clean double slashes in URL path except after http:// or https://."""
+        if not url:
+            return url
+        if "://" in url:
+            scheme, path = url.split("://", 1)
+            while "//" in path:
+                path = path.replace("//", "/")
+            return f"{scheme}://{path}"
+        return url.replace("//", "/")
 
     def load(self):
         if self.config_path.exists():
             try:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.kitsu_url = data.get("kitsu_url", self.kitsu_url)
+                    self.kitsu_url = self.clean_url(data.get("kitsu_url", self.kitsu_url))
                     self.kitsu_user = data.get("kitsu_user", self.kitsu_user)
                     self.kitsu_password = data.get("kitsu_password", self.kitsu_password)
                     self.nas_root = data.get("nas_root", self.nas_root)
@@ -82,7 +94,7 @@ class StudioConfig:
 
     def save(self):
         data = {
-            "kitsu_url": self.kitsu_url,
+            "kitsu_url": self.clean_url(self.kitsu_url),
             "kitsu_user": self.kitsu_user,
             "kitsu_password": self.kitsu_password,
             "nas_root": self.nas_root,

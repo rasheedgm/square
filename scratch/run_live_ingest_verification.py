@@ -54,24 +54,24 @@ def run_live_ingestion_test():
     scanner = PlateScanner(search_path=str(incoming_dir))
     items = scanner.scan()
     print(f"[4/5] Scanned {len(items)} items from {incoming_dir}")
-    for item in items:
-        print(f"  - {item.sequence_code}_{item.shot_code}_{item.plate_name}: {len(item.files)} files ({item.frame_range_str})")
 
     # 5. Execute Ingestion Pipeline
     nas_root = root_dir / "test_data" / "studio_nas"
     nas = NASManager(nas_root=nas_root, dry_run=False)
     proxy_gen = ProxyGenerator(output_dir=nas_root / "temp_proxies", dry_run=False)
 
-    print(f"\n[5/5] Executing Full Ingestion Pipeline on {len(items)} plates...")
+    print(f"\n[5/5] Executing Ingestion Pipeline on {len(items)} plates...")
     for idx, item in enumerate(items, 1):
         print(f"\n--- Processing Item {idx}/{len(items)}: {item.sequence_code} | {item.shot_code} | {item.plate_name} ---")
         
-        # A. Sequence
-        seq_obj = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
-        print(f"  [+] Kitsu Sequence: '{seq_obj.get('name')}' (ID: {seq_obj.get('id')})")
+        # Check Version & Existing Ingest
+        version_num, is_already_ingested = nas.get_plate_version_info(
+            proj_code, item.sequence_code, item.shot_code, item.plate_name, item=item
+        )
+        dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.plate_name, version=version_num)
 
-        # B. Shot & Metadata
-        dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.plate_name)
+        # Sequence & Shot
+        seq_obj = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
         shot_obj = kitsu.get_or_create_shot(
             proj_data, seq_obj, item.shot_code,
             plate_name=item.plate_name,
@@ -83,25 +83,29 @@ def run_live_ingestion_test():
             nas_path=str(dest_dir)
         )
         print(f"  [+] Kitsu Shot: '{shot_obj.get('name')}' (ID: {shot_obj.get('id')})")
+        print(f"  [+] Kitsu Shot Plates Data: {shot_obj.get('data', {}).get('plates')}")
 
-        # C. Shot Tasks
+        # Shot Tasks
         tasks = kitsu.create_default_tasks(shot_obj)
         task_names = [t.get("name") or t.get("task_type_name") for t in tasks] if tasks else []
         print(f"  [+] Kitsu Tasks Created ({len(tasks)}): {task_names}")
 
-        # D. NAS Directory & File Copy
-        nas.create_shot_structure(dest_dir)
-        nas.copy_sequence(item, dest_dir)
-        print(f"  [+] Copied files to NAS: {dest_dir}")
+        # NAS File Transfer or Skip
+        if is_already_ingested:
+            print(f"  [SKIP] Plate '{item.plate_name}' (v{version_num:03d}) already ingested on NAS. Skipping file copy.")
+        else:
+            nas.create_shot_structure(dest_dir)
+            nas.copy_sequence(item, dest_dir)
+            print(f"  [+] Copied files to NAS: {dest_dir} (v{version_num:03d})")
 
-        # E. Proxy Video & Kitsu Preview Upload
+        # Proxy Video & Preview Upload to 'Ingest' Task & Thumbnail Setting
         mp4_path = proxy_gen.generate_proxy(item)
-        print(f"  [+] Generated Proxy MP4: {mp4_path}")
 
         if tasks and mp4_path:
-            prep_task = next((t for t in tasks if t.get("name") == "Prep" or t.get("task_type_name") == "Prep"), tasks[0])
-            preview_res = kitsu.upload_preview_proxy(prep_task, mp4_path, comment=f"Plate Ingest Preview v001 ({item.plate_name})")
-            print(f"  [+] Uploaded Preview to Task '{prep_task.get('name')}': Preview ID {preview_res.get('id')}")
+            ingest_task = next((t for t in tasks if (t.get("name") or t.get("task_type_name")) in ("Ingest", "Prep")), tasks[0])
+            task_name = ingest_task.get("name") or ingest_task.get("task_type_name") or "Ingest"
+            preview_res = kitsu.upload_preview_proxy(ingest_task, mp4_path, comment=f"Plate Ingest Preview v{version_num:03d} ({item.plate_name})")
+            print(f"  [+] Uploaded Preview to Task '{task_name}' & Set Shot Thumbnail: Preview ID {preview_res.get('id')}")
 
     print("\n" + "=" * 60)
     print("LIVE INGESTION VERIFICATION COMPLETE - 100% SUCCESS!")

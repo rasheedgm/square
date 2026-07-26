@@ -111,14 +111,21 @@ class IngestWorkerThread(QtCore.QThread):
                 self.progress_signal.emit(step_pct, msg)
                 
                 seq_obj = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
+                dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.plate_name)
+                
                 shot_obj = kitsu.get_or_create_shot(
                     proj_data, seq_obj, item.shot_code,
-                    frame_in=item.start_frame, frame_out=item.end_frame, fps=item.fps
+                    plate_name=item.plate_name,
+                    frame_in=item.start_frame,
+                    frame_out=item.end_frame,
+                    fps=item.fps,
+                    resolution=item.resolution,
+                    colorspace=item.colorspace,
+                    nas_path=str(dest_dir)
                 )
                 tasks = kitsu.create_default_tasks(shot_obj)
 
                 # 2. Create NAS Folders & Copy Files
-                dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.plate_name)
                 msg = f"Creating NAS folder: {dest_dir}"
                 self.progress_signal.emit(step_pct + 10, msg)
                 nas.create_shot_structure(dest_dir)

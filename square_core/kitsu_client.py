@@ -100,10 +100,21 @@ class KitsuClient:
             "project_id": project_arg.get("id")
         }
 
-    def get_or_create_shot(self, project, sequence, shot_name, frame_in=1001, frame_out=1100, fps=24.0, description=""):
-        """Fetches shot or creates it with frame range metadata."""
+    def get_or_create_shot(self, project, sequence, shot_name, plate_name="PL01", frame_in=1001, frame_out=1100, fps=24.0, resolution="1920x1080", colorspace="ACEScg", nas_path="", description=""):
+        """Fetches shot or creates it with frame range & plate metadata."""
         project_arg = project if isinstance(project, dict) else {"id": str(project)}
         sequence_arg = sequence if isinstance(sequence, dict) else {"id": str(sequence)}
+
+        shot_data = {
+            "frame_in": frame_in,
+            "frame_out": frame_out,
+            "fps": fps,
+            "plate_name": plate_name,
+            "resolution": resolution,
+            "colorspace": colorspace,
+            "nas_path": nas_path,
+            "description": description
+        }
 
         if self.gazu and self.is_connected:
             try:
@@ -115,8 +126,13 @@ class KitsuClient:
                         sequence_arg,
                         shot_name,
                         nb_frames=(frame_out - frame_in + 1),
-                        data={"frame_in": frame_in, "frame_out": frame_out, "fps": fps, "description": description}
+                        data=shot_data
                     )
+                else:
+                    try:
+                        self.gazu.shot.update_shot_data(shot, shot_data)
+                    except Exception as ex:
+                        logger.warning(f"[KitsuClient] Could not update shot_data: {ex}")
                 return shot
             except Exception as e:
                 logger.warning(f"[KitsuClient] gazu shot error: {e}. Using mock shot.")
@@ -126,7 +142,7 @@ class KitsuClient:
             "name": shot_name,
             "sequence_id": sequence_arg.get("id"),
             "nb_frames": frame_out - frame_in + 1,
-            "data": {"frame_in": frame_in, "frame_out": frame_out, "fps": fps}
+            "data": shot_data
         }
 
     def create_default_tasks(self, shot, task_types=None):
@@ -153,18 +169,18 @@ class KitsuClient:
             created_tasks.append({"id": task_id, "name": tt, "shot_id": shot_arg.get("id")})
         return created_tasks
 
-    def upload_preview_proxy(self, task, preview_file_path, comment="Plate Ingest Preview"):
+    def upload_preview_proxy(self, task, preview_file_path, comment="Plate Ingest Preview v001"):
         """Uploads a low-res MP4 preview to a Kitsu task."""
         task_arg = task if isinstance(task, dict) else {"id": str(task)}
 
-        if self.gazu and self.is_connected and not self.dry_run:
+        if self.gazu and self.is_connected:
             try:
                 comment_obj = self.gazu.task.add_comment(task_arg, comment)
                 preview_obj = self.gazu.task.add_preview(task_arg, comment_obj, preview_file_path)
-                logger.info(f"[Kitsu] Uploaded preview to task")
+                logger.info(f"[Kitsu] Uploaded preview proxy to Kitsu task comment!")
                 return preview_obj
             except Exception as e:
-                logger.error(f"[Kitsu] Failed to upload preview: {e}")
+                logger.error(f"[Kitsu] Failed to upload preview to Kitsu: {e}")
 
         logger.info(f"[Mock Kitsu] Uploaded preview proxy '{preview_file_path}' with comment: '{comment}'")
         return {"id": str(uuid.uuid4()), "task_id": task_arg.get("id"), "path": preview_file_path}

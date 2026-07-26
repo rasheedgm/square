@@ -51,8 +51,8 @@ class IngestWorkerThread(QtCore.QThread):
             nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
             proxy_gen = ProxyGenerator(dry_run=self.dry_run)
 
-            proj_id = self.project_data.get("id", "proj-001")
-            proj_code = self.project_data.get("code", "PROJ")
+            proj_data = self.project_data or {"id": "11111111-1111-1111-1111-111111111111", "name": "Feature Film Alpha", "code": "FFA"}
+            proj_code = proj_data.get("code", "PROJ")
 
             for idx, item in enumerate(self.items):
                 step_pct = int((idx / total_items) * 100)
@@ -61,12 +61,12 @@ class IngestWorkerThread(QtCore.QThread):
                 msg = f"Connecting to Kitsu: Sequence '{item.sequence_code}', Shot '{item.shot_code}'..."
                 self.progress_signal.emit(step_pct, msg)
                 
-                seq_obj = kitsu.get_or_create_sequence(proj_id, item.sequence_code)
+                seq_obj = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
                 shot_obj = kitsu.get_or_create_shot(
-                    proj_id, seq_obj["id"], item.shot_code,
+                    proj_data, seq_obj, item.shot_code,
                     frame_in=item.start_frame, frame_out=item.end_frame, fps=item.fps
                 )
-                tasks = kitsu.create_default_tasks(shot_obj["id"])
+                tasks = kitsu.create_default_tasks(shot_obj)
 
                 # 2. Create NAS Folders & Copy Files
                 dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.plate_name)
@@ -88,7 +88,7 @@ class IngestWorkerThread(QtCore.QThread):
                     comp_task = tasks[-1]  # Comp or first task
                     msg = f"Uploading preview to Kitsu task '{comp_task['name']}'..."
                     self.progress_signal.emit(step_pct + 40, msg)
-                    kitsu.upload_preview_proxy(comp_task["id"], proxy_path)
+                    kitsu.upload_preview_proxy(comp_task, proxy_path)
 
             self.finished_signal.emit(True, "All plates ingested successfully!")
 
@@ -240,7 +240,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not items:
             return
 
-        proj_data = self.project_combo.currentData() or {"id": "proj-001", "code": "FFA"}
+        proj_data = self.project_combo.currentData() or {"id": "11111111-1111-1111-1111-111111111111", "code": "FFA"}
         nas_root = self.nas_root_edit.text().strip()
         dry_run = self.dry_run_check.isChecked()
 

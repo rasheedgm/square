@@ -34,6 +34,12 @@ def test_full_gui_flow():
     assert proj_dlg.created_project is not None
     assert proj_dlg.created_project.get("name") == "Test Feature Matrix"
 
+    # 4. Test Scan folder and table widget population
+    sample_dir = root_dir / "test_data" / "incoming_plates"
+    window.on_scan_folder(str(sample_dir))
+    print(f"[GUI Test] Table populated with {window.table_widget.rowCount()} rows.")
+    assert window.table_widget.rowCount() > 0
+
     # Reload projects into main window
     window.load_projects()
     print(f"[GUI Test] Reloaded Projects Count: {window.project_combo.count()}")

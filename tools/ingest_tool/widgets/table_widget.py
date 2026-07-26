@@ -61,39 +61,34 @@ class IngestTableWidget(QtWidgets.QTableWidget):
             range_item.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
             self.setItem(row_idx, self.COL_FRAMES, range_item)
 
-            # FPS (Combo/Spin)
+            # FPS (Non-editable)
             fps_item = QtWidgets.QTableWidgetItem(str(item.fps))
+            fps_item.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
             self.setItem(row_idx, self.COL_FPS, fps_item)
 
-            # Colorspace (Combo)
+            # Colorspace (Non-editable)
             cs_item = QtWidgets.QTableWidgetItem(item.colorspace)
+            cs_item.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
             self.setItem(row_idx, self.COL_COLORSPACE, cs_item)
 
-            # Status Badge
-            if item.has_warnings:
-                status_text = f"⚠️ Missing {len(item.missing_frames)} frames"
-                status_item = QtWidgets.QTableWidgetItem(status_text)
-                status_item.setForeground(QtGui.QColor("#F59E0B"))
-            else:
-                status_item = QtWidgets.QTableWidgetItem("Ready")
-                status_item.setForeground(QtGui.QColor("#10B981"))
-
+            # Status (Non-editable)
+            status_str = "Ready" if not item.missing_frames else f"Warning: {len(item.missing_frames)} missing"
+            status_item = QtWidgets.QTableWidgetItem(status_str)
             status_item.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
+            if item.missing_frames:
+                status_item.setForeground(QtGui.QBrush(QtGui.QColor(239, 68, 68)))
+            else:
+                status_item.setForeground(QtGui.QBrush(QtGui.QColor(16, 185, 129)))
             self.setItem(row_idx, self.COL_STATUS, status_item)
 
-        self.resizeColumnsToContents()
+    populate_table = populate_items
 
-    def get_updated_items(self):
-        """Reads modified table entries back into the items list."""
+    def get_selected_items(self):
+        """Returns the modified list of IngestSequenceItems from table rows."""
         for row in range(self.rowCount()):
             if row < len(self.items_data):
                 item = self.items_data[row]
-                item.sequence_code = self.item(row, self.COL_SEQ).text().strip().upper()
-                item.shot_code = self.item(row, self.COL_SHOT).text().strip().upper()
-                item.plate_name = self.item(row, self.COL_PLATE).text().strip().upper()
-                try:
-                    item.fps = float(self.item(row, self.COL_FPS).text().strip())
-                except ValueError:
-                    pass
-                item.colorspace = self.item(row, self.COL_COLORSPACE).text().strip()
+                item.sequence_code = self.item(row, self.COL_SEQ).text().strip()
+                item.shot_code = self.item(row, self.COL_SHOT).text().strip()
+                item.plate_name = self.item(row, self.COL_PLATE).text().strip()
         return self.items_data

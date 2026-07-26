@@ -1,0 +1,158 @@
+/* Square VFX Dark Studio Theme */
+
+QMainWindow {
+    background-color: #12151A;
+    color: #E2E8F0;
+    font-family: 'Segoe UI', 'Roboto', 'Inter', sans-serif;
+}
+
+QWidget {
+    color: #E2E8F0;
+    font-size: 13px;
+}
+
+/* Header Banner */
+#HeaderWidget {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1A1F29, stop:1 #0F172A);
+    border-bottom: 2px solid #00B4D8;
+    padding: 12px 20px;
+}
+
+#HeaderTitle {
+    font-size: 18px;
+    font-weight: bold;
+    color: #F8FAFC;
+}
+
+#HeaderSubtitle {
+    font-size: 12px;
+    color: #94A3B8;
+}
+
+/* Group Boxes / Cards */
+QGroupBox {
+    background-color: #1E232D;
+    border: 1px solid #2D3748;
+    border-radius: 8px;
+    margin-top: 12px;
+    padding-top: 24px;
+    font-weight: bold;
+    color: #00B4D8;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    padding: 4px 12px;
+    background-color: #262D3D;
+    border-radius: 4px;
+    color: #00B4D8;
+}
+
+/* Drag and Drop Zone */
+#DropZone {
+    background-color: #181C24;
+    border: 2px dashed #3B82F6;
+    border-radius: 10px;
+    padding: 30px;
+    text-align: center;
+}
+
+#DropZone:hover {
+    background-color: #1E2430;
+    border-color: #60A5FA;
+}
+
+/* Input Fields & Combos */
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    background-color: #171B24;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    padding: 6px 12px;
+    color: #F8FAFC;
+    selection-background-color: #00B4D8;
+}
+
+QLineEdit:focus, QComboBox:focus {
+    border: 1px solid #00B4D8;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 20px;
+}
+
+/* Primary Action Buttons */
+QPushButton {
+    background-color: #2563EB;
+    color: #FFFFFF;
+    font-weight: bold;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 18px;
+    min-height: 28px;
+}
+
+QPushButton:hover {
+    background-color: #3B82F6;
+}
+
+QPushButton:pressed {
+    background-color: #1D4ED8;
+}
+
+QPushButton#IngestButton {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #00B4D8, stop:1 #0077B6);
+    font-size: 14px;
+    font-weight: bold;
+    border-radius: 8px;
+    padding: 10px 24px;
+}
+
+QPushButton#IngestButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #48CAE4, stop:1 #0096C7);
+}
+
+/* Table Widget */
+QTableWidget {
+    background-color: #171B24;
+    border: 1px solid #2D3748;
+    gridline-color: #2D3748;
+    border-radius: 6px;
+    selection-background-color: #1E3A8A;
+    selection-color: #FFFFFF;
+}
+
+QHeaderView::section {
+    background-color: #1F2937;
+    color: #94A3B8;
+    padding: 8px;
+    font-weight: bold;
+    border: none;
+    border-bottom: 2px solid #374151;
+}
+
+/* Progress Bar */
+QProgressBar {
+    background-color: #171B24;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    text-align: center;
+    color: #F8FAFC;
+    font-weight: bold;
+}
+
+QProgressBar::chunk {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10B981, stop:1 #059669);
+    border-radius: 5px;
+}
+
+/* Status Log Text Edit */
+QTextEdit {
+    background-color: #0F172A;
+    border: 1px solid #1E293B;
+    border-radius: 6px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 12px;
+    color: #38BDF8;
+}

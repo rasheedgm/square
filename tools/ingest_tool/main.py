@@ -22,7 +22,12 @@ def main():
 
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    
+    # Use exec() for Qt.py / PyQt6 / PySide6 compatibility
+    if hasattr(app, "exec"):
+        sys.exit(app.exec())
+    else:
+        sys.exit(app.exec_())
 
 if __name__ == "__main__":
     main()

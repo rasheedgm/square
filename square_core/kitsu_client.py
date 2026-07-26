@@ -155,22 +155,28 @@ class KitsuClient:
 
         if self.gazu and self.is_connected:
             try:
+                # Fetch task types valid for shots specifically (for_entity="Shot")
+                shot_task_types = self.gazu.task.all_task_types_for_shot(shot_arg)
+                existing_type_names = {tt["name"]: tt for tt in shot_task_types} if shot_task_types else {}
+
+                # Fetch existing tasks on shot to avoid duplicates
                 existing_tasks = self.gazu.task.all_tasks_for_shot(shot_arg)
-                existing_type_ids = {t["task_type_id"] for t in existing_tasks} if existing_tasks else set()
+                existing_task_type_ids = {t["task_type_id"]: t for t in existing_tasks} if existing_tasks else {}
 
                 for task_type_name in task_types:
-                    tt = self.gazu.task.get_task_type_by_name(task_type_name)
-                    if not tt:
-                        logger.info(f"[Kitsu Live] Creating task type '{task_type_name}'...")
-                        tt = self.gazu.task.new_task_type(task_type_name)
+                    if task_type_name in existing_type_names:
+                        tt = existing_type_names[task_type_name]
+                    else:
+                        logger.info(f"[Kitsu Live] Creating task type '{task_type_name}' for entity='Shot'...")
+                        tt = self.gazu.task.new_task_type(task_type_name, for_entity="Shot")
                     
-                    if tt["id"] not in existing_type_ids:
+                    if tt["id"] in existing_task_type_ids:
+                        task = existing_task_type_ids[tt["id"]]
+                    else:
                         logger.info(f"[Kitsu Live] Creating task '{task_type_name}' on shot...")
                         task = self.gazu.task.new_task(shot_arg, tt)
-                        created_tasks.append(task)
-                    else:
-                        task = next(t for t in existing_tasks if t["task_type_id"] == tt["id"])
-                        created_tasks.append(task)
+
+                    created_tasks.append(task)
 
                 return created_tasks
             except Exception as e:

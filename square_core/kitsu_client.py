@@ -155,10 +155,9 @@ class KitsuClient:
 
         if self.gazu and self.is_connected:
             try:
-                # 1. Fetch task types specifically defined for entity='Shot'
+                # 1. Fetch task types defined on server
                 all_tts = self.gazu.task.all_task_types()
-                shot_tts = [t for t in all_tts if t.get("for_entity", "").lower() == "shot"] if all_tts else []
-                tt_by_name = {t["name"].lower(): t for t in shot_tts}
+                tt_by_name = {t["name"].lower(): t for t in all_tts} if all_tts else {}
 
                 # 2. Fetch existing tasks for this shot to avoid duplicate task creation
                 existing_tasks = self.gazu.task.all_tasks_for_shot(shot_arg)
@@ -168,20 +167,27 @@ class KitsuClient:
                     lower_name = task_type_name.lower()
                     if lower_name in tt_by_name:
                         tt = tt_by_name[lower_name]
+                        # Ensure task type is scoped for Shot entity so task creation succeeds
+                        if tt.get("for_entity") != "Shot":
+                            try:
+                                tt["for_entity"] = "Shot"
+                                tt = self.gazu.task.update_task_type(tt)
+                                tt_by_name[lower_name] = tt
+                            except Exception as ex:
+                                logger.warning(f"[Kitsu Live] Could not update task type for_entity: {ex}")
                     else:
-                        logger.info(f"[Kitsu Live] Creating task type '{task_type_name}' for entity='Shot'...")
                         try:
                             tt = self.gazu.task.new_task_type(task_type_name, for_entity="Shot")
                             tt_by_name[lower_name] = tt
-                        except Exception as ex:
-                            logger.warning(f"[Kitsu Live] new_task_type note: {ex}")
+                        except Exception:
                             tt = self.gazu.task.get_task_type_by_name(task_type_name)
+                            if tt:
+                                tt_by_name[lower_name] = tt
 
                     if tt and tt.get("id"):
                         if tt["id"] in existing_type_ids:
                             task = existing_type_ids[tt["id"]]
                         else:
-                            logger.info(f"[Kitsu Live] Creating task '{task_type_name}' on shot...")
                             task = self.gazu.task.new_task(shot_arg, tt)
                             existing_type_ids[tt["id"]] = task
                         created_tasks.append(task)

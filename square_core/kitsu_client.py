@@ -155,28 +155,33 @@ class KitsuClient:
 
         if self.gazu and self.is_connected:
             try:
-                # Fetch task types valid for shots specifically (for_entity="Shot")
-                shot_task_types = self.gazu.task.all_task_types_for_shot(shot_arg)
-                existing_type_names = {tt["name"]: tt for tt in shot_task_types} if shot_task_types else {}
+                # 1. Fetch all existing task types on server to prevent 'name already exists' error
+                all_tts = self.gazu.task.all_task_types()
+                tt_by_name = {t["name"].lower(): t for t in all_tts} if all_tts else {}
 
-                # Fetch existing tasks on shot to avoid duplicates
+                # 2. Fetch existing tasks for this shot to avoid duplicate tasks
                 existing_tasks = self.gazu.task.all_tasks_for_shot(shot_arg)
-                existing_task_type_ids = {t["task_type_id"]: t for t in existing_tasks} if existing_tasks else {}
+                existing_type_ids = {t["task_type_id"]: t for t in existing_tasks} if existing_tasks else {}
 
                 for task_type_name in task_types:
-                    if task_type_name in existing_type_names:
-                        tt = existing_type_names[task_type_name]
+                    lower_name = task_type_name.lower()
+                    if lower_name in tt_by_name:
+                        tt = tt_by_name[lower_name]
                     else:
-                        logger.info(f"[Kitsu Live] Creating task type '{task_type_name}' for entity='Shot'...")
-                        tt = self.gazu.task.new_task_type(task_type_name, for_entity="Shot")
-                    
-                    if tt["id"] in existing_task_type_ids:
-                        task = existing_task_type_ids[tt["id"]]
-                    else:
-                        logger.info(f"[Kitsu Live] Creating task '{task_type_name}' on shot...")
-                        task = self.gazu.task.new_task(shot_arg, tt)
+                        logger.info(f"[Kitsu Live] Creating task type '{task_type_name}'...")
+                        try:
+                            tt = self.gazu.task.new_task_type(task_type_name, for_entity="Shot")
+                            tt_by_name[lower_name] = tt
+                        except Exception:
+                            tt = self.gazu.task.get_task_type_by_name(task_type_name)
 
-                    created_tasks.append(task)
+                    if tt and tt.get("id"):
+                        if tt["id"] in existing_type_ids:
+                            task = existing_type_ids[tt["id"]]
+                        else:
+                            logger.info(f"[Kitsu Live] Creating task '{task_type_name}' on shot...")
+                            task = self.gazu.task.new_task(shot_arg, tt)
+                        created_tasks.append(task)
 
                 return created_tasks
             except Exception as e:
@@ -193,8 +198,14 @@ class KitsuClient:
 
         if self.gazu and self.is_connected and os.path.exists(preview_file_path):
             try:
-                logger.info(f"[Kitsu Live] Uploading preview proxy MP4 to Kitsu task...")
-                comment_obj = self.gazu.task.add_comment(task_arg, comment)
+                logger.info(f"[Kitsu Live] Uploading preview proxy file to Kitsu task...")
+                
+                # Fetch valid task status (e.g. WIP or Todo)
+                status = task_arg.get("task_status_id") or self.gazu.task.get_default_task_status()
+                if not status:
+                    status = self.gazu.task.get_task_status_by_name("WIP") or self.gazu.task.get_task_status_by_name("Todo") or "todo"
+
+                comment_obj = self.gazu.task.add_comment(task_arg, status, comment=comment)
                 preview_obj = self.gazu.task.add_preview(task_arg, comment_obj, preview_file_path)
                 logger.info(f"[Kitsu Live] Uploaded preview proxy successfully!")
                 return preview_obj

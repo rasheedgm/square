@@ -9,12 +9,19 @@ from PIL import Image, ImageDraw
 logger = logging.getLogger("SquareProxy")
 
 def find_ffmpeg_bin():
-    """Finds ffmpeg executable on PATH or inside local conda environment."""
+    """Finds ffmpeg executable via imageio-ffmpeg, PATH, or local conda environment."""
+    try:
+        import imageio_ffmpeg
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+        if exe and os.path.exists(exe):
+            return exe
+    except Exception:
+        pass
+
     ffmpeg_on_path = shutil.which("ffmpeg")
     if ffmpeg_on_path:
         return ffmpeg_on_path
 
-    # Check local conda env paths
     root_dir = Path(__file__).parent.parent
     possible_paths = [
         root_dir / "env" / "Library" / "bin" / "ffmpeg.exe",
@@ -57,14 +64,13 @@ class ProxyGenerator:
             src_video = item.files[0]
             cmd = [
                 self.ffmpeg_cmd, "-y", "-i", src_video,
-                "-vf", f"scale=1280:-2,drawtext=text='{item.sequence_code} {item.shot_code} | %{{frame_num}}':x=20:y=h-40:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5",
+                "-vf", "scale=1280:-2",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "22",
                 "-pix_fmt", "yuv420p",
                 str(out_mp4)
             ]
         else:
             first_frame = item.files[0]
-            # Pattern matching for image sequence
             pattern = first_frame.replace(str(item.start_frame), "%04d")
             
             cmd = [
@@ -72,7 +78,7 @@ class ProxyGenerator:
                 "-start_number", str(item.start_frame),
                 "-framerate", str(item.fps),
                 "-i", pattern,
-                "-vf", f"scale=1280:-2,drawtext=text='{item.sequence_code}_{item.shot_code} | Frame\\: %{{frame_num}}':x=20:y=h-40:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.5",
+                "-vf", "scale=1280:-2",
                 "-c:v", "libx264", "-preset", "fast", "-crf", "22",
                 "-pix_fmt", "yuv420p",
                 str(out_mp4)
@@ -83,12 +89,12 @@ class ProxyGenerator:
             subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
             return str(out_mp4)
         except Exception as e:
-            logger.warning(f"[ProxyGenerator] FFmpeg encoding failed: {e}. Generating studio slate preview card.")
+            logger.warning(f"[ProxyGenerator] FFmpeg sequence encoding failed: {e}. Generating studio slate preview video card.")
             return self._generate_slate_proxy(item, out_mp4)
 
     def _generate_slate_proxy(self, item, out_mp4):
-        """Generates a synthetic studio slate preview card when raw files cannot be converted."""
-        preview_img_path = str(out_mp4).replace(".mp4", "_preview.jpg")
+        """Generates a 1-second MP4 video preview card when raw sequence files are mock text or non-decodable."""
+        slate_jpg = self.output_dir / f"{item.sequence_code}_{item.shot_code}_{item.plate_name}_slate.jpg"
         
         try:
             # Create a 1280x720 dark slate image card
@@ -107,9 +113,19 @@ class ProxyGenerator:
             draw.text((50, 300), f"FPS: {item.fps} | Colorspace: {item.colorspace}", fill=(248, 250, 252))
             draw.text((50, 340), f"Total Files: {len(item.files)}", fill=(248, 250, 252))
 
-            img.save(preview_img_path)
-            logger.info(f"[ProxyGenerator] Created studio slate preview card: {preview_img_path}")
-            return preview_img_path
+            img.save(slate_jpg)
+
+            # Convert slate JPG into a 1-second MP4 video using FFmpeg
+            cmd = [
+                self.ffmpeg_cmd, "-y",
+                "-loop", "1", "-i", str(slate_jpg),
+                "-c:v", "libx264", "-t", "1", "-pix_fmt", "yuv420p",
+                str(out_mp4)
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+            logger.info(f"[ProxyGenerator] Created studio slate MP4 preview video card: {out_mp4}")
+            return str(out_mp4)
         except Exception as e:
             logger.error(f"[ProxyGenerator] Slate proxy generation failed: {e}")
-            return None
+            # Final fallback: return the JPEG image path if video encoding fails
+            return str(slate_jpg) if slate_jpg.exists() else None

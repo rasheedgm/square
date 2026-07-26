@@ -8,6 +8,7 @@ if str(root_dir) not in sys.path:
 
 from Qt import QtWidgets
 from tools.ingest_tool.ui_main import MainWindow
+from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
 
 def test_gui_instantiation():
     app = QtWidgets.QApplication.instance()
@@ -16,8 +17,13 @@ def test_gui_instantiation():
 
     window = MainWindow()
     print("[GUI Test] MainWindow instantiated successfully with Qt.py!")
-    print(f"[GUI Test] Active Qt Binding: {QtWidgets.__name__}")
+
+    settings_dlg = SettingsDialog(window)
+    print("[GUI Test] SettingsDialog instantiated successfully with Qt.py!")
+    
     assert window is not None
+    assert settings_dlg is not None
+    settings_dlg.close()
     window.close()
 
 if __name__ == "__main__":

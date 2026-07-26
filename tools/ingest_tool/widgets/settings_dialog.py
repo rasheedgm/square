@@ -1,6 +1,7 @@
 from Qt import QtWidgets, QtCore, QtGui
 from square_core.config import StudioConfig
 from square_core.kitsu_client import KitsuClient
+from tools.qt_compat import ECHO_MODE_PASSWORD
 
 class SettingsDialog(QtWidgets.QDialog):
     """Settings modal for configuring Kitsu credentials and NAS storage paths."""
@@ -35,7 +36,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.kitsu_user_edit.setPlaceholderText("pipeline@squarevfx.com")
 
         self.kitsu_pass_edit = QtWidgets.QLineEdit(self.config.kitsu_password)
-        self.kitsu_pass_edit.setEchoMode(QtWidgets.QLineEdit.Password)
+        self.kitsu_pass_edit.setEchoMode(ECHO_MODE_PASSWORD)
         self.kitsu_pass_edit.setPlaceholderText("Password")
 
         self.test_conn_btn = QtWidgets.QPushButton("⚡ Test Live Kitsu Connection")

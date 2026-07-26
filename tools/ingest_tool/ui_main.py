@@ -14,7 +14,7 @@ from tools.ingest_tool.widgets.scanner_widget import ScannerWidget
 from tools.ingest_tool.widgets.table_widget import IngestTableWidget
 from tools.ingest_tool.widgets.progress_dialog import IngestProgressDialog
 from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
-from tools.qt_compat import DIALOG_ACCEPTED
+from tools.qt_compat import DIALOG_ACCEPTED, FONT_BOLD, ORIENTATION_HORIZONTAL
 
 logger = logging.getLogger("IngestMainUI")
 
@@ -211,7 +211,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Header Bar
         header = QtWidgets.QHBoxLayout()
         title = QtWidgets.QLabel("SQUARE VFX - PLATE INGESTION & PIPELINE ENGINE")
-        title.setFont(QtGui.QFont("Segoe UI", 12, QtGui.QFont.Bold))
+        title.setFont(QtGui.QFont("Segoe UI", 12, FONT_BOLD))
 
         self.status_indicator = QtWidgets.QLabel()
         self.update_status_indicator()
@@ -252,7 +252,7 @@ class MainWindow(QtWidgets.QMainWindow):
         main_layout.addLayout(proj_layout)
 
         # Main Splitter
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        splitter = QtWidgets.QSplitter(ORIENTATION_HORIZONTAL)
 
         self.scanner_widget = ScannerWidget()
         self.scanner_widget.scan_requested.connect(self.on_scan_folder)
@@ -268,7 +268,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Bottom Action Bar
         bottom_bar = QtWidgets.QHBoxLayout()
         self.ingest_btn = QtWidgets.QPushButton("🚀 Start Ingestion Process")
-        self.ingest_btn.setFont(QtGui.QFont("Segoe UI", 11, QtGui.QFont.Bold))
+        self.ingest_btn.setFont(QtGui.QFont("Segoe UI", 11, FONT_BOLD))
         self.ingest_btn.setStyleSheet("background-color: #2563EB; color: white; padding: 10px 20px;")
         self.ingest_btn.clicked.connect(self.on_start_ingest)
 

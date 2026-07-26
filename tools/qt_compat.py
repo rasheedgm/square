@@ -31,3 +31,5 @@ HEADER_RESIZE_INTERACTIVE = get_qt_enum(QtWidgets.QHeaderView, "ResizeMode", "In
 SELECT_ROWS = get_qt_enum(QtWidgets.QAbstractItemView, "SelectionBehavior", "SelectRows")
 ECHO_MODE_PASSWORD = get_qt_enum(QtWidgets.QLineEdit, "EchoMode", "Password")
 DIALOG_ACCEPTED = get_qt_enum(QtWidgets.QDialog, "DialogCode", "Accepted")
+FONT_BOLD = get_qt_enum(QtGui.QFont, "Weight", "Bold")
+ORIENTATION_HORIZONTAL = get_qt_enum(QtCore.Qt, "Orientation", "Horizontal")

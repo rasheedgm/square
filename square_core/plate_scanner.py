@@ -36,10 +36,12 @@ class IngestSequenceItem:
             return
 
         frame_numbers = []
-        pattern = re.compile(r"\.(\d+)\." + re.escape(self.ext.lstrip(".")) + r"$", re.IGNORECASE)
+        # Support both .1001.exr and 1001.exr
+        pattern = re.compile(r"(?:[._]|^)(\d+)\." + re.escape(self.ext.lstrip(".")) + r"$", re.IGNORECASE)
 
         for filepath in self.files:
-            match = pattern.search(filepath)
+            filename = os.path.basename(filepath)
+            match = pattern.search(filename)
             if match:
                 frame_numbers.append(int(match.group(1)))
 
@@ -100,9 +102,11 @@ class PlateScanner:
         sequence_groups = defaultdict(list)
         single_videos = []
 
-        pattern_frame = re.compile(r"^(.*?)\.(\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
+        pattern_dotted = re.compile(r"^(.*?)[._](\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
+        pattern_standalone = re.compile(r"^(\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
 
         for root, _, files in os.walk(self.search_path):
+            folder_name = os.path.basename(root)
             for file in files:
                 filepath = os.path.join(root, file)
                 ext = os.path.splitext(file)[1].lower()
@@ -110,15 +114,18 @@ class PlateScanner:
                 if ext in SUPPORTED_VIDEO_EXTS:
                     single_videos.append(IngestSequenceItem(file, [filepath], ext, is_video=True))
                 elif ext in SUPPORTED_IMAGE_EXTS:
-                    match = pattern_frame.match(file)
-                    if match:
-                        base_prefix = match.group(1)
-                        # Key by folder path + base prefix
-                        group_key = (root, base_prefix, ext)
-                        sequence_groups[group_key].append(filepath)
+                    match_dotted = pattern_dotted.match(file)
+                    match_standalone = pattern_standalone.match(file)
+
+                    if match_dotted and match_dotted.group(1):
+                        base_prefix = match_dotted.group(1)
+                    elif match_standalone:
+                        base_prefix = folder_name
                     else:
-                        # Non-numbered single frame image
-                        sequence_groups[(root, file, ext)].append(filepath)
+                        base_prefix = file
+
+                    group_key = (root, base_prefix, ext)
+                    sequence_groups[group_key].append(filepath)
 
         items = []
         for (root, base_prefix, ext), file_list in sequence_groups.items():

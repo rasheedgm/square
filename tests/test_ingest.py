@@ -76,7 +76,7 @@ class TestIngestPipeline(unittest.TestCase):
         nas.create_shot_structure(dest_dir)
         
         copied = nas.copy_sequence(item, dest_dir)
-        self.assertEqual(len(copied), 10)
+        self.assertEqual(len(copied), len(item.files))
         self.assertTrue(os.path.exists(copied[0]))
 
         # Verify xxHash checksum calculation

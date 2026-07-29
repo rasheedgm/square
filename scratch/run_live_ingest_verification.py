@@ -92,11 +92,12 @@ def run_live_ingestion_test():
 
         # NAS File Transfer or Skip
         if is_already_ingested:
-            print(f"  [SKIP] Plate '{item.plate_name}' (v{version_num:03d}) already ingested on NAS. Skipping file copy.")
-        else:
-            nas.create_shot_structure(dest_dir)
-            nas.copy_sequence(item, dest_dir)
-            print(f"  [+] Copied files to NAS: {dest_dir} (v{version_num:03d})")
+            print(f"  [SKIP] Plate '{item.plate_name}' (v{version_num:03d}) already ingested on NAS. Skipping duplicate copy and Kitsu upload.")
+            continue
+
+        nas.create_shot_structure(dest_dir)
+        nas.copy_sequence(item, dest_dir)
+        print(f"  [+] Copied files to NAS: {dest_dir} (v{version_num:03d})")
 
         # Proxy Video & Preview Upload to 'Ingest' Task & Thumbnail Setting
         mp4_path = proxy_gen.generate_proxy(item)

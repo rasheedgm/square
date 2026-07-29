@@ -147,25 +147,26 @@ class IngestWorkerThread(QtCore.QThread):
                 )
                 tasks = kitsu.create_default_tasks(shot_obj)
 
-                # 3. Handle File Transfers (Copy or Skip if already ingested)
+                # 3. Handle File Transfers and Preview Uploads
                 if is_already_ingested:
-                    msg = f"Plate '{item.plate_name}' (v{version_num:03d}) already ingested on NAS. Skipping file copy."
-                    self.progress_signal.emit(step_pct + 20, msg)
-                else:
-                    msg = f"Creating NAS folder: {dest_dir} (v{version_num:03d})"
-                    self.progress_signal.emit(step_pct + 10, msg)
-                    nas.create_shot_structure(dest_dir)
+                    msg = f"Plate '{item.plate_name}' (v{version_num:03d}) already ingested. Skipping duplicate copy and Kitsu upload."
+                    self.progress_signal.emit(step_pct + 40, msg)
+                    continue
 
-                    msg = f"Copying {len(item.files)} plate files to v{version_num:03d}..."
-                    self.progress_signal.emit(step_pct + 20, msg)
-                    nas.copy_sequence(item, dest_dir)
+                # Copy Files to NAS for NEW Ingestion Version
+                msg = f"Creating NAS folder: {dest_dir} (v{version_num:03d})"
+                self.progress_signal.emit(step_pct + 10, msg)
+                nas.create_shot_structure(dest_dir)
 
-                # 4. Generate Low-Res Proxy Video
+                msg = f"Copying {len(item.files)} plate files to v{version_num:03d}..."
+                self.progress_signal.emit(step_pct + 20, msg)
+                nas.copy_sequence(item, dest_dir)
+
+                # Generate and Upload Proxy Preview for NEW Ingestion Version
                 msg = f"Encoding low-res MP4 preview card..."
                 self.progress_signal.emit(step_pct + 30, msg)
                 proxy_path = proxy_gen.generate_proxy(item)
 
-                # 5. Upload Proxy specifically to the 'Ingest' task (fallback to first task) & Set Shot Thumbnail
                 if proxy_path and tasks:
                     ingest_task = next((t for t in tasks if (t.get("name") or t.get("task_type_name")) in ("Ingest", "Prep")), tasks[0])
                     task_name = ingest_task.get("name") or ingest_task.get("task_type_name") or "Ingest"

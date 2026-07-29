@@ -1,7 +1,7 @@
 {
     "kitsu_url": "http://localhost/api",
     "kitsu_user": "admin@example.com",
-    "kitsu_password": "12345678",
+    "kitsu_password": "mysecretpassword",
     "nas_root": "D:/NAS_test",
     "cache_root": "C:/cache/square",
     "dry_run": true

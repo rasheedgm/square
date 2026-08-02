@@ -14,20 +14,21 @@ class IngestSequenceItem:
         self.files = sorted(files)
         self.ext = ext.lower()
         self.is_video = is_video
-        
+
         # Inferred details
         self.sequence_code = "SQ010"
-        self.shot_code = "SH0100"
-        self.plate_name = "PL01"
-        
-        self.start_frame = 1001
-        self.end_frame = 1001
+        self.shot_code     = "SH0100"
+        self.plate_name    = "PL01"
+        self.media_type    = "Plate"   # "Plate" | "Ref" | "BG Plate" | etc.
+
+        self.start_frame   = 1001
+        self.end_frame     = 1001
         self.missing_frames = []
-        self.frame_count = len(files)
-        self.fps = 24.0
-        self.resolution = "1920x1080"
-        self.colorspace = "ACEScg"
-        
+        self.frame_count   = len(files)
+        self.fps           = 24.0
+        self.resolution    = "1920x1080"
+        self.colorspace    = "ACEScg"
+
         self.parse_frames()
         self.infer_naming()
 

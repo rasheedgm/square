@@ -17,8 +17,10 @@ def main():
     # Load QSS Style
     qss_path = Path(__file__).parent / "style.qss"
     if qss_path.exists():
+        res_dir = (Path(__file__).parent / "resources").as_posix()
         with open(qss_path, "r", encoding="utf-8") as f:
-            app.setStyleSheet(f.read())
+            qss = f.read().replace("{RESOURCES_DIR}", res_dir)
+            app.setStyleSheet(qss)
 
     window = MainWindow()
     window.show()

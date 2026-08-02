@@ -4,17 +4,21 @@ from pathlib import Path
 
 from Qt import QtCore, QtWidgets, QtGui
 
+from square_core import __version__
 from square_core.config import StudioConfig
 from square_core.kitsu_client import KitsuClient
 from square_core.plate_scanner import PlateScanner
+from square_core.folder_mapper import FolderMapper
 from square_core.nas_manager import NASManager
 from square_core.proxy_generator import ProxyGenerator
 
 from tools.ingest_tool.widgets.scanner_widget import ScannerWidget
+from tools.ingest_tool.widgets.folder_tree_widget import FolderTreeWidget
 from tools.ingest_tool.widgets.table_widget import IngestTableWidget
 from tools.ingest_tool.widgets.progress_dialog import IngestProgressDialog
 from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
-from tools.qt_compat import DIALOG_ACCEPTED, FONT_BOLD, ORIENTATION_HORIZONTAL
+from tools.ingest_tool.widgets.results_dialog import DryRunResultsDialog
+from tools.qt_compat import FONT_BOLD, ALIGN_CENTER, ORIENTATION_HORIZONTAL, DIALOG_ACCEPTED
 
 logger = logging.getLogger("IngestMainUI")
 
@@ -46,7 +50,6 @@ class CreateProjectDialog(QtWidgets.QDialog):
 
         layout.addLayout(form)
 
-        # Task Selection Section
         tasks_group = QtWidgets.QGroupBox("Project Task Types Pipeline")
         tasks_layout = QtWidgets.QVBoxLayout()
 
@@ -84,26 +87,54 @@ class CreateProjectDialog(QtWidgets.QDialog):
             self.accept()
 
 
+# ---------------------------------------------------------------------------
+# Background Workers
+# ---------------------------------------------------------------------------
+
+class NASCheckWorker(QtCore.QThread):
+    """Background thread: check all items against NAS for version/duplicate status."""
+
+    progress_signal = QtCore.Signal(int, int)      # done, total
+    results_ready   = QtCore.Signal(dict)           # {id(item): (ver, already)}
+
+    def __init__(self, items, nas_root, proj_code, dry_run):
+        super().__init__()
+        self.items     = items
+        self.nas_root  = nas_root
+        self.proj_code = proj_code
+        self.dry_run   = dry_run
+
+    def run(self):
+        nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
+        results = nas.check_all_plates(
+            self.items,
+            self.proj_code,
+            progress_callback=lambda done, total: self.progress_signal.emit(done, total)
+        )
+        self.results_ready.emit(results)
+
+
 class IngestWorkerThread(QtCore.QThread):
-    """Background worker for non-blocking ingestion execution."""
+    """Background worker: copy files + push to Kitsu."""
 
     progress_signal = QtCore.Signal(int, str)
-    finished_signal = QtCore.Signal(bool, str)
+    finished_signal = QtCore.Signal(bool, str, object)
 
-    def __init__(self, items, project_data, nas_root, dry_run=True, kitsu_host=None, kitsu_user=None, kitsu_pass=None):
+    def __init__(self, items_with_versions, project_data, nas_root,
+                 dry_run=True, kitsu_host=None, kitsu_user=None, kitsu_pass=None):
         super(IngestWorkerThread, self).__init__()
-        self.items = items
+        self.items_with_versions = items_with_versions   # list of (item, version_int)
         self.project_data = project_data
-        self.nas_root = nas_root
-        self.dry_run = dry_run
-        self.kitsu_host = kitsu_host
-        self.kitsu_user = kitsu_user
-        self.kitsu_pass = kitsu_pass
+        self.nas_root     = nas_root
+        self.dry_run      = dry_run
+        self.kitsu_host   = kitsu_host
+        self.kitsu_user   = kitsu_user
+        self.kitsu_pass   = kitsu_pass
 
     def run(self):
         try:
-            total_items = len(self.items)
-            if total_items == 0:
+            total = len(self.items_with_versions)
+            if total == 0:
                 self.finished_signal.emit(True, "No items to ingest.")
                 return
 
@@ -115,186 +146,330 @@ class IngestWorkerThread(QtCore.QThread):
             )
             kitsu.connect()
 
-            nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
+            nas       = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
             proxy_gen = ProxyGenerator(dry_run=self.dry_run)
 
-            proj_data = self.project_data or {"id": "11111111-1111-1111-1111-111111111111", "name": "Feature Film Alpha", "code": "FFA"}
+            proj_data = self.project_data or {"id": "11111111-1111-1111-1111-111111111111",
+                                               "name": "Feature Film Alpha", "code": "FFA"}
             proj_code = proj_data.get("code", "PROJ")
 
-            for idx, item in enumerate(self.items):
-                step_pct = int((idx / total_items) * 100)
-                
-                # 1. Version Detection & Skipping Check
-                version_num, is_already_ingested = nas.get_plate_version_info(
-                    proj_code, item.sequence_code, item.shot_code, item.plate_name, item=item
-                )
-                dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.plate_name, version=version_num)
+            from square_core.config import DEFAULT_FILE_NAME_TEMPLATE, format_dest_filename
 
-                # 2. Sync Sequence & Shot with Kitsu DB
-                msg = f"Syncing Kitsu Shot: '{item.shot_code}' (Plate '{item.plate_name}', v{version_num:03d})..."
-                self.progress_signal.emit(step_pct, msg)
-                
-                seq_obj = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
+            summary = {
+                "is_dry_run": self.dry_run,
+                "project_code": proj_code,
+                "total_items": total,
+                "total_files": sum(len(item.files) for item, _ in self.items_with_versions),
+                "items": []
+            }
+
+            for idx, (item, version_num) in enumerate(self.items_with_versions):
+                step_pct = int((idx / total) * 100)
+                dest_dir = nas.get_dest_dir(
+                    proj_code, item.sequence_code,
+                    item.shot_code, item.plate_name,
+                    version=version_num,
+                    media_type=getattr(item, "media_type", "Plate"),
+                    resolution=getattr(item, "resolution", "1920x1080")
+                )
+
+                # Kitsu sync
+                self.progress_signal.emit(step_pct,
+                    f"Syncing Kitsu: {item.shot_code} / {item.plate_name} v{version_num:03d}")
+                seq_obj  = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
                 shot_obj = kitsu.get_or_create_shot(
                     proj_data, seq_obj, item.shot_code,
                     plate_name=item.plate_name,
-                    frame_in=item.start_frame,
-                    frame_out=item.end_frame,
-                    fps=item.fps,
-                    resolution=item.resolution,
-                    colorspace=item.colorspace,
-                    nas_path=str(dest_dir)
+                    frame_in=item.start_frame, frame_out=item.end_frame,
+                    fps=item.fps, resolution=item.resolution,
+                    colorspace=item.colorspace, nas_path=str(dest_dir)
                 )
                 tasks = kitsu.create_default_tasks(shot_obj)
 
-                # 3. Handle File Transfers and Preview Uploads
-                if is_already_ingested:
-                    msg = f"Plate '{item.plate_name}' (v{version_num:03d}) already ingested. Skipping duplicate copy and Kitsu upload."
-                    self.progress_signal.emit(step_pct + 40, msg)
-                    continue
-
-                # Copy Files to NAS for NEW Ingestion Version
-                msg = f"Creating NAS folder: {dest_dir} (v{version_num:03d})"
-                self.progress_signal.emit(step_pct + 10, msg)
+                # File copy
+                self.progress_signal.emit(step_pct + 20,
+                    f"Copying {len(item.files)} files → v{version_num:03d}")
                 nas.create_shot_structure(dest_dir)
+                tmpl = getattr(self, "filename_template", None) or DEFAULT_FILE_NAME_TEMPLATE
+                copied = nas.copy_sequence(item, dest_dir, filename_template=tmpl, version_num=version_num, proj_code=proj_code)
 
-                msg = f"Copying {len(item.files)} plate files to v{version_num:03d}..."
-                self.progress_signal.emit(step_pct + 20, msg)
-                nas.copy_sequence(item, dest_dir)
-
-                # Generate and Upload Proxy Preview for NEW Ingestion Version
-                msg = f"Encoding low-res MP4 preview card..."
-                self.progress_signal.emit(step_pct + 30, msg)
+                # Proxy + upload
+                self.progress_signal.emit(step_pct + 50, "Generating preview...")
                 proxy_path = proxy_gen.generate_proxy(item)
-
                 if proxy_path and tasks:
-                    ingest_task = next((t for t in tasks if (t.get("name") or t.get("task_type_name")) in ("Ingest", "Prep")), tasks[0])
-                    task_name = ingest_task.get("name") or ingest_task.get("task_type_name") or "Ingest"
-                    
-                    msg = f"Uploading preview to task '{task_name}' & setting Shot Thumbnail..."
-                    self.progress_signal.emit(step_pct + 40, msg)
-                    kitsu.upload_preview_proxy(ingest_task, proxy_path, comment=f"Plate Ingest Preview v{version_num:03d} ({item.plate_name})")
+                    ingest_task = next(
+                        (t for t in tasks
+                         if (t.get("name") or t.get("task_type_name")) in ("Ingest", "Prep")),
+                        tasks[0]
+                    )
+                    task_name = ingest_task.get("name") or "Ingest"
+                    self.progress_signal.emit(step_pct + 70,
+                        f"Uploading preview to '{task_name}' & setting thumbnail...")
+                    kitsu.upload_preview_proxy(
+                        ingest_task, proxy_path,
+                        comment=f"Plate Ingest v{version_num:03d} ({item.plate_name})"
+                    )
 
-            self.finished_signal.emit(True, "All plates ingested successfully!")
+                sample_fn = format_dest_filename(
+                    tmpl, proj_code, item.sequence_code, item.shot_code,
+                    getattr(item, "media_type", "Plate"), item.plate_name,
+                    version_num, frame="1001" if not item.is_video else None, ext=item.ext
+                )
+                summary["items"].append({
+                    "source_name": item.name,
+                    "sequence_code": item.sequence_code,
+                    "shot_code": item.shot_code,
+                    "media_type": getattr(item, "media_type", "Plate"),
+                    "plate_name": item.plate_name,
+                    "version": version_num,
+                    "resolution": item.resolution,
+                    "frame_count": len(item.files),
+                    "dest_dir": str(dest_dir),
+                    "sample_dest_file": str(dest_dir / sample_fn),
+                    "status": "Dry-Run Simulated" if self.dry_run else "Ingested Successfully"
+                })
+
+            msg = f"Dry-Run completed for {total} items." if self.dry_run else f"Successfully ingested {total} items."
+            self.finished_signal.emit(True, msg, summary)
 
         except Exception as e:
             logger.error(f"Ingestion worker failed: {e}")
-            self.finished_signal.emit(False, f"Ingestion Error: {str(e)}")
+            self.finished_signal.emit(False, f"Ingestion Error: {str(e)}", None)
 
+
+# ---------------------------------------------------------------------------
+# Main Window
+# ---------------------------------------------------------------------------
 
 class MainWindow(QtWidgets.QMainWindow):
-    """Main Application Window for Ingest Tool."""
+    """Main Application Window for Square VFX Ingest Tool."""
 
     def __init__(self):
         super(MainWindow, self).__init__()
-        self.setWindowTitle("Square VFX Ingest Tool")
-        self.resize(1100, 700)
+        self.setWindowTitle(f"Square VFX Ingest Tool v{__version__}")
+        self.resize(1280, 780)
 
-        self.config = StudioConfig()
-        self.kitsu = KitsuClient(
+        self.config   = StudioConfig()
+        self.kitsu    = KitsuClient(
             host=self.config.kitsu_url,
             email=self.config.kitsu_user,
             password=self.config.kitsu_password,
             dry_run=False
         )
         self.is_kitsu_live = self.kitsu.connect()
+        self.project_data  = None
+        self._nas_check_worker = None
 
-        self.items = []
-        self.project_data = None
         self.setup_ui()
         self.load_projects()
 
     def setup_ui(self):
         central = QtWidgets.QWidget()
+        central.setStyleSheet("background-color: #0F1117;")
         self.setCentralWidget(central)
         main_layout = QtWidgets.QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # Header Bar
-        header = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("SQUARE VFX - PLATE INGESTION & PIPELINE ENGINE")
-        title.setFont(QtGui.QFont("Segoe UI", 12, FONT_BOLD))
+        # ── Header bar ──
+        header_frame = QtWidgets.QFrame()
+        header_frame.setFixedHeight(52)
+        header_frame.setStyleSheet(
+            "QFrame { background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            " stop:0 #131C2E, stop:1 #0F1117);"
+            " border-bottom: 1px solid #1E2D4A; }"
+        )
+        header_h = QtWidgets.QHBoxLayout(header_frame)
+        header_h.setContentsMargins(16, 0, 16, 0)
+        header_h.setSpacing(12)
+
+        logo_lbl = QtWidgets.QLabel("⬡")
+        logo_lbl.setStyleSheet(
+            "font-size:20px; color:#3B82F6; background:transparent;"
+        )
+        title_lbl = QtWidgets.QLabel("SQUARE VFX — PLATE INGEST")
+        title_lbl.setFont(QtGui.QFont("Segoe UI", 11, FONT_BOLD))
+        title_lbl.setStyleSheet(
+            "color:#E2E8F0; letter-spacing:1px; background:transparent;"
+        )
 
         self.status_indicator = QtWidgets.QLabel()
+        self.status_indicator.setStyleSheet("background:transparent;")
         self.update_status_indicator()
 
-        self.settings_btn = QtWidgets.QPushButton("⚙️ Settings")
+        self.settings_btn = QtWidgets.QPushButton("Settings")
+        self.settings_btn.setFixedHeight(28)
         self.settings_btn.clicked.connect(self.on_open_settings)
 
-        header.addWidget(title)
-        header.addStretch()
-        header.addWidget(self.status_indicator)
-        header.addWidget(self.settings_btn)
-        main_layout.addLayout(header)
+        header_h.addWidget(logo_lbl)
+        header_h.addWidget(title_lbl)
+        header_h.addStretch()
+        header_h.addWidget(self.status_indicator)
+        header_h.addWidget(self.settings_btn)
+        main_layout.addWidget(header_frame)
 
-        # Project Bar
-        proj_layout = QtWidgets.QHBoxLayout()
-        proj_label = QtWidgets.QLabel("Target Project:")
+        # ── Project bar ──
+        proj_frame = QtWidgets.QFrame()
+        proj_frame.setFixedHeight(46)
+        proj_frame.setStyleSheet(
+            "QFrame { background:#131720; border-bottom:1px solid #1E2535; }"
+        )
+        proj_h = QtWidgets.QHBoxLayout(proj_frame)
+        proj_h.setContentsMargins(12, 0, 12, 0)
+        proj_h.setSpacing(8)
+
+        proj_lbl = QtWidgets.QLabel("Project:")
+        proj_lbl.setStyleSheet("color:#64748B; font-size:12px; background:transparent;")
 
         self.project_combo = QtWidgets.QComboBox()
-        self.project_combo.setMinimumWidth(220)
+        self.project_combo.setMinimumWidth(240)
+        self.project_combo.setFixedHeight(30)
         self.project_combo.currentIndexChanged.connect(self.on_project_changed)
 
-        self.new_proj_btn = QtWidgets.QPushButton("➕ New Project")
+        self.new_proj_btn = QtWidgets.QPushButton("+ New Project")
+        self.new_proj_btn.setFixedHeight(30)
         self.new_proj_btn.clicked.connect(self.on_create_new_project)
 
-        self.refresh_btn = QtWidgets.QPushButton("🔄 Refresh")
+        self.refresh_btn = QtWidgets.QPushButton("↻ Refresh")
+        self.refresh_btn.setFixedHeight(30)
         self.refresh_btn.clicked.connect(self.load_projects)
 
-        proj_layout.addWidget(proj_label)
-        proj_layout.addWidget(self.project_combo)
-        proj_layout.addWidget(self.new_proj_btn)
-        proj_layout.addWidget(self.refresh_btn)
-        proj_layout.addStretch()
-
-        self.dry_run_check = QtWidgets.QCheckBox("Dry-Run NAS Files (No Copy)")
+        self.dry_run_check = QtWidgets.QCheckBox("Dry-Run")
+        self.dry_run_check.setToolTip("Dry-Run: simulate transfer & path generation without copying files")
         self.dry_run_check.setChecked(self.config.dry_run)
-        proj_layout.addWidget(self.dry_run_check)
+        self.dry_run_check.setStyleSheet("color:#64748B; background:transparent;")
+        self.dry_run_check.stateChanged.connect(self._update_ingest_btn_style)
 
-        main_layout.addLayout(proj_layout)
+        proj_h.addWidget(proj_lbl)
+        proj_h.addWidget(self.project_combo)
+        proj_h.addWidget(self.new_proj_btn)
+        proj_h.addWidget(self.refresh_btn)
+        proj_h.addStretch()
+        proj_h.addWidget(self.dry_run_check)
+        main_layout.addWidget(proj_frame)
 
-        # Main Splitter
+        # ── NAS check thin progress bar ──
+        self._check_bar = QtWidgets.QProgressBar()
+        self._check_bar.setVisible(False)
+        self._check_bar.setFixedHeight(3)
+        self._check_bar.setTextVisible(False)
+        self._check_bar.setStyleSheet(
+            "QProgressBar { background:#131720; border:none; border-radius:0; }"
+            "QProgressBar::chunk { background:#3B82F6; }"
+        )
+        main_layout.addWidget(self._check_bar)
+
+        # ── Splitter: folder tree (left) + table (right) ──
+        content = QtWidgets.QWidget()
+        content.setStyleSheet("background:#0F1117;")
+        content_layout = QtWidgets.QHBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+
         splitter = QtWidgets.QSplitter(ORIENTATION_HORIZONTAL)
+        splitter.setHandleWidth(4)
+        splitter.setStyleSheet(
+            "QSplitter::handle { background:#1E2535; }"
+            "QSplitter::handle:hover { background:#3B82F6; }"
+        )
 
-        self.scanner_widget = ScannerWidget()
-        self.scanner_widget.scan_requested.connect(self.on_scan_folder)
+        self.folder_tree = FolderTreeWidget()
+        self.folder_tree.load_requested.connect(self.on_load_media)
 
         self.table_widget = IngestTableWidget()
+        self.table_widget.table_changed.connect(self._update_conflict_badge)
 
-        splitter.addWidget(self.scanner_widget)
+        splitter.addWidget(self.folder_tree)
         splitter.addWidget(self.table_widget)
-        splitter.setSizes([300, 800])
+        splitter.setSizes([300, 980])
+        content_layout.addWidget(splitter)
+        main_layout.addWidget(content, stretch=1)
 
-        main_layout.addWidget(splitter)
+        # ── Bottom action bar ──
+        bottom_frame = QtWidgets.QFrame()
+        bottom_frame.setFixedHeight(54)
+        bottom_frame.setStyleSheet(
+            "QFrame { background:#131720; border-top:1px solid #1E2535; }"
+        )
+        bottom_h = QtWidgets.QHBoxLayout(bottom_frame)
+        bottom_h.setContentsMargins(16, 0, 16, 0)
+        bottom_h.setSpacing(12)
 
-        # Bottom Action Bar
-        bottom_bar = QtWidgets.QHBoxLayout()
-        self.ingest_btn = QtWidgets.QPushButton("🚀 Start Ingestion Process")
+        self.conflict_badge = QtWidgets.QLabel()
+        self.conflict_badge.setStyleSheet(
+            "color:#EF4444; font-weight:bold; font-size:12px; background:transparent;"
+        )
+        self.conflict_badge.setVisible(False)
+
+        self.ingest_btn = QtWidgets.QPushButton("▶  Start Dry Run")
+        self.ingest_btn.setFixedHeight(38)
+        self.ingest_btn.setMinimumWidth(180)
         self.ingest_btn.setFont(QtGui.QFont("Segoe UI", 11, FONT_BOLD))
-        self.ingest_btn.setStyleSheet("background-color: #2563EB; color: white; padding: 10px 20px;")
+        self._update_ingest_btn_style()
         self.ingest_btn.clicked.connect(self.on_start_ingest)
 
-        bottom_bar.addStretch()
-        bottom_bar.addWidget(self.ingest_btn)
-        main_layout.addLayout(bottom_bar)
+        bottom_h.addWidget(self.conflict_badge)
+        bottom_h.addStretch()
+        bottom_h.addWidget(self.ingest_btn)
+        main_layout.addWidget(bottom_frame)
+
+    def _update_ingest_btn_style(self):
+        is_dry_run = self.dry_run_check.isChecked()
+        if is_dry_run:
+            self.ingest_btn.setText("▶  Start Dry Run")
+            self.ingest_btn.setStyleSheet(
+                "QPushButton {"
+                "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "               stop:0 #DC2626, stop:1 #EF4444);"
+                "  color: white; border: none; border-radius: 6px;"
+                "}"
+                "QPushButton:hover {"
+                "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "               stop:0 #EF4444, stop:1 #F87171);"
+                "}"
+                "QPushButton:disabled { background:#1A2035; color:#374151; }"
+            )
+        else:
+            self.ingest_btn.setText("🚀  Start Ingestion")
+            self.ingest_btn.setStyleSheet(
+                "QPushButton {"
+                "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "               stop:0 #059669, stop:1 #10B981);"
+                "  color: white; border: none; border-radius: 6px;"
+                "}"
+                "QPushButton:hover {"
+                "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+                "               stop:0 #10B981, stop:1 #34D399);"
+                "}"
+                "QPushButton:disabled { background:#1A2035; color:#374151; }"
+            )
+
+    # ------------------------------------------------------------------
+    # Project Management
+    # ------------------------------------------------------------------
 
     def update_status_indicator(self):
         if self.is_kitsu_live:
-            self.status_indicator.setText("🟢 Connected to Kitsu")
-            self.status_indicator.setStyleSheet("color: #10B981; font-weight: bold;")
+            self.status_indicator.setText("Connected to Kitsu")
+            self.status_indicator.setStyleSheet("color:#10B981; font-weight:bold;")
         else:
-            self.status_indicator.setText("🟠 Offline / Mock Mode")
-            self.status_indicator.setStyleSheet("color: #F59E0B; font-weight: bold;")
+            self.status_indicator.setText("Offline / Mock Mode")
+            self.status_indicator.setStyleSheet("color:#F59E0B; font-weight:bold;")
 
     def load_projects(self):
         self.project_combo.clear()
-        projects = self.kitsu.get_all_projects()
-        for proj in projects:
-            display_name = f"{proj.get('name')} [{proj.get('code')}]"
-            self.project_combo.addItem(display_name, proj)
+        for proj in self.kitsu.get_all_projects():
+            self.project_combo.addItem(
+                f"{proj.get('name')} [{proj.get('code')}]", proj
+            )
 
     def on_project_changed(self, index):
         if index >= 0:
             self.project_data = self.project_combo.itemData(index)
+            code = (self.project_data or {}).get("code", "")
+            self.table_widget.set_project_code(code)
+            self.table_widget.set_nas_root(self.config.nas_root)
+            self.table_widget.set_filename_template(self.config.filename_template)
 
     def on_create_new_project(self):
         dialog = CreateProjectDialog(self.kitsu, self)
@@ -313,37 +488,118 @@ class MainWindow(QtWidgets.QMainWindow):
         res = dialog.exec() if hasattr(dialog, "exec") else dialog.exec_()
         if res == DIALOG_ACCEPTED:
             self.config = StudioConfig()
-            self.kitsu = KitsuClient(
+            self.kitsu  = KitsuClient(
                 host=self.config.kitsu_url,
                 email=self.config.kitsu_user,
                 password=self.config.kitsu_password,
                 dry_run=False
             )
             self.is_kitsu_live = self.kitsu.connect()
+            self.table_widget.set_nas_root(self.config.nas_root)
+            self.table_widget.set_filename_template(self.config.filename_template)
+            self.table_widget._refresh_table()
             self.update_status_indicator()
             self.load_projects()
 
-    def on_scan_folder(self, folder_path):
-        scanner = PlateScanner(search_path=folder_path)
-        self.items = scanner.scan()
-        self.table_widget.populate_table(self.items)
+    # ------------------------------------------------------------------
+    # Loading / Updating Media
+    # ------------------------------------------------------------------
+
+    def on_load_media(self, root_path, folder_mapper=None, selected_paths=None, is_update=False):
+        """Called when FolderTreeWidget emits load_requested."""
+        if folder_mapper and folder_mapper.has_map():
+            items = folder_mapper.build_items(filter_paths=selected_paths)
+        else:
+            scanner = PlateScanner(search_path=root_path)
+            items   = scanner.scan()
+            if selected_paths:
+                filtered = []
+                for item in items:
+                    item_paths = {os.path.normcase(os.path.abspath(f)) for f in item.files}
+                    if item_paths.intersection(selected_paths):
+                        filtered.append(item)
+                items = filtered
+
+        if is_update:
+            self.table_widget.update_table(items)
+        else:
+            self.table_widget.populate_table(items)
+
+        current_items = self.table_widget.items_data
+        if current_items and self.project_data:
+            self._start_nas_check(current_items)
+
+    def on_scan_folder(self, root_path, folder_mapper=None, selected_paths=None, is_update=False):
+        """Alias for backward compatibility."""
+        self.on_load_media(root_path, folder_mapper, selected_paths, is_update)
+
+    def _start_nas_check(self, items):
+        """Launch background NAS duplicate/version check."""
+        if self._nas_check_worker and self._nas_check_worker.isRunning():
+            self._nas_check_worker.terminate()
+
+        proj_code = (self.project_data or {}).get("code", "PROJ")
+        self._nas_check_worker = NASCheckWorker(
+            items=items,
+            nas_root=self.config.nas_root,
+            proj_code=proj_code,
+            dry_run=self.dry_run_check.isChecked()
+        )
+        total = len(items)
+        self._check_bar.setMaximum(total)
+        self._check_bar.setValue(0)
+        self._check_bar.setVisible(True)
+
+        self._nas_check_worker.progress_signal.connect(
+            lambda done, tot: self._check_bar.setValue(done)
+        )
+        self._nas_check_worker.results_ready.connect(self._on_nas_check_done)
+        self._nas_check_worker.start()
+
+    def _on_nas_check_done(self, results):
+        self._check_bar.setVisible(False)
+        self.table_widget.apply_version_results(results)
+        self._update_conflict_badge()
+
+    def _update_conflict_badge(self):
+        has_conflicts = self.table_widget.has_unresolved_conflicts()
+        has_items     = bool(self.table_widget.get_selected_items())
+        if has_conflicts:
+            self.conflict_badge.setText("Unresolved conflicts — fix before ingesting")
+            self.conflict_badge.setVisible(True)
+            self.ingest_btn.setEnabled(False)
+        else:
+            self.conflict_badge.setVisible(False)
+            self.ingest_btn.setEnabled(has_items)
+
+    # ------------------------------------------------------------------
+    # Ingestion
+    # ------------------------------------------------------------------
 
     def on_start_ingest(self):
-        items = self.table_widget.get_selected_items()
-        if not items:
-            QtWidgets.QMessageBox.warning(self, "No Selection", "Please scan and select items to ingest.")
+        if self.table_widget.has_unresolved_conflicts():
+            QtWidgets.QMessageBox.critical(
+                self, "Conflicts Exist",
+                "Please resolve all shot name conflicts before ingesting."
+            )
             return
 
-        proj_data = self.project_data
-        nas_root = self.config.nas_root
-        dry_run = self.dry_run_check.isChecked()
+        items_with_versions = self.table_widget.get_selected_items()
+        if not items_with_versions:
+            QtWidgets.QMessageBox.warning(
+                self, "Nothing to Ingest",
+                "No new items selected. All plates are either already ingested, discarded, or conflicted."
+            )
+            return
 
         self.progress_dialog = IngestProgressDialog(self)
         self.progress_dialog.show()
 
         self.worker = IngestWorkerThread(
-            items, proj_data, nas_root,
-            dry_run=dry_run,
+            items_with_versions=items_with_versions,
+            project_data=self.project_data,
+            nas_root=self.config.nas_root,
+            dry_run=self.dry_run_check.isChecked(),
             kitsu_host=self.config.kitsu_url,
             kitsu_user=self.config.kitsu_user,
             kitsu_pass=self.config.kitsu_password
@@ -352,11 +608,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.finished_signal.connect(self.on_ingest_finished)
         self.worker.start()
 
-    def on_ingest_finished(self, success, message):
+    def on_ingest_finished(self, success, message, summary=None):
         if hasattr(self, "progress_dialog"):
             self.progress_dialog.close()
-
         if success:
-            QtWidgets.QMessageBox.information(self, "Ingestion Complete", message)
+            if summary:
+                dlg = DryRunResultsDialog(summary, self)
+                dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
+            else:
+                QtWidgets.QMessageBox.information(self, "Ingestion Complete", message)
         else:
             QtWidgets.QMessageBox.critical(self, "Ingestion Failed", message)

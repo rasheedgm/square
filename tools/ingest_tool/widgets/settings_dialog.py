@@ -11,7 +11,7 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(SettingsDialog, self).__init__(parent)
         self.setWindowTitle("Square VFX - Studio Pipeline Configuration")
-        self.setMinimumSize(520, 420)
+        self.setMinimumSize(620, 640)
         self.config = StudioConfig()
         self.setup_ui()
 
@@ -67,6 +67,28 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(nas_box)
 
+        # Pipeline Naming & Folder Templates Group Box
+        tmpl_box = QtWidgets.QGroupBox("Pipeline Naming & Folder Structure Templates")
+        t_layout = QtWidgets.QFormLayout(tmpl_box)
+        t_layout.setSpacing(10)
+
+        self.filename_tmpl_edit = QtWidgets.QLineEdit(self.config.filename_template)
+        self.filename_tmpl_edit.setToolTip("Tokens: {project}, {seq}, {shot}, {type}, {name}, {version}, {frame}, {ext}")
+
+        self.nas_dir_tmpl_edit = QtWidgets.QLineEdit(self.config.nas_dir_template)
+        self.nas_dir_tmpl_edit.setToolTip("Tokens: {nas_root}, {project_code}, {sequence_code}, {shot_code}, {plate_type}, {plate_name}, {version}, {resolution}")
+
+        self.shot_struct_edit = QtWidgets.QTextEdit()
+        self.shot_struct_edit.setFixedHeight(120)
+        self.shot_struct_edit.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
+        self.shot_struct_edit.setPlainText("\n".join(self.config.shot_folder_structure))
+
+        t_layout.addRow("File Naming Pattern:", self.filename_tmpl_edit)
+        t_layout.addRow("NAS Directory Pattern:", self.nas_dir_tmpl_edit)
+        t_layout.addRow("Shot Folder Structure:", self.shot_struct_edit)
+
+        layout.addWidget(tmpl_box)
+
         # Action Buttons
         btn_layout = QtWidgets.QHBoxLayout()
         self.save_btn = QtWidgets.QPushButton("💾 Save Settings")
@@ -106,7 +128,15 @@ class SettingsDialog(QtWidgets.QDialog):
         self.config.kitsu_password = self.kitsu_pass_edit.text().strip()
         self.config.nas_root = self.nas_root_edit.text().strip()
         self.config.cache_root = self.cache_root_edit.text().strip()
-        
+        self.config.filename_template = self.filename_tmpl_edit.text().strip()
+        self.config.nas_dir_template = self.nas_dir_tmpl_edit.text().strip()
+
+        struct_lines = [
+            line.strip() for line in self.shot_struct_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        self.config.shot_folder_structure = struct_lines
+
         self.config.save()
         self.config_saved.emit()
         self.accept()

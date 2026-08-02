@@ -69,3 +69,6 @@ Desktop.ini
 *.tmp
 *.log
 local_cache/
+temp_proxies/
+test_data/
+.square_ingest_map.json

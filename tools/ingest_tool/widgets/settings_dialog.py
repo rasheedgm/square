@@ -79,15 +79,41 @@ class SettingsDialog(QtWidgets.QDialog):
         self.nas_dir_tmpl_edit.setToolTip("Tokens: {nas_root}, {project_code}, {sequence_code}, {shot_code}, {plate_type}, {plate_name}, {version}, {resolution}")
 
         self.shot_struct_edit = QtWidgets.QTextEdit()
-        self.shot_struct_edit.setFixedHeight(120)
+        self.shot_struct_edit.setFixedHeight(70)
         self.shot_struct_edit.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
         self.shot_struct_edit.setPlainText("\n".join(self.config.shot_folder_structure))
 
         t_layout.addRow("File Naming Pattern:", self.filename_tmpl_edit)
-        t_layout.addRow("NAS Directory Pattern:", self.nas_dir_tmpl_edit)
+        t_layout.addRow("Default Directory Pattern:", self.nas_dir_tmpl_edit)
         t_layout.addRow("Shot Folder Structure:", self.shot_struct_edit)
 
         layout.addWidget(tmpl_box)
+
+        # Media Types & Path Patterns Group Box
+        mt_box = QtWidgets.QGroupBox("Media Types & Storage Path Patterns")
+        mt_layout = QtWidgets.QVBoxLayout(mt_box)
+        mt_layout.setSpacing(6)
+
+        self.media_types_table = QtWidgets.QTableWidget()
+        self.media_types_table.setColumnCount(2)
+        self.media_types_table.setHorizontalHeaderLabels(["Media Type", "NAS Directory Path Pattern Template"])
+        self.media_types_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self.media_types_table.setMinimumHeight(120)
+
+        self._populate_media_types_table()
+
+        mt_btn_layout = QtWidgets.QHBoxLayout()
+        add_mt_btn = QtWidgets.QPushButton("➕ Add Media Type")
+        add_mt_btn.clicked.connect(self._on_add_media_type)
+        del_mt_btn = QtWidgets.QPushButton("➖ Remove Selected")
+        del_mt_btn.clicked.connect(self._on_remove_media_type)
+        mt_btn_layout.addWidget(add_mt_btn)
+        mt_btn_layout.addWidget(del_mt_btn)
+        mt_btn_layout.addStretch()
+
+        mt_layout.addWidget(self.media_types_table)
+        mt_layout.addLayout(mt_btn_layout)
+        layout.addWidget(mt_box)
 
         # Action Buttons
         btn_layout = QtWidgets.QHBoxLayout()
@@ -102,6 +128,28 @@ class SettingsDialog(QtWidgets.QDialog):
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
+
+    def _populate_media_types_table(self):
+        self.media_types_table.setRowCount(0)
+        configs = getattr(self.config, "media_type_configs", {})
+        for row_idx, (mtype, tmpl) in enumerate(configs.items()):
+            self.media_types_table.insertRow(row_idx)
+            item_type = QtWidgets.QTableWidgetItem(mtype)
+            item_tmpl = QtWidgets.QTableWidgetItem(tmpl)
+            self.media_types_table.setItem(row_idx, 0, item_type)
+            self.media_types_table.setItem(row_idx, 1, item_tmpl)
+
+    def _on_add_media_type(self):
+        row = self.media_types_table.rowCount()
+        self.media_types_table.insertRow(row)
+        self.media_types_table.setItem(row, 0, QtWidgets.QTableWidgetItem("NewType"))
+        self.media_types_table.setItem(row, 1, QtWidgets.QTableWidgetItem("{nas_root}/{project_code}/shots/{seq}/{shot}/newtype/{name}"))
+
+    def _on_remove_media_type(self):
+        selected = self.media_types_table.selectedIndexes()
+        rows = {idx.row() for idx in selected}
+        for r in sorted(rows, reverse=True):
+            self.media_types_table.removeRow(r)
 
     def on_test_connection(self):
         url = self.kitsu_url_edit.text().strip()
@@ -136,6 +184,14 @@ class SettingsDialog(QtWidgets.QDialog):
             if line.strip()
         ]
         self.config.shot_folder_structure = struct_lines
+
+        configs = {}
+        for r in range(self.media_types_table.rowCount()):
+            type_item = self.media_types_table.item(r, 0)
+            pat_item  = self.media_types_table.item(r, 1)
+            if type_item and pat_item and type_item.text().strip():
+                configs[type_item.text().strip()] = pat_item.text().strip()
+        self.config.media_type_configs = configs
 
         self.config.save()
         self.config_saved.emit()

@@ -15,46 +15,48 @@ from tools.qt_compat import (
 )
 
 # ── Status constants ──
-STATUS_NEW            = "New"
-STATUS_ALREADY        = "Already Ingested"
-STATUS_NEW_VERSION    = "New Version"
-STATUS_CONFLICT       = "Conflict"
-STATUS_MISSING_FRAMES = "Missing Frames"
-STATUS_DISCARDED      = "Discarded"
-STATUS_CHECKING       = "Checking..."
+STATUS_NEW             = "New"
+STATUS_ALREADY         = "Already Ingested"
+STATUS_NEW_VERSION     = "New Version"
+STATUS_CONFLICT        = "Conflict"
+STATUS_MISSING_FRAMES  = "Missing Frames"
+STATUS_MISSING_DETAILS = "Missing Details"
+STATUS_DISCARDED       = "Discarded"
+STATUS_CHECKING        = "Checking..."
 
 STATUS_COLOURS = {
-    STATUS_NEW:            ("#065F46", "#D1FAE5"),   # green
-    STATUS_ALREADY:        ("#92400E", "#FEF3C7"),   # amber
-    STATUS_NEW_VERSION:    ("#1E3A8A", "#DBEAFE"),   # blue
-    STATUS_CONFLICT:       ("#7F1D1D", "#FEE2E2"),   # red
-    STATUS_MISSING_FRAMES: ("#78350F", "#FFF7ED"),   # orange
-    STATUS_DISCARDED:      ("#374151", "#F3F4F6"),   # grey
-    STATUS_CHECKING:       ("#1F2937", "#F9FAFB"),   # dark grey
+    STATUS_NEW:             ("#065F46", "#D1FAE5"),   # green
+    STATUS_ALREADY:         ("#92400E", "#FEF3C7"),   # amber
+    STATUS_NEW_VERSION:     ("#1E3A8A", "#DBEAFE"),   # blue
+    STATUS_CONFLICT:        ("#7F1D1D", "#FEE2E2"),   # red
+    STATUS_MISSING_FRAMES:  ("#78350F", "#FFF7ED"),   # orange
+    STATUS_MISSING_DETAILS: ("#991B1B", "#FEE2E2"),   # dark red alert
+    STATUS_DISCARDED:       ("#374151", "#F3F4F6"),   # grey
+    STATUS_CHECKING:        ("#1F2937", "#F9FAFB"),   # dark grey
 }
 
 # Column indices
-COL_INCLUDE  = 0
-COL_SRC_NAME = 1
-COL_SEQ      = 2
-COL_SHOT     = 3
-COL_TYPE     = 4
-COL_PLATE    = 5
-COL_DEST     = 6
-COL_FRAMES   = 7
-COL_FPS      = 8
-COL_RES      = 9
-COL_CS       = 10
-COL_VERSION  = 11
-COL_STATUS   = 12
+COL_INCLUDE    = 0
+COL_SRC_NAME   = 1
+COL_SEQ        = 2
+COL_SHOT       = 3
+COL_TYPE       = 4
+COL_MEDIA_NAME = 5
+COL_DEST       = 6
+COL_FRAMES     = 7
+COL_FPS        = 8
+COL_RES        = 9
+COL_CS         = 10
+COL_VERSION    = 11
+COL_STATUS     = 12
 
 HEADERS = [
     "",             # checkbox
     "Source",
     "Sequence",
     "Shot",
-    "Type",
-    "Plate",
+    "Media Type",
+    "Media Name",
     "Destination",
     "Frames",
     "FPS",
@@ -173,6 +175,31 @@ class IngestTableWidget(QtWidgets.QWidget):
         return any(s == STATUS_CONFLICT for s in self.item_status.values()
                    if id not in self.item_discarded)
 
+    def get_valid_ingest_items(self):
+        """
+        Return (item, version) pairs for rows that are included, not conflicted,
+        and have all required fields (Sequence, Shot, Media Type, Name).
+        Also syncs any manual edits from the table cells back to items.
+        """
+        self._sync_edits_from_table()
+        result = []
+        for item in self.items_data:
+            key = id(item)
+            if key in self.item_discarded:
+                continue
+            status = self.item_status.get(key, STATUS_NEW)
+            seq = (item.sequence_code or "").strip()
+            shot = (item.shot_code or "").strip()
+            mtype = (getattr(item, "media_type", "") or "").strip()
+            name = (item.plate_name or "").strip()
+
+            if not (seq and shot and mtype and name):
+                continue
+            if status in (STATUS_ALREADY, STATUS_DISCARDED, STATUS_CONFLICT, STATUS_MISSING_DETAILS):
+                continue
+            result.append((item, self.item_version.get(key, 1)))
+        return result
+
     def get_selected_items(self):
         """
         Return (item, version) pairs for rows that are included and not conflicted.
@@ -217,8 +244,8 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._table.setColumnWidth(COL_SRC_NAME, 160)
         self._table.setColumnWidth(COL_SEQ, 75)
         self._table.setColumnWidth(COL_SHOT, 80)
-        self._table.setColumnWidth(COL_TYPE, 75)
-        self._table.setColumnWidth(COL_PLATE, 70)
+        self._table.setColumnWidth(COL_TYPE, 85)
+        self._table.setColumnWidth(COL_MEDIA_NAME, 90)
         self._table.setColumnWidth(COL_DEST, 220)
         self._table.setColumnWidth(COL_FRAMES, 130)
         self._table.setColumnWidth(COL_FPS, 45)
@@ -255,7 +282,7 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         # Which column to rename
         self._target_combo = QtWidgets.QComboBox()
-        self._target_combo.addItems(["Shot", "Plate", "Sequence"])
+        self._target_combo.addItems(["Shot", "Media Name", "Sequence"])
 
         apply_btn = QtWidgets.QPushButton("Apply Rename")
         apply_btn.setStyleSheet("background:#2563EB; color:white; font-weight:bold; padding:4px 10px;")
@@ -306,6 +333,14 @@ class IngestTableWidget(QtWidgets.QWidget):
             ver    = self.item_version.get(key, 1)
             discarded = key in self.item_discarded
 
+            seq = (item.sequence_code or "").strip()
+            shot = (item.shot_code or "").strip()
+            mtype = (getattr(item, "media_type", "") or "").strip()
+            name = (item.plate_name or "").strip()
+
+            if not (seq and shot and mtype and name) and not discarded:
+                status = STATUS_MISSING_DETAILS
+
             if discarded:
                 status = STATUS_DISCARDED
 
@@ -328,26 +363,27 @@ class IngestTableWidget(QtWidgets.QWidget):
             self._table.setItem(row_idx, COL_SRC_NAME, src)
 
             # ── Editable columns ──
-            self._table.setItem(row_idx, COL_SEQ,   self._mk_cell(item.sequence_code))
-            self._table.setItem(row_idx, COL_SHOT,  self._mk_cell(item.shot_code))
-            self._table.setItem(row_idx, COL_TYPE,  self._mk_cell(getattr(item, "media_type", "Plate")))
-            self._table.setItem(row_idx, COL_PLATE, self._mk_cell(item.plate_name))
+            self._table.setItem(row_idx, COL_SEQ,        self._mk_cell(item.sequence_code or ""))
+            self._table.setItem(row_idx, COL_SHOT,       self._mk_cell(item.shot_code or ""))
+            self._table.setItem(row_idx, COL_TYPE,       self._mk_cell(getattr(item, "media_type", "") or ""))
+            self._table.setItem(row_idx, COL_MEDIA_NAME, self._mk_cell(getattr(item, "media_name", "") or ""))
 
             # ── Destination cell (Filename in cell, full destination path in tooltip) ──
             from square_core.config import DEFAULT_FILE_NAME_TEMPLATE, format_dest_filename
             from square_core.nas_manager import NASManager
 
             tmpl = self._filename_template or DEFAULT_FILE_NAME_TEMPLATE
-            mtype = getattr(item, "media_type", "Plate") or "Plate"
+            mtype = (getattr(item, "media_type", "") or "").strip()
+            mname = (getattr(item, "media_name", "") or "").strip()
             frame_sample = "####" if not item.is_video else None
             dest_filename = format_dest_filename(
                 tmpl, self._project_code or "PROJ", item.sequence_code,
-                item.shot_code, mtype, item.plate_name, ver,
-                frame=frame_sample, ext=item.ext
+                item.shot_code, mtype, mname, ver,
+                frame=frame_sample, ext=item.ext, media_name=mname
             )
             dest_dir = NASManager(nas_root=self._nas_root).get_dest_dir(
                 self._project_code or "PROJ", item.sequence_code,
-                item.shot_code, item.plate_name, version=ver,
+                item.shot_code, mname, version=ver,
                 media_type=mtype, resolution=item.resolution
             )
             full_dest_path = str(dest_dir / dest_filename)
@@ -413,7 +449,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             widget = self._table.cellWidget(row_idx, col)
             cell   = self._table.item(row_idx, col)
             if dim and cell and col not in (COL_STATUS, COL_INCLUDE):
-                cell.setForeground(QtGui.QBrush(QtGui.QColor("#6B7280")))
+                cell.setForeground(QtGui.QBrush(QtGui.QColor("#4B5563")))
             if status == STATUS_CONFLICT and cell and col in (COL_SEQ, COL_SHOT):
                 cell.setBackground(QtGui.QBrush(QtGui.QColor("#450A0A")))
 
@@ -431,21 +467,21 @@ class IngestTableWidget(QtWidgets.QWidget):
     def _on_cell_edited(self, cell_item):
         """
         Called whenever the user edits a table cell.
-        Re-syncs data and re-checks conflicts so renaming a plate
+        Re-syncs data and re-checks conflicts so renaming a media item
         or shot immediately resolves or reveals conflicts.
         """
         col = cell_item.column()
-        if col not in (COL_SEQ, COL_SHOT, COL_TYPE, COL_PLATE):
+        if col not in (COL_SEQ, COL_SHOT, COL_TYPE, COL_MEDIA_NAME):
             return
         # Sync the edited value back to the item object first
         row = cell_item.row()
         if row < len(self.items_data):
             item = self.items_data[row]
             text = cell_item.text().strip()
-            if col == COL_SEQ:   item.sequence_code = text
-            if col == COL_SHOT:  item.shot_code     = text
-            if col == COL_TYPE:  item.media_type    = text
-            if col == COL_PLATE: item.plate_name    = text
+            if col == COL_SEQ:        item.sequence_code = text
+            if col == COL_SHOT:       item.shot_code     = text
+            if col == COL_TYPE:       item.media_type    = text
+            if col == COL_MEDIA_NAME: item.media_name    = text; item.plate_name = text
         self._run_conflict_detection()
         self._refresh_table()
 
@@ -487,7 +523,8 @@ class IngestTableWidget(QtWidgets.QWidget):
 
             if target == "shot":
                 item.shot_code = new_val
-            elif target == "plate":
+            elif target in ("media name", "plate"):
+                item.media_name = new_val
                 item.plate_name = new_val
             elif target == "sequence":
                 item.sequence_code = new_val
@@ -592,12 +629,14 @@ class IngestTableWidget(QtWidgets.QWidget):
             if row >= len(self.items_data):
                 break
             item = self.items_data[row]
-            seq_cell  = self._table.item(row, COL_SEQ)
-            shot_cell = self._table.item(row, COL_SHOT)
-            plt_cell  = self._table.item(row, COL_PLATE)
-            if seq_cell:  item.sequence_code = seq_cell.text().strip()
-            if shot_cell: item.shot_code     = shot_cell.text().strip()
-            if plt_cell:  item.plate_name    = plt_cell.text().strip()
+            seq_cell   = self._table.item(row, COL_SEQ)
+            shot_cell  = self._table.item(row, COL_SHOT)
+            type_cell  = self._table.item(row, COL_TYPE)
+            media_cell = self._table.item(row, COL_MEDIA_NAME)
+            if seq_cell:   item.sequence_code = seq_cell.text().strip()
+            if shot_cell:  item.shot_code     = shot_cell.text().strip()
+            if type_cell:  item.media_type    = type_cell.text().strip()
+            if media_cell: item.media_name    = media_cell.text().strip(); item.plate_name = item.media_name
 
     def _get_selected_items_in_table(self):
         rows = {index.row() for index in self._table.selectedIndexes()}

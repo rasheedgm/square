@@ -7,7 +7,7 @@ SUPPORTED_IMAGE_EXTS = {".exr", ".dpx", ".png", ".jpg", ".jpeg", ".tif", ".tiff"
 SUPPORTED_VIDEO_EXTS = {".mov", ".mp4", ".mkv", ".m4v"}
 
 class IngestSequenceItem:
-    """Represents a discovered plate sequence or video file."""
+    """Represents a discovered media sequence or video file."""
 
     def __init__(self, name, files, ext, is_video=False):
         self.name = name  # Base prefix or file name
@@ -15,11 +15,10 @@ class IngestSequenceItem:
         self.ext = ext.lower()
         self.is_video = is_video
 
-        # Inferred details
-        self.sequence_code = "SQ010"
-        self.shot_code     = "SH0100"
-        self.plate_name    = "PL01"
-        self.media_type    = "Plate"   # "Plate" | "Ref" | "BG Plate" | etc.
+        self.sequence_code = ""
+        self.shot_code     = ""
+        self.media_name    = ""
+        self.media_type    = ""
 
         self.start_frame   = 1001
         self.end_frame     = 1001
@@ -30,14 +29,20 @@ class IngestSequenceItem:
         self.colorspace    = "ACEScg"
 
         self.parse_frames()
-        self.infer_naming()
+
+    @property
+    def plate_name(self):
+        return self.media_name
+
+    @plate_name.setter
+    def plate_name(self, value):
+        self.media_name = value
 
     def parse_frames(self):
         if self.is_video or not self.files:
             return
 
         frame_numbers = []
-        # Support both .1001.exr and 1001.exr
         pattern = re.compile(r"(?:[._]|^)(\d+)\." + re.escape(self.ext.lstrip(".")) + r"$", re.IGNORECASE)
 
         for filepath in self.files:
@@ -51,32 +56,13 @@ class IngestSequenceItem:
             self.start_frame = frame_numbers[0]
             self.end_frame = frame_numbers[-1]
             
-            # Detect missing frames in range
             expected_set = set(range(self.start_frame, self.end_frame + 1))
             actual_set = set(frame_numbers)
             self.missing_frames = sorted(list(expected_set - actual_set))
 
     def infer_naming(self):
-        """Uses regex to smart-detect Sequence, Shot, and Plate names from filename/path."""
-        text_to_search = self.name + " " + (self.files[0] if self.files else "")
-
-        # Match Sequence (e.g. SQ010, seq_01, sq100)
-        sq_match = re.search(r"(?i)(?:SQ|seq)[-_]?(\d{2,4})", text_to_search)
-        if sq_match:
-            self.sequence_code = f"SQ{int(sq_match.group(1)):03d}"
-
-        # Match Shot (e.g. SH0100, shot_10, sh100)
-        sh_match = re.search(r"(?i)(?:SH|shot)[-_]?(\d{2,4})", text_to_search)
-        if sh_match:
-            self.shot_code = f"SH{int(sh_match.group(1)):04d}"
-
-        # Match Plate (e.g. PL01, plate_01, main, fg)
-        pl_match = re.search(r"(?i)(?:PL|plate)[-_]?(\w+|\d+)", text_to_search)
-        if pl_match:
-            raw_pl = pl_match.group(1)
-            self.plate_name = f"PL{raw_pl.upper()}" if raw_pl.isdigit() else raw_pl.upper()
-        else:
-            self.plate_name = "MAIN"
+        """Disabled auto pattern matching as instructed."""
+        pass
 
     @property
     def frame_range_str(self):
@@ -92,8 +78,9 @@ class IngestSequenceItem:
 class PlateScanner:
     """Scans incoming media directories for sequences and single files with deep directory robustness."""
 
-    def __init__(self, search_path):
-        self.search_path = Path(search_path)
+    def __init__(self, root_path=None, search_path=None):
+        target = root_path if root_path is not None else search_path
+        self.search_path = Path(target) if target else Path(".")
 
     def scan(self):
         """Returns a list of IngestSequenceItem objects found in search_path."""
@@ -106,7 +93,6 @@ class PlateScanner:
         pattern_dotted = re.compile(r"^(.*?)[._](\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
         pattern_standalone = re.compile(r"^(\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
 
-        # Iterative safe directory walk with error catching & long path support
         root_path_str = str(self.search_path.resolve())
         if os.name == 'nt' and not root_path_str.startswith('\\\\?\\') and len(root_path_str) > 240:
             root_path_str = '\\\\?\\' + root_path_str
@@ -135,8 +121,10 @@ class PlateScanner:
 
         items = []
         for (root, base_prefix, ext), file_list in sequence_groups.items():
-            item = IngestSequenceItem(base_prefix, file_list, ext, is_video=False)
-            items.append(item)
+            items.append(IngestSequenceItem(base_prefix, file_list, ext, is_video=False))
 
         items.extend(single_videos)
         return items
+
+
+MediaScanner = PlateScanner

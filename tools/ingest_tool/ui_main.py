@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 from pathlib import Path
@@ -7,7 +8,7 @@ from Qt import QtCore, QtWidgets, QtGui
 from square_core import __version__
 from square_core.config import StudioConfig
 from square_core.kitsu_client import KitsuClient
-from square_core.plate_scanner import PlateScanner
+from square_core.plate_scanner import MediaScanner, PlateScanner
 from square_core.folder_mapper import FolderMapper
 from square_core.nas_manager import NASManager
 from square_core.proxy_generator import ProxyGenerator
@@ -366,9 +367,9 @@ class MainWindow(QtWidgets.QMainWindow):
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(0)
 
-        splitter = QtWidgets.QSplitter(ORIENTATION_HORIZONTAL)
-        splitter.setHandleWidth(4)
-        splitter.setStyleSheet(
+        self.main_splitter = QtWidgets.QSplitter(ORIENTATION_HORIZONTAL)
+        self.main_splitter.setHandleWidth(4)
+        self.main_splitter.setStyleSheet(
             "QSplitter::handle { background:#1E2535; }"
             "QSplitter::handle:hover { background:#3B82F6; }"
         )
@@ -379,10 +380,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.table_widget = IngestTableWidget()
         self.table_widget.table_changed.connect(self._update_conflict_badge)
 
-        splitter.addWidget(self.folder_tree)
-        splitter.addWidget(self.table_widget)
-        splitter.setSizes([300, 980])
-        content_layout.addWidget(splitter)
+        self.main_splitter.addWidget(self.folder_tree)
+        self.main_splitter.addWidget(self.table_widget)
+        self.main_splitter.setSizes([340, 940])
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 2)
+        content_layout.addWidget(self.main_splitter)
         main_layout.addWidget(content, stretch=1)
 
         # ── Bottom action bar ──
@@ -507,27 +510,40 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def on_load_media(self, root_path, folder_mapper=None, selected_paths=None, is_update=False):
         """Called when FolderTreeWidget emits load_requested."""
-        if folder_mapper and folder_mapper.has_map():
-            items = folder_mapper.build_items(filter_paths=selected_paths)
-        else:
-            scanner = PlateScanner(search_path=root_path)
-            items   = scanner.scan()
-            if selected_paths:
-                filtered = []
-                for item in items:
-                    item_paths = {os.path.normcase(os.path.abspath(f)) for f in item.files}
-                    if item_paths.intersection(selected_paths):
-                        filtered.append(item)
-                items = filtered
+        try:
+            if folder_mapper and folder_mapper.has_map():
+                items = folder_mapper.build_items(filter_paths=selected_paths)
+                folder_mapper.save_table_state(items)
+            elif folder_mapper and folder_mapper._table_state and not is_update:
+                items = folder_mapper.get_saved_table_items()
+            else:
+                scanner = MediaScanner(root_path)
+                items   = scanner.scan()
+                if selected_paths:
+                    filtered = []
+                    for item in items:
+                        item_paths = {os.path.normcase(os.path.abspath(f)) for f in item.files}
+                        if item_paths.intersection(selected_paths):
+                            filtered.append(item)
+                    items = filtered
 
-        if is_update:
-            self.table_widget.update_table(items)
-        else:
-            self.table_widget.populate_table(items)
+            if is_update:
+                self.table_widget.update_table(items)
+            else:
+                self.table_widget.populate_table(items)
 
-        current_items = self.table_widget.items_data
-        if current_items and self.project_data:
-            self._start_nas_check(current_items)
+            current_items = self.table_widget.items_data
+            if folder_mapper:
+                folder_mapper.save_table_state(current_items)
+
+            if current_items and self.project_data:
+                self._start_nas_check(current_items)
+        except Exception as e:
+            logger.error(f"[IngestMainUI] Error in on_load_media: {e}", exc_info=True)
+            with open("gui_test_step.log", "a", encoding="utf-8") as f:
+                import traceback
+                f.write(f"ON_LOAD_MEDIA_ERROR:\n{traceback.format_exc()}\n")
+            raise e
 
     def on_scan_folder(self, root_path, folder_mapper=None, selected_paths=None, is_update=False):
         """Alias for backward compatibility."""
@@ -584,13 +600,16 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
-        items_with_versions = self.table_widget.get_selected_items()
-        if not items_with_versions:
+        valid_items = self.table_widget.get_valid_ingest_items()
+        if not valid_items:
             QtWidgets.QMessageBox.warning(
-                self, "Nothing to Ingest",
-                "No new items selected. All plates are either already ingested, discarded, or conflicted."
+                self, "Missing Details or Nothing to Ingest",
+                "No valid items ready to ingest.\n\n"
+                "Please ensure all rows marked for ingestion have Sequence, Shot, Media Type, and Name filled in."
             )
             return
+
+        items_with_versions = valid_items
 
         self.progress_dialog = IngestProgressDialog(self)
         self.progress_dialog.show()
@@ -619,3 +638,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.information(self, "Ingestion Complete", message)
         else:
             QtWidgets.QMessageBox.critical(self, "Ingestion Failed", message)
+
+    def closeEvent(self, event):
+        if self._nas_check_worker and self._nas_check_worker.isRunning():
+            self._nas_check_worker.quit()
+            self._nas_check_worker.wait(1000)
+        super(MainWindow, self).closeEvent(event)

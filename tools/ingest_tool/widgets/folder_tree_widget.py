@@ -21,21 +21,25 @@ from Qt import QtWidgets, QtCore, QtGui
 
 from square_core.folder_mapper import (
     FolderMapper,
-    LEVEL_SEQ, LEVEL_SHOT, LEVEL_PLATE,
+    LEVEL_SEQ, LEVEL_SHOT, LEVEL_MEDIA_NAME, LEVEL_MEDIA_TYPE, LEVEL_VERSION,
     SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS,
 )
 from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION
 
 # ── Colours for tagged-folder text ──────────────────────────────────
 LEVEL_FG = {
-    LEVEL_SEQ:   "#60A5FA",   # blue-400
-    LEVEL_SHOT:  "#34D399",   # emerald-400
-    LEVEL_PLATE: "#FBBF24",   # amber-400
+    LEVEL_SEQ:        "#60A5FA",   # blue-400
+    LEVEL_SHOT:       "#34D399",   # emerald-400
+    LEVEL_MEDIA_NAME: "#FBBF24",   # amber-400
+    LEVEL_MEDIA_TYPE: "#A5F3FC",   # cyan-300
+    LEVEL_VERSION:    "#C084FC",   # purple-400
 }
 LEVEL_LABEL = {
-    LEVEL_SEQ:   "SEQ",
-    LEVEL_SHOT:  "SHOT",
-    LEVEL_PLATE: "PLATE",
+    LEVEL_SEQ:        "SEQ",
+    LEVEL_SHOT:       "SHOT",
+    LEVEL_MEDIA_NAME: "NAME",
+    LEVEL_MEDIA_TYPE: "TYPE",
+    LEVEL_VERSION:    "VER",
 }
 
 # Item data roles (integer literals for Qt5/Qt6 compatibility)
@@ -47,7 +51,7 @@ ROLE_MEDIA_TYPE = 259   # Qt.UserRole + 3  — media type label on seq/video ite
 
 class TagPillDelegate(QtWidgets.QStyledItemDelegate):
     """
-    Paints a small coloured pill  [ SEQ ] / [ SHOT ] / [ PLATE ]
+    Paints a small coloured pill  [ SEQ ] / [ SHOT ] / [ NAME ] / [ TYPE ] / [ VER ]
     on the right side of any folder row that has a level tag.
     Reads the level from item data at ROLE_LEVEL.
     """
@@ -59,15 +63,24 @@ class TagPillDelegate(QtWidgets.QStyledItemDelegate):
 
     # Background / foreground per level / media type
     _BG = {
-        LEVEL_SEQ:   ("#1D4ED8", "#BFDBFE"),
-        LEVEL_SHOT:  ("#065F46", "#A7F3D0"),
-        LEVEL_PLATE: ("#78350F", "#FDE68A"),
-        # Media item types
-        "PLATE":       ("#78350F", "#FDE68A"),  # same amber badge as folder PLATE
-        "REF":         ("#581C87", "#E9D5FF"),  # purple
-        "BG PLATE":    ("#164E63", "#A5F3FC"),  # cyan
-        "COMP RENDER": ("#065F46", "#A7F3D0"),  # emerald
-        "PRECOMP":     ("#1D4ED8", "#BFDBFE"),  # blue
+        LEVEL_SEQ:        ("#1D4ED8", "#BFDBFE"),
+        LEVEL_SHOT:       ("#065F46", "#A7F3D0"),
+        LEVEL_MEDIA_NAME: ("#78350F", "#FDE68A"),
+        LEVEL_MEDIA_TYPE: ("#164E63", "#A5F3FC"),
+        LEVEL_VERSION:    ("#581C87", "#E9D5FF"),
+        "SEQ":            ("#1D4ED8", "#BFDBFE"),
+        "SHOT":           ("#065F46", "#A7F3D0"),
+        "NAME":           ("#78350F", "#FDE68A"),
+        "MEDIA":          ("#78350F", "#FDE68A"),
+        "TYPE":           ("#164E63", "#A5F3FC"),
+        "MEDIA_TYPE":     ("#164E63", "#A5F3FC"),
+        "VER":            ("#581C87", "#E9D5FF"),
+        "VERSION":        ("#581C87", "#E9D5FF"),
+        "PLATE":          ("#78350F", "#FDE68A"),
+        "REF":            ("#581C87", "#E9D5FF"),
+        "BG PLATE":       ("#164E63", "#A5F3FC"),
+        "COMP RENDER":    ("#065F46", "#A7F3D0"),
+        "PRECOMP":        ("#1D4ED8", "#BFDBFE"),
     }
 
     def paint(self, painter, option, index):
@@ -181,9 +194,10 @@ class FolderTreeWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._root_path = None
         self._mapper    = None
+        from square_core.config import StudioConfig
+        self.config = StudioConfig()
         self.setAcceptDrops(True)
         self.setMinimumWidth(280)
-        self.setMaximumWidth(1200)
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -204,11 +218,11 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._browse_btn.setFixedHeight(28)
         self._browse_btn.clicked.connect(self._on_browse)
 
-        self._auto_btn = QtWidgets.QPushButton("Auto-Tag")
-        self._auto_btn.setToolTip("Detect SEQ/SHOT/PLATE levels from folder names")
-        self._auto_btn.setFixedHeight(28)
-        self._auto_btn.setEnabled(False)
-        self._auto_btn.clicked.connect(self._on_auto_detect)
+        self._preset_combo = QtWidgets.QComboBox()
+        self._preset_combo.setFixedHeight(28)
+        self._preset_combo.setToolTip("Load or Save Tag Hierarchy Preset")
+        self._refresh_preset_combo()
+        self._preset_combo.activated.connect(self._on_preset_combo_activated)
 
         self._clear_btn = QtWidgets.QPushButton("Clear")
         self._clear_btn.setToolTip("Remove all level tags")
@@ -217,7 +231,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._clear_btn.clicked.connect(self._on_clear_tags)
 
         btn_row.addWidget(self._browse_btn)
-        btn_row.addWidget(self._auto_btn)
+        btn_row.addWidget(self._preset_combo, stretch=1)
         btn_row.addWidget(self._clear_btn)
         layout.addLayout(btn_row)
 
@@ -252,6 +266,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._tree.setAnimated(True)
         self._tree.setUniformRowHeights(True)
         self._tree.setIconSize(QtCore.QSize(14, 14))
+        self._tree.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
         # Attach pill delegate — draws level tags on folder rows
         self._pill_delegate = TagPillDelegate(self._tree)
         self._tree.setItemDelegateForColumn(0, self._pill_delegate)
@@ -346,20 +361,20 @@ class FolderTreeWidget(QtWidgets.QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def root_path(self):
+        return self._root_path
+
     def load_path(self, path: str):
         self._root_path = path
         self._mapper    = FolderMapper(path)
 
-        if not self._mapper.load():
-            self._mapper.auto_detect()
-            if self._mapper.has_map():
-                self._mapper.save()
+        self._mapper.load()
 
         self._path_lbl.setText(path)
         self._path_lbl.setStyleSheet(
             "font-size:10px; color:#64748B; background:transparent;"
         )
-        self._auto_btn.setEnabled(True)
         self._clear_btn.setEnabled(True)
         self._load_btn.setEnabled(True)
         self._update_btn.setEnabled(True)
@@ -445,17 +460,18 @@ class FolderTreeWidget(QtWidgets.QWidget):
         for prefix, ext, frames in sorted(sequences, key=lambda x: x[0].lower()):
             seq_item = QtWidgets.QTreeWidgetItem()
             padding  = len(str(max(frames)))
-            seq_path = str(folder / f"{prefix}.{ext}")
+            clean_ext = ext.lstrip('.')
+            seq_path = str(folder / f"{prefix}.{clean_ext}")
             mtype    = self._mapper.get_media_type(seq_path) if self._mapper else None
             seq_item.setText(
                 0,
-                f"{prefix}.{'#' * padding}.{ext}   {_frame_range_str(frames)}"
+                f"{prefix}.{'#' * padding}.{clean_ext}   {_frame_range_str(frames)}"
             )
             seq_item.setIcon(0, self._icon_film)
             seq_item.setData(0, ROLE_PATH, seq_path)
             seq_item.setData(0, ROLE_KIND, "sequence")
             seq_item.setData(0, ROLE_MEDIA_TYPE, mtype)
-            seq_item.setToolTip(0, f"{len(frames)} frames  ·  {prefix}.{ext}")
+            seq_item.setToolTip(0, f"{len(frames)} frames  ·  {prefix}.{clean_ext}")
             seq_item.setForeground(
                 0, QtGui.QColor("#FBBF24" if mtype else "#5B7AA8")
             )
@@ -492,13 +508,20 @@ class FolderTreeWidget(QtWidgets.QWidget):
             item.setForeground(0, QtGui.QColor("#94A3B8"))
 
     def _refresh_item_colours(self):
-        """Walk tree and refresh item colours after tag changes (no full repopulate)."""
+        """Walk tree and refresh item colours & badges after tag changes."""
         def walk(item):
             kind = item.data(0, ROLE_KIND)
             path_str = item.data(0, ROLE_PATH)
-            if kind == "folder" and path_str and self._mapper:
-                level = self._mapper.level_of_path(Path(path_str))
-                self._style_folder_item(item, level)
+            if path_str and self._mapper:
+                p = Path(path_str)
+                if kind == "folder":
+                    level = self._mapper.level_of_path(p)
+                    self._style_folder_item(item, level)
+                else:
+                    mtype = self._mapper.get_media_type(p)
+                    item.setData(0, ROLE_MEDIA_TYPE, mtype)
+                    clr = "#FBBF24" if mtype else ("#5B7BC4" if kind == "video" else "#4B6A8A")
+                    item.setForeground(0, QtGui.QColor(clr))
             for i in range(item.childCount()):
                 walk(item.child(i))
 
@@ -550,22 +573,15 @@ class FolderTreeWidget(QtWidgets.QWidget):
         hdr.setEnabled(False)
         menu.addSeparator()
 
-        # Determine which levels are available to tag
-        if has_shot_above:
-            # SHOT already above → only PLATE makes sense here
-            available = [(LEVEL_PLATE, "Plate / Media")]
-        elif has_seq_above:
-            # SEQ above → SHOT or PLATE
-            available = [(LEVEL_SHOT, "Shot"), (LEVEL_PLATE, "Plate / Media")]
-        else:
-            # Nothing above → offer all three
-            available = [
-                (LEVEL_SEQ,   "Sequence"),
-                (LEVEL_SHOT,  "Shot"),
-                (LEVEL_PLATE, "Plate / Media"),
-            ]
+        available = [
+            (LEVEL_SEQ,        "Sequence (SEQ)"),
+            (LEVEL_SHOT,       "Shot (SHOT)"),
+            (LEVEL_MEDIA_NAME, "Media Name (NAME)"),
+            (LEVEL_MEDIA_TYPE, "Media Type (TYPE)"),
+            (LEVEL_VERSION,    "Version (VER)"),
+        ]
 
-        tag_menu = menu.addMenu("Tag as")
+        tag_menu = menu.addMenu("Tag Folder as")
         for level, label in available:
             level_submenu = tag_menu.addMenu(label)
 
@@ -578,15 +594,22 @@ class FolderTreeWidget(QtWidgets.QWidget):
                 lambda checked=False, p=path, l=level: self._tag_folder(p, l)
             )
 
-            act_depth = level_submenu.addAction(f"All folders at depth {depth}")
-            act_depth.setCheckable(True)
-            act_depth.setChecked(
-                self._mapper.get_level(depth) == level
-                and self._mapper.get_level_for_folder(path) is None
-            )
-            act_depth.triggered.connect(
-                lambda checked=False, d=depth, l=level: self._tag_depth(d, l)
-            )
+            if depth >= 0:
+                act_depth = level_submenu.addAction(f"All folders at depth {depth}")
+                act_depth.setCheckable(True)
+                act_depth.setChecked(
+                    self._mapper.get_level(depth) == level
+                    and self._mapper.get_level_for_folder(path) is None
+                )
+                act_depth.triggered.connect(
+                    lambda checked=False, d=depth, l=level: self._tag_depth(d, l)
+                )
+
+        menu.addSeparator()
+        token_act = menu.addAction("🏷️ Tag Name Tokens…")
+        token_act.triggered.connect(
+            lambda checked=False, i=item, p=path: self._open_token_splitter(i, p)
+        )
 
         menu.addSeparator()
         clear_act = menu.addAction("Clear tag")
@@ -601,8 +624,76 @@ class FolderTreeWidget(QtWidgets.QWidget):
         else:
             menu.exec_(gp)
 
+    def _refresh_preset_combo(self):
+        """Refreshes the hierarchy preset dropdown list with options + Save action."""
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.clear()
+        self._preset_combo.addItem("Presets ▼")
+        for name in self.config.hierarchy_presets.keys():
+            self._preset_combo.addItem(f"  {name}")
+        self._preset_combo.addItem("💾 Save Tagging as Preset…")
+        self._preset_combo.blockSignals(False)
+
+    def _on_preset_combo_activated(self, index):
+        text = self._preset_combo.itemText(index).strip()
+        if text.startswith("💾 Save"):
+            self._on_save_hierarchy_preset()
+        elif text.startswith("Presets"):
+            return
+        else:
+            preset_name = text
+            self._on_preset_selected(preset_name)
+
+    def _on_preset_selected(self, preset_name):
+        """Applies a selected Tag Hierarchy Preset to the tree."""
+        if not self._mapper or preset_name not in self.config.hierarchy_presets:
+            return
+
+        data = self.config.hierarchy_presets[preset_name]
+        level_mappings = data.get("level_mappings", {})
+
+        # Clear existing level tags
+        self._mapper.clear_all_levels()
+
+        # Apply level mappings
+        for depth_str, rule in level_mappings.items():
+            depth = int(depth_str)
+            rule_type = rule.get("type", "direct")
+            if rule_type == "direct" and "tag" in rule:
+                self._mapper.set_level(depth, rule["tag"])
+
+        self._mapper.save()
+        self.config.active_hierarchy_preset = preset_name
+        self.config.save()
+
+        self._refresh_item_colours()
+        self._update_map_label()
+
+    def _on_save_hierarchy_preset(self):
+        """Saves current tree folder depth tags as a new Hierarchy Preset."""
+        if not self._mapper:
+            QtWidgets.QMessageBox.information(self, "Save Preset", "Please load a folder tree first before saving a preset.")
+            return
+
+        text, ok = QtWidgets.QInputDialog.getText(self, "Save Tag Hierarchy Preset", "Preset Name:")
+        if ok and text.strip():
+            preset_name = text.strip()
+            level_mappings = {}
+            for depth, tag in self._mapper._depth_map.items():
+                level_mappings[str(depth)] = {"type": "direct", "tag": tag}
+
+            preset_data = {
+                "name": preset_name,
+                "level_mappings": level_mappings
+            }
+            self.config.hierarchy_presets[preset_name] = preset_data
+            self.config.active_hierarchy_preset = preset_name
+            self.config.save()
+
+            self._refresh_preset_combo()
+
     def _show_media_context_menu(self, item, path: Path, gp):
-        """Context menu for sequence / video / image items."""
+        """Context menu for sequence / video / image items aligned with Token Tag Modal."""
         menu = QtWidgets.QMenu(self)
 
         hdr = menu.addAction(f"  {path.name}")
@@ -611,33 +702,95 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
         current_type = self._mapper.get_media_type(path) if self._mapper else None
 
-        from square_core.folder_mapper import FolderMapper as _FM
-        type_menu = menu.addMenu("Mark as")
-        for mtype in _FM.MEDIA_TYPES:
-            act = type_menu.addAction(mtype)
+        from square_core.config import StudioConfig
+        media_types = list(StudioConfig().media_type_configs.keys())
+
+        for mtype in media_types:
+            act = menu.addAction(f"Tag as {mtype}")
             act.setCheckable(True)
             act.setChecked(current_type == mtype)
             act.triggered.connect(
                 lambda checked=False, t=mtype, i=item, p=path: self._set_media_type(i, p, t)
             )
 
-        type_menu.addSeparator()
-        custom_act = type_menu.addAction("Custom name…")
+        custom_act = menu.addAction("Custom Media Type…")
         custom_act.triggered.connect(
             lambda checked=False, i=item, p=path: self._set_media_type_custom(i, p)
         )
 
-        if current_type:
+        menu.addSeparator()
+        token_act = menu.addAction("🏷️ Tag Name Tokens…")
+        token_act.triggered.connect(
+            lambda checked=False, i=item, p=path: self._open_token_splitter(i, p)
+        )
+
+        has_tags = bool(current_type or (self._mapper and (self._mapper.get_token_rule(path) or self._mapper._item_overrides.get(self._mapper._norm_path(path)))))
+        if has_tags:
             menu.addSeparator()
-            clr_act = menu.addAction("Clear label")
+            clr_act = menu.addAction("Clear All Tags on Item")
             clr_act.triggered.connect(
-                lambda checked=False, i=item, p=path: self._set_media_type(i, p, None)
+                lambda checked=False, i=item, p=path: self._clear_item_tags(i, p)
             )
 
         if hasattr(menu, "exec"):
             menu.exec(gp)
         else:
             menu.exec_(gp)
+
+    def _clear_item_tags(self, item, path: Path):
+        """Clears all media type, token rules, and item overrides for this specific item."""
+        if self._mapper:
+            self._mapper.clear_token_rule(path)
+            self._mapper.set_media_type(path, None)
+            self._mapper.save()
+        item.setData(0, ROLE_MEDIA_TYPE, None)
+        item.setForeground(0, QtGui.QColor("#5B7AA8"))
+        idx = self._tree.indexFromItem(item)
+        self._tree.update(idx)
+        self._tree.viewport().update()
+
+    def _open_token_splitter(self, item, path: Path):
+        """Open the interactive TokenSplitterDialog for this item."""
+        from tools.ingest_tool.widgets.token_splitter_dialog import TokenSplitterDialog
+        from square_core.token_parser import parse_string_with_token_rule
+
+        existing_rule = self._mapper.get_token_rule(path) if self._mapper else None
+        dlg = TokenSplitterDialog(raw_text=path.name, current_rule=existing_rule, parent=self)
+        exec_res = dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
+        if exec_res == QtWidgets.QDialog.Accepted:
+            rule = dlg.current_rule
+
+            if dlg.apply_to_all_level:
+                # Apply token rule to ALL items at the same depth across the entire tree
+                target_depth = self._mapper.depth_of_path(path) if self._mapper else -1
+
+                def _apply_recursive(tree_item):
+                    c_path_str = tree_item.data(0, ROLE_PATH)
+                    if c_path_str:
+                        c_path = Path(c_path_str)
+                        c_depth = self._mapper.depth_of_path(c_path) if self._mapper else -1
+                        if c_depth == target_depth or tree_item.parent() == item.parent():
+                            if self._mapper:
+                                self._mapper.set_token_rule(c_path, rule)
+                            res = parse_string_with_token_rule(c_path.name, rule)
+                            badge_label = res.get("media_type") or res.get("media_name") or res.get("plate_name") or "TOKEN TAG"
+                            tree_item.setData(0, ROLE_MEDIA_TYPE, badge_label)
+
+                    for i in range(tree_item.childCount()):
+                        _apply_recursive(tree_item.child(i))
+
+                for i in range(self._tree.topLevelItemCount()):
+                    _apply_recursive(self._tree.topLevelItem(i))
+            else:
+                if self._mapper:
+                    self._mapper.set_token_rule(path, rule)
+                res = dlg.get_parsed_result()
+                badge_label = res.get("media_type") or res.get("media_name") or res.get("plate_name") or "TOKEN TAG"
+                item.setData(0, ROLE_MEDIA_TYPE, badge_label)
+
+            if self._mapper:
+                self._mapper.save()
+            self._refresh_item_colours()
 
     def _set_media_type(self, item, path: Path, type_name):
         """Assign or clear a media type label on a media tree item."""
@@ -684,10 +837,14 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._update_map_label()
 
     def _clear_tag(self, path: Path, depth: int):
-        """Clear both folder override and depth-wide tag for this folder's depth."""
-        self._mapper.set_level_for_folder(path, None)
-        self._mapper.set_level(depth, None)
-        self._mapper.save()
+        """Clear folder override, depth tag, token rule, item override, and media type."""
+        if self._mapper:
+            self._mapper.set_level_for_folder(path, None)
+            self._mapper.clear_token_rule(path)
+            self._mapper.set_media_type(path, None)
+            if depth >= 0:
+                self._mapper.set_level(depth, None)
+            self._mapper.save()
         self._refresh_item_colours()
         self._update_map_label()
 
@@ -729,9 +886,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
     def _on_clear_tags(self):
         if self._mapper:
-            self._mapper._depth_map.clear()
-            self._mapper._folder_overrides.clear()
-            self._mapper.save()
+            self._mapper.clear_all_levels()
             self._refresh_item_colours()
             self._update_map_label()
 

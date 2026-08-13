@@ -4,5 +4,101 @@
     "kitsu_password": "mysecretpassword",
     "nas_root": "D:/NAS_test",
     "cache_root": "C:/cache/square",
-    "dry_run": true
+    "filename_template": "{seq}_{shot}_{media_type}_{media_name}_v{version:03d}.{frame}{ext}",
+    "nas_dir_template": "{nas_root}/{project_code}/shots/{sequence_code}/{shot_code}/{media_type}/{media_name}_v{version:03d}",
+    "shot_folder_structure": [
+        "2d",
+        "3d",
+        "comp",
+        "element",
+        "input",
+        "luts",
+        "mattes",
+        "media",
+        "plates",
+        "ref",
+        "renders"
+    ],
+    "dry_run": true,
+    "token_presets": {
+        "Shot_Media_Version": {
+            "name": "Shot_Media_Version",
+            "delimiter": "_",
+            "mapping": {
+                "shot_code": [
+                    0
+                ],
+                "media_name": [
+                    1
+                ],
+                "version": [
+                    2
+                ]
+            },
+            "merged_ranges": []
+        },
+        "Seq_Shot_Media_Version": {
+            "name": "Seq_Shot_Media_Version",
+            "delimiter": "_",
+            "mapping": {
+                "sequence_code": [
+                    0
+                ],
+                "shot_code": [
+                    1
+                ],
+                "media_name": [
+                    2
+                ],
+                "version": [
+                    3
+                ]
+            },
+            "merged_ranges": []
+        }
+    },
+    "hierarchy_presets": {
+        "VFX Standard 3-Level": {
+            "name": "VFX Standard 3-Level",
+            "level_mappings": {
+                "1": {
+                    "type": "direct",
+                    "tag": "seq"
+                },
+                "2": {
+                    "type": "direct",
+                    "tag": "shot"
+                },
+                "3": {
+                    "type": "direct",
+                    "tag": "media_name"
+                }
+            }
+        },
+        "Nested Sequence + Combined File": {
+            "name": "Nested Sequence + Combined File",
+            "level_mappings": {
+                "1": {
+                    "type": "direct",
+                    "tag": "seq"
+                },
+                "2": {
+                    "type": "token_preset",
+                    "preset_name": "Shot_Media_Version"
+                }
+            }
+        }
+    },
+    "active_hierarchy_preset": "VFX Standard 3-Level",
+    "media_type_configs": {
+        "Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/plates/{media_name}_v{version:03d}",
+        "Ref": "{nas_root}/{project_code}/shots/{seq}/{shot}/ref/{media_name}_v{version:03d}",
+        "BG Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/bg_plates/{media_name}_v{version:03d}",
+        "Comp Render": "{nas_root}/{project_code}/shots/{seq}/{shot}/comp/{media_name}_v{version:03d}",
+        "Precomp": "{nas_root}/{project_code}/shots/{seq}/{shot}/precomp/{media_name}_v{version:03d}",
+        "Element": "{nas_root}/{project_code}/shots/{seq}/{shot}/elements/{media_name}",
+        "LUT": "{nas_root}/{project_code}/shots/{seq}/{shot}/luts/{media_name}",
+        "Audio": "{nas_root}/{project_code}/shots/{seq}/{shot}/audio/{media_name}",
+        "Matte": "{nas_root}/{project_code}/shots/{seq}/{shot}/mattes/{media_name}"
+    }
 }

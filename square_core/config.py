@@ -23,7 +23,7 @@ DEFAULT_SHOT_TASKS = [
 # Naming Convention Regex Templates
 REGEX_SEQUENCE = r"(?i)(?:SQ|seq)[-_]?(\d{3,4})"
 REGEX_SHOT = r"(?i)(?:SH|shot)[-_]?(\d{3,4})"
-REGEX_PLATE = r"(?i)(?:PL|plate)[-_]?(\w+|\d+)"
+REGEX_MEDIA_NAME = r"(?i)(?:PL|plate|media|name)[-_]?(\w+|\d+)"
 REGEX_FRAME = r"\.(\d{4,7})\.(exr|dpx|png|jpg|jpeg|tif|tiff)$"
 
 # Default File Naming Template
@@ -31,17 +31,21 @@ REGEX_FRAME = r"\.(\d{4,7})\.(exr|dpx|png|jpg|jpeg|tif|tiff)$"
 DEFAULT_FILE_NAME_TEMPLATE = "{seq}_{shot}_{type}_{name}_v{version:03d}.{frame}{ext}"
 
 
-def format_dest_filename(template, proj_code, sequence_code, shot_code, media_type, plate_name, version_num, frame=None, ext=".exr"):
-    mtype = (media_type or "Plate").strip()
-    pname = (plate_name or "PL01").strip()
+def format_dest_filename(template, proj_code, sequence_code, shot_code, media_type, plate_name=None, version_num=1, frame=None, ext=".exr", media_name=None):
+    mtype = (media_type or "").strip()
+    mname = (media_name or plate_name or "").strip()
     clean_ext = ext if (ext and ext.startswith(".")) else (f".{ext}" if ext else ".exr")
 
     res = template or DEFAULT_FILE_NAME_TEMPLATE
     res = res.replace("{project}", proj_code or "PROJ")
-    res = res.replace("{seq}", sequence_code or "SQ010")
-    res = res.replace("{shot}", shot_code or "SH0100")
+    res = res.replace("{seq}", sequence_code or "")
+    res = res.replace("{shot}", shot_code or "")
+    res = res.replace("{media_type}", mtype)
+    res = res.replace("{plate_type}", mtype)
     res = res.replace("{type}", mtype)
-    res = res.replace("{name}", pname)
+    res = res.replace("{media_name}", mname)
+    res = res.replace("{plate_name}", mname)
+    res = res.replace("{name}", mname)
     res = res.replace("{version:03d}", f"{version_num:03d}")
     res = res.replace("{version}", f"{version_num:03d}")
 
@@ -159,6 +163,52 @@ SHOT_RENDER_TEMPLATE = os.path.join(
 )
 
 
+DEFAULT_TOKEN_PRESETS = {
+    "Shot_Media_Version": {
+        "name": "Shot_Media_Version",
+        "delimiter": "_",
+        "mapping": {"shot_code": [0], "media_name": [1], "version": [2]},
+        "merged_ranges": []
+    },
+    "Seq_Shot_Media_Version": {
+        "name": "Seq_Shot_Media_Version",
+        "delimiter": "_",
+        "mapping": {"sequence_code": [0], "shot_code": [1], "media_name": [2], "version": [3]},
+        "merged_ranges": []
+    }
+}
+
+DEFAULT_HIERARCHY_PRESETS = {
+    "VFX Standard 3-Level": {
+        "name": "VFX Standard 3-Level",
+        "level_mappings": {
+            "1": {"type": "direct", "tag": "seq"},
+            "2": {"type": "direct", "tag": "shot"},
+            "3": {"type": "direct", "tag": "media_name"}
+        }
+    },
+    "Nested Sequence + Combined File": {
+        "name": "Nested Sequence + Combined File",
+        "level_mappings": {
+            "1": {"type": "direct", "tag": "seq"},
+            "2": {"type": "token_preset", "preset_name": "Shot_Media_Version"}
+        }
+    }
+}
+
+DEFAULT_MEDIA_TYPE_CONFIGS = {
+    "Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/plates/{media_name}_v{version:03d}",
+    "Ref": "{nas_root}/{project_code}/shots/{seq}/{shot}/ref/{media_name}_v{version:03d}",
+    "BG Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/bg_plates/{media_name}_v{version:03d}",
+    "Comp Render": "{nas_root}/{project_code}/shots/{seq}/{shot}/comp/{media_name}_v{version:03d}",
+    "Precomp": "{nas_root}/{project_code}/shots/{seq}/{shot}/precomp/{media_name}_v{version:03d}",
+    "Element": "{nas_root}/{project_code}/shots/{seq}/{shot}/elements/{media_name}",
+    "LUT": "{nas_root}/{project_code}/shots/{seq}/{shot}/luts/{media_name}",
+    "Audio": "{nas_root}/{project_code}/shots/{seq}/{shot}/audio/{media_name}",
+    "Matte": "{nas_root}/{project_code}/shots/{seq}/{shot}/mattes/{media_name}"
+}
+
+
 class StudioConfig:
     """Studio configuration manager."""
     
@@ -184,6 +234,11 @@ class StudioConfig:
         self.shot_folder_structure = list(SHOT_FOLDER_STRUCTURE)
         self.tasks = DEFAULT_SHOT_TASKS
         self.dry_run = True
+
+        self.token_presets = dict(DEFAULT_TOKEN_PRESETS)
+        self.hierarchy_presets = dict(DEFAULT_HIERARCHY_PRESETS)
+        self.active_hierarchy_preset = "VFX Standard 3-Level"
+        self.media_type_configs = dict(DEFAULT_MEDIA_TYPE_CONFIGS)
 
         self.load()
 
@@ -212,6 +267,10 @@ class StudioConfig:
                     self.nas_dir_template = data.get("nas_dir_template", self.nas_dir_template)
                     self.shot_folder_structure = data.get("shot_folder_structure", self.shot_folder_structure)
                     self.dry_run = data.get("dry_run", self.dry_run)
+                    self.token_presets = data.get("token_presets", self.token_presets)
+                    self.hierarchy_presets = data.get("hierarchy_presets", self.hierarchy_presets)
+                    self.active_hierarchy_preset = data.get("active_hierarchy_preset", self.active_hierarchy_preset)
+                    self.media_type_configs = data.get("media_type_configs", self.media_type_configs)
             except Exception as e:
                 print(f"[StudioConfig] Error loading config: {e}")
 
@@ -225,7 +284,11 @@ class StudioConfig:
             "filename_template": self.filename_template,
             "nas_dir_template": self.nas_dir_template,
             "shot_folder_structure": self.shot_folder_structure,
-            "dry_run": self.dry_run
+            "dry_run": self.dry_run,
+            "token_presets": self.token_presets,
+            "hierarchy_presets": self.hierarchy_presets,
+            "active_hierarchy_preset": self.active_hierarchy_preset,
+            "media_type_configs": self.media_type_configs
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)

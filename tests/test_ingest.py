@@ -20,13 +20,16 @@ class TestIngestPipeline(unittest.TestCase):
         cls.test_nas_dir = Path("d:/projects/square/test_data/mock_nas")
 
     def test_01_scanner(self):
-        scanner = PlateScanner(self.test_media_dir)
-        items = scanner.scan()
+        from square_core.folder_mapper import FolderMapper
+        mapper = FolderMapper(self.test_media_dir)
+        mapper.set_level(1, "seq")
+        mapper.set_level(2, "shot")
+        items = mapper.build_items()
         
-        self.assertGreater(len(items), 0, "Scanner should discover media items")
-        print(f"\n[Test] Scanner discovered {len(items)} items:")
+        self.assertGreater(len(items), 0, "Mapper should discover media items")
+        print(f"\n[Test] Mapper discovered {len(items)} items:")
         for i in items:
-            print(f"  - {i.name}: {i.sequence_code} | {i.shot_code} | {i.plate_name} ({i.frame_range_str})")
+            print(f"  - {i.name}: {i.sequence_code} | {i.shot_code} | {i.media_name} ({i.frame_range_str})")
         
         found_seqs = {item.sequence_code for item in items}
         self.assertIn("SQ010", found_seqs)

@@ -9,8 +9,10 @@ if str(root_dir) not in sys.path:
 
 from Qt import QtWidgets, QtCore
 from tools.ingest_tool.ui_main import MainWindow
+from tools.ingest_tool.widgets.crash_dialog import install_global_crash_handler
 
 def main():
+    install_global_crash_handler()
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Square VFX Ingest Tool")
 

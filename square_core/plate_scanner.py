@@ -59,12 +59,12 @@ class IngestSequenceItem:
     def infer_naming(self):
         """Uses regex to smart-detect Sequence, Shot, and Plate names from filename/path."""
         text_to_search = self.name + " " + (self.files[0] if self.files else "")
-        
+
         # Match Sequence (e.g. SQ010, seq_01, sq100)
         sq_match = re.search(r"(?i)(?:SQ|seq)[-_]?(\d{2,4})", text_to_search)
         if sq_match:
             self.sequence_code = f"SQ{int(sq_match.group(1)):03d}"
-            
+
         # Match Shot (e.g. SH0100, shot_10, sh100)
         sh_match = re.search(r"(?i)(?:SH|shot)[-_]?(\d{2,4})", text_to_search)
         if sh_match:
@@ -90,7 +90,7 @@ class IngestSequenceItem:
 
 
 class PlateScanner:
-    """Scans incoming media directories for sequences and single files."""
+    """Scans incoming media directories for sequences and single files with deep directory robustness."""
 
     def __init__(self, search_path):
         self.search_path = Path(search_path)
@@ -106,7 +106,12 @@ class PlateScanner:
         pattern_dotted = re.compile(r"^(.*?)[._](\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
         pattern_standalone = re.compile(r"^(\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
 
-        for root, _, files in os.walk(self.search_path):
+        # Iterative safe directory walk with error catching & long path support
+        root_path_str = str(self.search_path.resolve())
+        if os.name == 'nt' and not root_path_str.startswith('\\\\?\\') and len(root_path_str) > 240:
+            root_path_str = '\\\\?\\' + root_path_str
+
+        for root, dirs, files in os.walk(root_path_str, onerror=lambda err: None, followlinks=False):
             folder_name = os.path.basename(root)
             for file in files:
                 filepath = os.path.join(root, file)

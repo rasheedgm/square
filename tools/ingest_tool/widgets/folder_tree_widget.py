@@ -519,8 +519,15 @@ class FolderTreeWidget(QtWidgets.QWidget):
                     self._style_folder_item(item, level)
                 else:
                     mtype = self._mapper.get_media_type(p)
-                    item.setData(0, ROLE_MEDIA_TYPE, mtype)
-                    clr = "#FBBF24" if mtype else ("#5B7BC4" if kind == "video" else "#4B6A8A")
+                    rule  = self._mapper.get_token_rule(p)
+                    ov    = self._mapper._item_overrides.get(self._mapper._norm_path(p))
+
+                    badge = mtype
+                    if not badge and (rule or ov):
+                        badge = (ov.get("media_type") if ov else None) or (ov.get("media_name") if ov else None) or (ov.get("sequence_code") if ov else None) or "TOKEN TAG"
+
+                    item.setData(0, ROLE_MEDIA_TYPE, badge)
+                    clr = "#FBBF24" if badge else ("#5B7BC4" if kind == "video" else "#4B6A8A")
                     item.setForeground(0, QtGui.QColor(clr))
             for i in range(item.childCount()):
                 walk(item.child(i))

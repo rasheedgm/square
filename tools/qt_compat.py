@@ -42,3 +42,4 @@ EXTENDED_SELECTION      = get_qt_enum(QtWidgets.QAbstractItemView, "SelectionMod
 SCROLLBAR_AS_NEEDED     = get_qt_enum(QtCore.Qt, "ScrollBarPolicy", "ScrollBarAsNeeded")
 SCROLLBAR_ALWAYS_OFF    = get_qt_enum(QtCore.Qt, "ScrollBarPolicy", "ScrollBarAlwaysOff")
 SCROLLBAR_ALWAYS_ON     = get_qt_enum(QtCore.Qt, "ScrollBarPolicy", "ScrollBarAlwaysOn")
+TOOLBUTTON_INSTANT_POPUP = get_qt_enum(QtWidgets.QToolButton, "ToolButtonPopupMode", "InstantPopup")

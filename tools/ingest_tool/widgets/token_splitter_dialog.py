@@ -11,6 +11,7 @@ from square_core.token_parser import (
     parse_string_with_token_rule,
 )
 from square_core.config import StudioConfig
+from tools.qt_compat import TOOLBUTTON_INSTANT_POPUP
 
 QDialog = QtWidgets.QDialog
 QVBoxLayout = QtWidgets.QVBoxLayout
@@ -193,7 +194,7 @@ class TokenSplitterDialog(QDialog):
         # Dropdown button for Media Name and Media Types
         self.btn_tag_media = QToolButton()
         self.btn_tag_media.setText("Tag Media Name / Type ▼")
-        self.btn_tag_media.setPopupMode(QToolButton.InstantPopup)
+        self.btn_tag_media.setPopupMode(TOOLBUTTON_INSTANT_POPUP)
         self.btn_tag_media.setStyleSheet("background-color: #78350F; color: #FBBF24; font-weight: bold; padding: 4px 8px;")
 
         media_menu = QMenu(self)

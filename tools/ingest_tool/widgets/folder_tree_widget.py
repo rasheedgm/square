@@ -24,7 +24,7 @@ from square_core.folder_mapper import (
     LEVEL_SEQ, LEVEL_SHOT, LEVEL_MEDIA_NAME, LEVEL_MEDIA_TYPE, LEVEL_VERSION,
     SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS,
 )
-from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION
+from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED
 
 # ── Colours for tagged-folder text ──────────────────────────────────
 LEVEL_FG = {
@@ -266,7 +266,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._tree.setAnimated(True)
         self._tree.setUniformRowHeights(True)
         self._tree.setIconSize(QtCore.QSize(14, 14))
-        self._tree.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        self._tree.setHorizontalScrollBarPolicy(SCROLLBAR_AS_NEEDED)
         # Attach pill delegate — draws level tags on folder rows
         self._pill_delegate = TagPillDelegate(self._tree)
         self._tree.setItemDelegateForColumn(0, self._pill_delegate)

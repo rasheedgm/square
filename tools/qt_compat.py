@@ -43,3 +43,5 @@ SCROLLBAR_AS_NEEDED     = get_qt_enum(QtCore.Qt, "ScrollBarPolicy", "ScrollBarAs
 SCROLLBAR_ALWAYS_OFF    = get_qt_enum(QtCore.Qt, "ScrollBarPolicy", "ScrollBarAlwaysOff")
 SCROLLBAR_ALWAYS_ON     = get_qt_enum(QtCore.Qt, "ScrollBarPolicy", "ScrollBarAlwaysOn")
 TOOLBUTTON_INSTANT_POPUP = get_qt_enum(QtWidgets.QToolButton, "ToolButtonPopupMode", "InstantPopup")
+HEADER_RESIZE_STRETCH   = get_qt_enum(QtWidgets.QHeaderView, "ResizeMode", "Stretch")
+HEADER_RESIZE_TO_CONTENTS = get_qt_enum(QtWidgets.QHeaderView, "ResizeMode", "ResizeToContents")

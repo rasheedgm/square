@@ -24,7 +24,7 @@ from square_core.folder_mapper import (
     LEVEL_SEQ, LEVEL_SHOT, LEVEL_MEDIA_NAME, LEVEL_MEDIA_TYPE, LEVEL_VERSION,
     SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS,
 )
-from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED
+from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED
 
 # ── Colours for tagged-folder text ──────────────────────────────────
 LEVEL_FG = {
@@ -764,7 +764,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         existing_rule = self._mapper.get_token_rule(path) if self._mapper else None
         dlg = TokenSplitterDialog(raw_text=path.name, current_rule=existing_rule, parent=self)
         exec_res = dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
-        if exec_res == QtWidgets.QDialog.Accepted:
+        if exec_res == DIALOG_ACCEPTED:
             rule = dlg.current_rule
 
             if dlg.apply_to_all_level:

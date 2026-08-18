@@ -1,7 +1,7 @@
 from Qt import QtWidgets, QtCore, QtGui
 from square_core.config import StudioConfig
 from square_core.kitsu_client import KitsuClient
-from tools.qt_compat import ECHO_MODE_PASSWORD
+from tools.qt_compat import ECHO_MODE_PASSWORD, HEADER_RESIZE_STRETCH
 
 class SettingsDialog(QtWidgets.QDialog):
     """Settings modal for configuring Kitsu credentials and NAS storage paths."""
@@ -97,7 +97,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.media_types_table = QtWidgets.QTableWidget()
         self.media_types_table.setColumnCount(2)
         self.media_types_table.setHorizontalHeaderLabels(["Media Type", "NAS Directory Path Pattern Template"])
-        self.media_types_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.Stretch)
+        self.media_types_table.horizontalHeader().setSectionResizeMode(1, HEADER_RESIZE_STRETCH)
         self.media_types_table.setMinimumHeight(120)
 
         self._populate_media_types_table()

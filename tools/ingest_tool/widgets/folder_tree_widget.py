@@ -24,7 +24,7 @@ from square_core.folder_mapper import (
     LEVEL_SEQ, LEVEL_SHOT, LEVEL_MEDIA_NAME, LEVEL_MEDIA_TYPE, LEVEL_VERSION,
     SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS,
 )
-from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED
+from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED, PEN_STYLE_NO_PEN
 
 # ── Colours for tagged-folder text ──────────────────────────────────
 LEVEL_FG = {
@@ -106,10 +106,7 @@ class TagPillDelegate(QtWidgets.QStyledItemDelegate):
         rect   = QtCore.QRect(px, py, pw, ph)
 
         painter.setBrush(QtGui.QColor(bg_hex))
-        try:
-            painter.setPen(QtCore.Qt.PenStyle.NoPen)
-        except AttributeError:
-            painter.setPen(QtCore.Qt.NoPen)
+        painter.setPen(PEN_STYLE_NO_PEN)
         painter.drawRoundedRect(rect, 3, 3)
 
         f = QtGui.QFont(painter.font())

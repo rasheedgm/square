@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from Qt import QtWidgets, QtCore, QtGui
+from tools.qt_compat import TEXT_SELECTABLE_BY_MOUSE, CURSOR_POINTING_HAND
 
 QDialog = QtWidgets.QDialog
 QVBoxLayout = QtWidgets.QVBoxLayout
@@ -16,7 +17,6 @@ QLabel = QtWidgets.QLabel
 QTextEdit = QtWidgets.QTextEdit
 QPushButton = QtWidgets.QPushButton
 QApplication = QtWidgets.QApplication
-Qt = QtCore.Qt
 
 
 class CrashReportDialog(QDialog):
@@ -62,7 +62,7 @@ class CrashReportDialog(QDialog):
 
         # Error Type Banner
         err_banner = QLabel(f"<b>Exception:</b> {self.exc_type.__name__}: {self.exc_value}")
-        err_banner.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        err_banner.setTextInteractionFlags(TEXT_SELECTABLE_BY_MOUSE)
         err_banner.setStyleSheet("background-color: #1F2937; color: #F87171; border: 1px solid #374151; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 12px;")
         layout.addWidget(err_banner)
 
@@ -80,7 +80,7 @@ class CrashReportDialog(QDialog):
         btn_layout = QHBoxLayout()
 
         self.copy_btn = QPushButton("📋 Copy Traceback")
-        self.copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_btn.setCursor(CURSOR_POINTING_HAND)
         self.copy_btn.setStyleSheet(
             "QPushButton { background-color: #3B82F6; color: white; font-weight: bold; border-radius: 6px; padding: 8px 16px; }"
             "QPushButton:hover { background-color: #2563EB; }"
@@ -88,7 +88,7 @@ class CrashReportDialog(QDialog):
         self.copy_btn.clicked.connect(self._copy_traceback)
 
         self.save_btn = QPushButton("💾 Save Log...")
-        self.save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_btn.setCursor(CURSOR_POINTING_HAND)
         self.save_btn.setStyleSheet(
             "QPushButton { background-color: #374151; color: white; border-radius: 6px; padding: 8px 16px; }"
             "QPushButton:hover { background-color: #4B5563; }"
@@ -96,7 +96,7 @@ class CrashReportDialog(QDialog):
         self.save_btn.clicked.connect(self._save_log)
 
         close_btn = QPushButton("Close")
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.setCursor(CURSOR_POINTING_HAND)
         close_btn.setStyleSheet(
             "QPushButton { background-color: #1F2937; color: #9CA3AF; border: 1px solid #374151; border-radius: 6px; padding: 8px 16px; }"
             "QPushButton:hover { background-color: #374151; color: white; }"

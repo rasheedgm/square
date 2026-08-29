@@ -25,9 +25,8 @@ def run_e2e_demo():
     print("=" * 75)
 
     # 1. Create sample incoming plates
-    create_sample_media()
-    incoming_dir = Path("d:/projects/square/test_data/incoming_plates")
-    nas_root = Path("d:/projects/square/test_data/studio_nas")
+    incoming_dir = create_sample_media()
+    nas_root = root_dir / "test_data" / "studio_nas"
 
     if os.path.exists(nas_root):
         shutil.rmtree(nas_root)

@@ -6,6 +6,7 @@ Tests Scenarios A, B, and C with dummy files and folders.
 import sys
 import os
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from square_core.config import StudioConfig
 from tools.ingest_tool.widgets.token_splitter_dialog import TokenSplitterDialog
 
 
-TEST_BASE_DIR = Path("C:/tmp/square_test_scenarios")
+TEST_BASE_DIR = Path(tempfile.gettempdir()) / "square_test_scenarios"
 
 
 class TestTokenArchitecture(unittest.TestCase):

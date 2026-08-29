@@ -8,8 +8,7 @@ from Qt import QtCore, QtWidgets, QtGui
 from square_core import __version__
 from square_core.config import StudioConfig
 from square_core.kitsu_client import KitsuClient
-from square_core.plate_scanner import MediaScanner, PlateScanner
-from square_core.folder_mapper import FolderMapper
+from square_core.plate_scanner import MediaScanner
 from square_core.nas_manager import NASManager
 from square_core.proxy_generator import ProxyGenerator
 
@@ -605,9 +604,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._start_nas_check(current_items)
         except Exception as e:
             logger.error(f"[IngestMainUI] Error in on_load_media: {e}", exc_info=True)
-            with open("gui_test_step.log", "a", encoding="utf-8") as f:
-                import traceback
-                f.write(f"ON_LOAD_MEDIA_ERROR:\n{traceback.format_exc()}\n")
             raise e
 
     def on_scan_folder(self, root_path, folder_mapper=None, selected_paths=None, is_update=False):

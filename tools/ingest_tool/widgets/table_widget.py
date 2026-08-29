@@ -172,8 +172,11 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._refresh_table()
 
     def has_unresolved_conflicts(self) -> bool:
-        return any(s == STATUS_CONFLICT for s in self.item_status.values()
-                   if id not in self.item_discarded)
+        return any(
+            status == STATUS_CONFLICT
+            for key, status in self.item_status.items()
+            if key not in self.item_discarded
+        )
 
     def get_valid_ingest_items(self):
         """
@@ -462,6 +465,9 @@ class IngestTableWidget(QtWidgets.QWidget):
             self.item_discarded.add(key)
         else:
             self.item_discarded.discard(key)
+        # Discarding/restoring a row can resolve (or re-create) a conflict with
+        # its siblings, so re-derive statuses before refreshing the table.
+        self._run_conflict_detection()
         self._refresh_table()
 
     def _on_cell_edited(self, cell_item):

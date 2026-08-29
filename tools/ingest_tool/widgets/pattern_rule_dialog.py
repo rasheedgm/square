@@ -12,7 +12,7 @@ from square_core.folder_mapper import (
     LEVEL_SEQ, LEVEL_SHOT, LEVEL_MEDIA_NAME, LEVEL_MEDIA_TYPE, LEVEL_VERSION,
 )
 from square_core.config import StudioConfig
-from tools.qt_compat import DIALOG_ACCEPTED, HEADER_RESIZE_STRETCH, SELECT_ROWS
+from tools.qt_compat import DIALOG_ACCEPTED, HEADER_RESIZE_STRETCH, SELECT_ROWS, TEXT_SELECTABLE_BY_MOUSE
 
 LEVEL_CHOICES = [
     (LEVEL_SEQ,        "Sequence (SEQ)"),
@@ -49,15 +49,26 @@ class PatternRuleEditDialog(QtWidgets.QDialog):
         form.addRow("Rule Name:", self.name_edit)
 
         self.pattern_edit = QtWidgets.QLineEdit(rule.pattern if rule else seed_text)
-        self.pattern_edit.setPlaceholderText(r"e.g. (?i)^SH\d{3,4}$")
+        self.pattern_edit.setPlaceholderText(r"e.g. (?i)^SH\d{3,4}$  -- add a (...) capture group to extract just part of the name")
+        self.pattern_edit.setToolTip(
+            "No prefix is assumed and none is invented -- match whatever your\n"
+            "footage actually looks like (letters included, e.g. gfg_010_a).\n"
+            "Add a (...) capture group to extract just part of the matched name\n"
+            "(e.g. \"gfg_(\\d+_[a-z])\" captures \"010_a\"); without one, the whole\n"
+            "matched text is used as the tag value."
+        )
         self.pattern_edit.textChanged.connect(self._update_preview)
         form.addRow("Pattern:", self.pattern_edit)
 
         self.regex_radio = QtWidgets.QRadioButton("Regex")
         self.glob_radio  = QtWidgets.QRadioButton("Glob (*, ?)")
+        self.pattern_type_group = QtWidgets.QButtonGroup(self)
+        self.pattern_type_group.addButton(self.regex_radio)
+        self.pattern_type_group.addButton(self.glob_radio)
         self.regex_radio.setChecked(rule.is_regex if rule else True)
         self.glob_radio.setChecked((not rule.is_regex) if rule else False)
         self.regex_radio.toggled.connect(self._update_preview)
+        self.glob_radio.toggled.connect(self._update_preview)
         pat_type_row = QtWidgets.QHBoxLayout()
         pat_type_row.addWidget(self.regex_radio)
         pat_type_row.addWidget(self.glob_radio)
@@ -68,6 +79,32 @@ class PatternRuleEditDialog(QtWidgets.QDialog):
         self.target_combo.setCurrentText(rule.target if rule else default_target)
         self.target_combo.currentTextChanged.connect(self._update_preview)
         form.addRow("Match Against:", self.target_combo)
+
+        self.whole_scope_radio = QtWidgets.QRadioButton("Whole name (safer)")
+        self.anywhere_scope_radio = QtWidgets.QRadioButton("Anywhere in name")
+        self.whole_scope_radio.setToolTip(
+            "The entire name must match. Recommended: a rule meant for exact shot\n"
+            "folders like \"SH0100\" won't also catch \"SH0100_ref\" or \"SH0100_edl\"."
+        )
+        self.anywhere_scope_radio.setToolTip(
+            "Matches as a substring anywhere in the name -- useful for things like\n"
+            "\"anything with 'ref' in the filename\", but can over-match (e.g. a bare\n"
+            "\"sh10\" would also match \"sh10_ref\" and \"sh10_edl\", not just the shot itself)."
+        )
+        # QRadioButtons only auto-exclude when Qt considers them siblings at the
+        # time it matters -- nested layouts assembled after the fact don't
+        # reliably qualify, so use an explicit group rather than relying on it.
+        self.scope_group = QtWidgets.QButtonGroup(self)
+        self.scope_group.addButton(self.whole_scope_radio)
+        self.scope_group.addButton(self.anywhere_scope_radio)
+        self.whole_scope_radio.setChecked((rule.match_scope if rule else "whole") == "whole")
+        self.anywhere_scope_radio.setChecked((rule.match_scope if rule else "whole") == "anywhere")
+        self.whole_scope_radio.toggled.connect(self._update_preview)
+        self.anywhere_scope_radio.toggled.connect(self._update_preview)
+        scope_row = QtWidgets.QHBoxLayout()
+        scope_row.addWidget(self.whole_scope_radio)
+        scope_row.addWidget(self.anywhere_scope_radio)
+        form.addRow("Match Scope:", scope_row)
 
         self.any_depth_check = QtWidgets.QCheckBox("Any depth")
         self.any_depth_check.setChecked(True if not rule else (rule.min_depth is None and rule.max_depth is None))
@@ -142,6 +179,8 @@ class PatternRuleEditDialog(QtWidgets.QDialog):
         layout.addLayout(form)
 
         self.preview_lbl = QtWidgets.QLabel("0 matches")
+        self.preview_lbl.setWordWrap(True)
+        self.preview_lbl.setTextInteractionFlags(TEXT_SELECTABLE_BY_MOUSE)
         self.preview_lbl.setStyleSheet("color:#60A5FA; font-weight:bold;")
         layout.addWidget(self.preview_lbl)
 
@@ -182,6 +221,7 @@ class PatternRuleEditDialog(QtWidgets.QDialog):
             is_regex=self.regex_radio.isChecked(),
             target=self.target_combo.currentText(),
             min_depth=min_d, max_depth=max_d,
+            match_scope="whole" if self.whole_scope_radio.isChecked() else "anywhere",
             action=action,
             level=self.level_combo.currentData() if action == ACTION_LEVEL else None,
             media_type=self.mtype_combo.currentText() if action == ACTION_MEDIA_TYPE else None,
@@ -191,11 +231,20 @@ class PatternRuleEditDialog(QtWidgets.QDialog):
     def _update_preview(self, *_args):
         rule = self._current_rule()
         try:
+            samples = self.mapper.sample_pattern_matches(rule, limit=5) if self.mapper else []
             count = self.mapper.count_pattern_matches(rule) if self.mapper else 0
-            self.preview_lbl.setText(f"{count} match{'es' if count != 1 else ''} in current tree")
-            self.preview_lbl.setStyleSheet(
-                "color:#60A5FA; font-weight:bold;" if count else "color:#F59E0B; font-weight:bold;"
-            )
+            if not count:
+                self.preview_lbl.setText("0 matches in current tree")
+                self.preview_lbl.setStyleSheet("color:#F59E0B; font-weight:bold;")
+                return
+            lines = [f"{count} match{'es' if count != 1 else ''} in current tree -- extracted value shown:"]
+            for name, extracted in samples:
+                shown_name = name if len(name) <= 40 else name[:37] + "..."
+                lines.append(f"  {shown_name}  →  \"{extracted}\"")
+            if count > len(samples):
+                lines.append(f"  ... and {count - len(samples)} more")
+            self.preview_lbl.setText("\n".join(lines))
+            self.preview_lbl.setStyleSheet("color:#60A5FA; font-weight:bold;")
         except Exception as e:
             self.preview_lbl.setText(f"Invalid pattern: {e}")
             self.preview_lbl.setStyleSheet("color:#EF4444; font-weight:bold;")

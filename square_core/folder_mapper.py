@@ -46,18 +46,25 @@ ACTION_MEDIA_TYPE    = "media_type"
 ACTION_TOKEN_PRESET  = "token_preset"
 
 # ------------------------------------------------------------------
-# Auto-detection regexes (search in compound names too)
+# Auto-detection regexes -- best-effort guess only (the "Auto-Detect" button),
+# never applied silently. Anchored to the WHOLE folder name deliberately: a
+# looser "search anywhere" match would treat "sh10_ref" or "sh10_edl" (a
+# reference/EDL folder named after the shot it belongs to, not the shot
+# folder itself) as if they were the shot folder, which is wrong. This is
+# still just a common-convention guess -- studios that don't use SH/SQ
+# prefixes at all should tag manually or with a Pattern Rule instead of
+# relying on this.
 # ------------------------------------------------------------------
-RE_SEQ_PART   = re.compile(r"(?i)(?:^|[_\-])(?:SQ|seq|reel|ep)[_\-]?(\d{2,4})(?:[_\-]|$)")
-RE_SHOT_PART  = re.compile(r"(?i)(?:^|[_\-])(?:SH|shot|sc)[_\-]?(\d{2,4})(?:[_\-]|$)")
-RE_MEDIA_PART = re.compile(r"(?i)(?:^|[_\-])(?:PL|plate|plates?|img|render|raw|media)[_\-]?(\w*)(?:[_\-]|$)")
+RE_SEQ_PART   = re.compile(r"(?i)^(?:SQ|seq|reel|ep)[_\-]?(\d{2,4})$")
+RE_SHOT_PART  = re.compile(r"(?i)^(?:SH|shot|sc)[_\-]?(\d{2,4})$")
+RE_MEDIA_PART = re.compile(r"(?i)^(?:PL|plate|plates?|img|render|raw|media)[_\-]?(\w*)$")
 
 
 def _detect_level(folder_name: str):
     """Return the single dominant level for a folder name, or None."""
-    has_seq   = bool(RE_SEQ_PART.search(folder_name))
-    has_shot  = bool(RE_SHOT_PART.search(folder_name))
-    has_media = bool(RE_MEDIA_PART.search(folder_name))
+    has_seq   = bool(RE_SEQ_PART.match(folder_name))
+    has_shot  = bool(RE_SHOT_PART.match(folder_name))
+    has_media = bool(RE_MEDIA_PART.match(folder_name))
     if has_media and has_shot:
         return LEVEL_MEDIA_NAME
     if has_shot:
@@ -98,6 +105,7 @@ class PatternRule:
 
     def __init__(self, name="Custom Pattern", pattern="", is_regex=True,
                  target="folder", min_depth=None, max_depth=None,
+                 match_scope="whole",
                  action=ACTION_LEVEL, level=None, media_type=None, token_preset_name=None):
         self.name = name
         self.pattern = pattern or ""
@@ -105,6 +113,11 @@ class PatternRule:
         self.target = target if target in ("folder", "file", "both") else "folder"
         self.min_depth = min_depth
         self.max_depth = max_depth
+        # "whole": the entire name must match (the safe default -- a rule meant
+        # for exact shot folders like "SH0100" won't also catch "SH0100_ref").
+        # "anywhere": matches as a substring anywhere in the name -- useful for
+        # e.g. "anything with 'ref' in the filename".
+        self.match_scope = match_scope if match_scope in ("whole", "anywhere") else "whole"
         self.action = action if action in (ACTION_LEVEL, ACTION_MEDIA_TYPE, ACTION_TOKEN_PRESET) else ACTION_LEVEL
         self.level = _canonicalize_level(level) if action == ACTION_LEVEL else None
         self.media_type = media_type
@@ -119,6 +132,7 @@ class PatternRule:
             "target": self.target,
             "min_depth": self.min_depth,
             "max_depth": self.max_depth,
+            "match_scope": self.match_scope,
             "action": self.action,
             "level": self.level,
             "media_type": self.media_type,
@@ -136,6 +150,7 @@ class PatternRule:
             target=data.get("target", "folder"),
             min_depth=data.get("min_depth"),
             max_depth=data.get("max_depth"),
+            match_scope=data.get("match_scope", "whole"),
             action=data.get("action", ACTION_LEVEL),
             level=data.get("level"),
             media_type=data.get("media_type"),
@@ -148,21 +163,35 @@ class PatternRule:
             self._compiled = re.compile(pat, re.IGNORECASE)
         return self._compiled
 
-    def matches(self, name: str, depth: int, is_folder: bool) -> bool:
+    def extract(self, name: str, depth: int, is_folder: bool):
+        """
+        Returns the extracted tag value if this rule applies to `name`, else
+        None. If the pattern has a capture group, group(1) is returned as the
+        value -- so a name like "gfg_010_a" can be captured as exactly
+        "010_a", with no prefix invented and no letters discarded. Without a
+        capture group, the whole matched text is used.
+        """
         if not self.pattern:
-            return False
+            return None
         if self.target == "folder" and not is_folder:
-            return False
+            return None
         if self.target == "file" and is_folder:
-            return False
+            return None
         if self.min_depth is not None and depth < self.min_depth:
-            return False
+            return None
         if self.max_depth is not None and depth > self.max_depth:
-            return False
+            return None
         try:
-            return bool(self._regex().search(name))
+            rx = self._regex()
+            m = rx.fullmatch(name) if self.match_scope == "whole" else rx.search(name)
         except re.error:
-            return False
+            return None
+        if not m:
+            return None
+        return m.group(1) if m.groups() else m.group(0)
+
+    def matches(self, name: str, depth: int, is_folder: bool) -> bool:
+        return self.extract(name, depth, is_folder) is not None
 
 
 class FolderMapper:
@@ -190,7 +219,7 @@ class FolderMapper:
         self._table_state      = []   # list of serialized item dicts
 
         self._pattern_rules              = []   # list of PatternRule dicts, active for this root
-        self._pattern_applied_folder_levels = {}  # resolved path -> level (lower precedence than _folder_overrides)
+        self._pattern_applied_folder_levels = {}  # resolved path -> (level, extracted_value); lower precedence than _folder_overrides
         self._pattern_applied_media_types   = {}  # resolved path -> media type (lower precedence than _media_types)
         self._pattern_applied_item_overrides = {} # resolved path -> overrides dict (lower precedence than _item_overrides)
 
@@ -293,7 +322,24 @@ class FolderMapper:
     def get_level_for_folder(self, path):
         """Return the effective level for this exact folder: manual override first, then pattern-rule match."""
         key = self._norm_path(path)
-        return self._folder_overrides.get(key) or self._pattern_applied_folder_levels.get(key)
+        if key in self._folder_overrides:
+            return self._folder_overrides[key]
+        hit = self._pattern_applied_folder_levels.get(key)
+        return hit[0] if hit else None
+
+    def get_extracted_value_for_folder(self, path):
+        """
+        Return the value a pattern rule's capture group extracted for this
+        exact folder (e.g. "010_a" out of "gfg_010_a"), or None if this
+        folder's level came from a manual tag or a depth rule instead --
+        those have no extraction step, so callers should fall back to using
+        the folder's own name.
+        """
+        key = self._norm_path(path)
+        if key in self._folder_overrides:
+            return None
+        hit = self._pattern_applied_folder_levels.get(key)
+        return hit[1] if hit else None
 
     # ------------------------------------------------------------------
     # Tag API — pattern rules (any depth, reusable)
@@ -316,24 +362,41 @@ class FolderMapper:
             self._pattern_rules.pop(index)
             self.apply_pattern_rules()
 
-    def count_pattern_matches(self, rule) -> int:
-        """Number of folders/files under root that would currently match a single rule (for live preview in the tagging UI)."""
+    def _iter_pattern_matches(self, rule):
+        """Yields (name, extracted_value) for every folder/file under root that matches `rule`."""
         if not self.root.exists() or not rule.pattern:
-            return 0
-        count = 0
+            return
         for dirpath, dirnames, filenames in os.walk(self.root):
             dirnames[:] = [d for d in dirnames if not d.startswith('.')]
             folder = Path(dirpath).resolve()
             depth = self.depth_of_path(folder)
             if depth <= 0:
                 continue
-            if rule.target in ("folder", "both") and rule.matches(folder.name, depth, True):
-                count += 1
+            if rule.target in ("folder", "both"):
+                extracted = rule.extract(folder.name, depth, True)
+                if extracted is not None:
+                    yield folder.name, extracted
             if rule.target in ("file", "both"):
                 for fn in filenames:
-                    if not fn.startswith('.') and rule.matches(fn, depth, False):
-                        count += 1
-        return count
+                    if fn.startswith('.'):
+                        continue
+                    extracted = rule.extract(fn, depth, False)
+                    if extracted is not None:
+                        yield fn, extracted
+
+    def count_pattern_matches(self, rule) -> int:
+        """Number of folders/files under root that would currently match a single rule (for live preview in the tagging UI)."""
+        return sum(1 for _ in self._iter_pattern_matches(rule))
+
+    def sample_pattern_matches(self, rule, limit=5):
+        """Up to `limit` (name, extracted_value) pairs a rule matches -- lets the tagging UI show
+        exactly what would be tagged and what value would be extracted, before it's applied."""
+        samples = []
+        for name, extracted in self._iter_pattern_matches(rule):
+            samples.append((name, extracted))
+            if len(samples) >= limit:
+                break
+        return samples
 
     def apply_pattern_rules(self):
         """
@@ -368,8 +431,9 @@ class FolderMapper:
 
             if level_rules:
                 for rule in level_rules:
-                    if rule.matches(folder.name, depth, is_folder=True):
-                        self._pattern_applied_folder_levels[self._norm_path(folder)] = rule.level
+                    extracted = rule.extract(folder.name, depth, is_folder=True)
+                    if extracted is not None:
+                        self._pattern_applied_folder_levels[self._norm_path(folder)] = (rule.level, extracted)
                         break
 
             if leaf_rules:
@@ -613,9 +677,9 @@ class FolderMapper:
 
                 if ext in SUPPORTED_VIDEO_EXTS:
                     item = IngestSequenceItem(filename, [filepath], ext, is_video=True)
-                    if seq_name:   item.sequence_code = self._normalise_seq(seq_name)
-                    if shot_name:  item.shot_code     = self._normalise_shot(shot_name)
-                    if media_name: item.media_name    = self._normalise_plate(media_name); item.plate_name = item.media_name
+                    if seq_name:   item.sequence_code = seq_name
+                    if shot_name:  item.shot_code     = shot_name
+                    if media_name: item.media_name    = media_name; item.plate_name = item.media_name
                     if mtype_val:  item.media_type    = mtype_val
                     if ver_val:
                         m_v = re.search(r"v?(\d+)", ver_val, re.IGNORECASE)
@@ -656,9 +720,9 @@ class FolderMapper:
 
             item = IngestSequenceItem(base_prefix, file_list, ext, is_video=False)
             seq_n, shot_n, media_n, mtype_n, ver_n = group_meta.get((folder_str, base_prefix, ext), ("", "", "", "", ""))
-            if seq_n:   item.sequence_code = self._normalise_seq(seq_n)
-            if shot_n:  item.shot_code     = self._normalise_shot(shot_n)
-            if media_n: item.media_name    = self._normalise_plate(media_n); item.plate_name = item.media_name
+            if seq_n:   item.sequence_code = seq_n
+            if shot_n:  item.shot_code     = shot_n
+            if media_n: item.media_name    = media_n; item.plate_name = item.media_name
             if mtype_n: item.media_type    = mtype_n
             if ver_n:
                 m_v = re.search(r"v?(\d+)", ver_n, re.IGNORECASE)
@@ -827,9 +891,12 @@ class FolderMapper:
         type_depth  = next((d for d, l in self._depth_map.items() if l == LEVEL_MEDIA_TYPE), None)
         ver_depth   = next((d for d, l in self._depth_map.items() if l == LEVEL_VERSION),    None)
 
-        if seq_depth is not None:   seq_name   = self._ancestor_name(folder, seq_depth)
-        if shot_depth is not None:  shot_name  = self._ancestor_name(folder, shot_depth)
-        if media_depth is not None: media_name = self._ancestor_name(folder, media_depth)
+        # Depth-map-derived: the whole folder name, standardized if it has a
+        # recognizable prefix and passed through unchanged otherwise (never an
+        # invented "SQ"/"SH" prefix -- see _normalise_seq/_normalise_shot).
+        if seq_depth is not None:   seq_name   = self._normalise_seq(self._ancestor_name(folder, seq_depth))
+        if shot_depth is not None:  shot_name  = self._normalise_shot(self._ancestor_name(folder, shot_depth))
+        if media_depth is not None: media_name = self._normalise_plate(self._ancestor_name(folder, media_depth))
         if type_depth is not None:  media_type_val = self._ancestor_name(folder, type_depth)
         if ver_depth is not None:   version_val    = self._ancestor_name(folder, ver_depth)
 
@@ -846,16 +913,24 @@ class FolderMapper:
 
         for anc in ancestors:
             lvl = self.get_level_for_folder(anc)
+            if not lvl:
+                continue
+            # A manual override has no extraction step (there's no regex to have
+            # captured a sub-part) -- use the whole folder name, standardized the
+            # same way a depth rule would be. A pattern rule's own capture group
+            # already decided exactly what the value should be (e.g. "010_a" out
+            # of "gfg_010_a") -- use it as-is, with no further reformatting on top.
+            extracted = self.get_extracted_value_for_folder(anc)
             if lvl == LEVEL_SEQ:
-                seq_name = anc.name
+                seq_name = extracted if extracted is not None else self._normalise_seq(anc.name)
             elif lvl == LEVEL_SHOT:
-                shot_name = anc.name
+                shot_name = extracted if extracted is not None else self._normalise_shot(anc.name)
             elif lvl == LEVEL_MEDIA_NAME:
-                media_name = anc.name
+                media_name = extracted if extracted is not None else self._normalise_plate(anc.name)
             elif lvl == LEVEL_MEDIA_TYPE:
-                media_type_val = anc.name
+                media_type_val = extracted if extracted is not None else anc.name
             elif lvl == LEVEL_VERSION:
-                version_val = anc.name
+                version_val = extracted if extracted is not None else anc.name
 
         return seq_name, shot_name, media_name, media_type_val, version_val
 
@@ -872,16 +947,16 @@ class FolderMapper:
         return ""
 
     def _normalise_seq(self, name: str) -> str:
-        m = RE_SEQ_PART.search(name)
-        if m: return f"SQ{int(m.group(1)):03d}"
-        m = re.search(r"(\d{2,4})", name)
-        return f"SQ{int(m.group(1)):03d}" if m else name.upper()
+        """Standardizes a recognizable "SQ"/"seq" prefix; otherwise returns the
+        folder's own name unchanged -- never invents a prefix that wasn't there,
+        never discards letters/suffixes that were (e.g. "gfg_010_a" stays as-is)."""
+        from square_core.token_parser import normalise_code
+        return normalise_code(name, "SQ|seq|reel|ep", "SQ", 3)
 
     def _normalise_shot(self, name: str) -> str:
-        m = RE_SHOT_PART.search(name)
-        if m: return f"SH{int(m.group(1)):04d}"
-        m = re.search(r"(\d{2,4})", name)
-        return f"SH{int(m.group(1)):04d}" if m else name.upper()
+        """Same principle as _normalise_seq, for shot codes."""
+        from square_core.token_parser import normalise_code
+        return normalise_code(name, "SH|shot|sc", "SH", 4)
 
     def _normalise_plate(self, name: str) -> str:
         if not name:

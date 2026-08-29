@@ -209,17 +209,11 @@ DEFAULT_INGEST_PRESETS = {
         },
         "pattern_rules": []
     },
-    "Pattern-Based (SEQ/SHOT Anywhere)": {
-        "name": "Pattern-Based (SEQ/SHOT Anywhere)",
-        "depth_rules": {},
-        "pattern_rules": [
-            {"name": "Sequence folders anywhere", "pattern": r"(?i)^(?:SQ|seq)[-_]?\d{2,4}$", "is_regex": True,
-             "target": "folder", "min_depth": None, "max_depth": None, "action": "level", "level": "seq"},
-            {"name": "Shot folders anywhere", "pattern": r"(?i)^(?:SH|shot)[-_]?\d{2,4}$", "is_regex": True,
-             "target": "folder", "min_depth": None, "max_depth": None, "action": "level", "level": "shot"}
-        ]
-    }
 }
+# Deliberately no shipped example of a pattern-based preset: there is no
+# universal shot/seq naming convention (prefix or none, numeric or with
+# letters), so a real one is only meaningful once a studio builds and saves
+# it for their own footage via the Pattern Rule editor ("Tag by Pattern...").
 
 DEFAULT_MEDIA_TYPE_CONFIGS = {
     "Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/plates/{media_name}_v{version:03d}",

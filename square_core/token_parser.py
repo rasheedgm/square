@@ -100,6 +100,25 @@ def merge_token_indices(tokens, start_idx, end_idx, join_char="_"):
     return merged
 
 
+def normalise_code(raw_text, prefix_pattern, canonical_prefix, pad_width):
+    """
+    Recognizes a studio's own prefix convention if it's actually there (e.g.
+    a chip reading "SQ010" or "seq_10") and standardizes it to a canonical
+    zero-padded form. If the source has no recognizable prefix at all --
+    no prefix, letters mixed in ("gfg_010_a"), a different convention
+    entirely -- returns the source text unchanged. Never invents a prefix
+    that wasn't there and never discards characters (letters, suffixes)
+    that were.
+    """
+    if not raw_text:
+        return raw_text
+    text = raw_text.strip()
+    m = re.match(rf"(?i)^(?:{prefix_pattern})[-_]?(\d+)$", text)
+    if m:
+        return f"{canonical_prefix}{int(m.group(1)):0{pad_width}d}"
+    return text
+
+
 def parse_string_with_token_rule(text, token_rule):
     """
     Applies a TokenRule to a text string.
@@ -138,25 +157,19 @@ def parse_string_with_token_rule(text, token_rule):
                 valid_vals.append(tokens[idx])
         return "_".join(valid_vals) if valid_vals else None
 
-    # 1. Sequence Code
+    # 1. Sequence Code -- standardize a recognizable "SQ"/"seq" prefix if present;
+    # otherwise keep the chip's own text exactly (no invented prefix, letters kept).
     if "sequence_code" in mapping and mapping["sequence_code"]:
         raw_sq = get_joined_token_val(mapping["sequence_code"], role="sequence_code")
         if raw_sq:
-            digits = re.search(r"\d+", raw_sq)
-            if digits:
-                res["sequence_code"] = f"SQ{int(digits.group(0)):03d}"
-            else:
-                res["sequence_code"] = raw_sq.upper()
+            res["sequence_code"] = normalise_code(raw_sq, "SQ|seq|reel|ep", "SQ", 3)
 
-    # 2. Shot Code
+    # 2. Shot Code -- same principle: standardize a recognizable "SH"/"shot" prefix,
+    # otherwise pass the chip's own text through untouched.
     if "shot_code" in mapping and mapping["shot_code"]:
         raw_sh = get_joined_token_val(mapping["shot_code"], role="shot_code")
         if raw_sh:
-            digits = re.search(r"\d+", raw_sh)
-            if digits:
-                res["shot_code"] = f"SH{int(digits.group(0)):04d}"
-            else:
-                res["shot_code"] = raw_sh.upper()
+            res["shot_code"] = normalise_code(raw_sh, "SH|shot|sc", "SH", 4)
 
     # 3. Media Name
     key_name = "media_name" if "media_name" in mapping else ("plate_name" if "plate_name" in mapping else None)

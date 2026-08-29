@@ -4,10 +4,10 @@ import unittest
 from pathlib import Path
 
 from square_core.folder_mapper import (
-    FolderMapper, PatternRule,
+    FolderMapper, PatternRule, _detect_level,
     LEVEL_SEQ, LEVEL_SHOT, LEVEL_MEDIA_NAME, LEVEL_MEDIA_TYPE, LEVEL_VERSION,
 )
-from square_core.token_parser import TokenRule
+from square_core.token_parser import TokenRule, normalise_code, parse_string_with_token_rule
 
 
 class TestFolderMapperCrashFixes(unittest.TestCase):
@@ -94,9 +94,14 @@ class TestFolderMapperPatternRules(unittest.TestCase):
         self.assertEqual(mapper.level_of_path(self.tmp / "SQ010"), LEVEL_SHOT)
 
     def test_media_type_pattern_rule_on_filename(self):
+        # match_scope="anywhere" is required here on purpose: the safer default
+        # ("whole") would require the ENTIRE filename to be just "ref", which
+        # "extra_ref.mov" is not -- substring matching is an explicit opt-in,
+        # not the default, precisely so a bare "sh10" can't silently also
+        # match "sh10_ref"/"sh10_edl" alongside the real shot folder.
         mapper = FolderMapper(self.tmp)
         rule = PatternRule(name="ref files", pattern=r"(?i)ref", is_regex=True,
-                            target="file", action="media_type", media_type="Ref")
+                            target="file", match_scope="anywhere", action="media_type", media_type="Ref")
         mapper.set_pattern_rules([rule])
         self.assertEqual(mapper.count_pattern_matches(rule), 0)  # no "ref" filenames in this fixture yet
 
@@ -144,6 +149,94 @@ class TestApplyDepthTokenPreset(unittest.TestCase):
         self.assertEqual(items[0].shot_code, "SH0100")
         self.assertEqual(items[0].media_name, "PL01")
         self.assertEqual(items[0].version, 1)
+
+
+class TestNoAssumedShotSeqConvention(unittest.TestCase):
+    """
+    Real-world feedback: shot/seq names don't necessarily have an SH/SQ
+    prefix, aren't necessarily purely numeric (letters can be mixed in, e.g.
+    "gfg_010_a"), and a folder can legitimately contain "sh10" as a
+    substring for an unrelated reason (a "sh10_ref"/"sh10_edl" subfolder
+    holding reference material or an EDL for shot 10, not the shot folder
+    itself). None of that should be hardcoded away.
+    """
+
+    def test_normalise_code_never_invents_a_prefix(self):
+        # No prefix at all -- must be returned exactly as-is, not "SH0010".
+        self.assertEqual(normalise_code("0010", "SH|shot|sc", "SH", 4), "0010")
+        # Letters mixed in, no recognizable prefix -- preserved exactly.
+        self.assertEqual(normalise_code("gfg_010_a", "SH|shot|sc", "SH", 4), "gfg_010_a")
+        # A recognizable prefix IS present -- standardizing padding/case here
+        # is fine, since nothing is being invented that wasn't already implied.
+        self.assertEqual(normalise_code("sh100", "SH|shot|sc", "SH", 4), "SH0100")
+
+    def test_token_rule_shot_code_role_does_not_invent_prefix_or_drop_letters(self):
+        rule = TokenRule(name="r", delimiter="_", mapping={"shot_code": [0]})
+        # A bare numeric chip with no prefix -- kept exactly as-is, not "SH0100".
+        self.assertEqual(parse_string_with_token_rule("0100", rule)["shot_code"], "0100")
+        # A single-letter-code chip ("gfg") with no digits at all -- passed through untouched.
+        self.assertEqual(parse_string_with_token_rule("gfg_010_a", rule)["shot_code"], "gfg")
+
+        # A chip spanning all three tokens, with letters and no prefix, must
+        # survive completely intact -- no invented "SH", nothing dropped.
+        rule2 = TokenRule(name="r2", delimiter="_", mapping={"shot_code": [0, 1, 2]})
+        res = parse_string_with_token_rule("gfg_010_a", rule2)
+        self.assertEqual(res["shot_code"], "gfg_010_a")
+
+    def test_depth_map_does_not_invent_prefix_for_plain_folder_name(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "0100" / "PL01").mkdir(parents=True)
+        (tmp / "0100" / "PL01" / "a.1001.exr").write_text("x")
+
+        mapper = FolderMapper(tmp)
+        mapper.set_level(1, LEVEL_SHOT)
+        mapper.set_level(2, LEVEL_MEDIA_NAME)
+        items = mapper.build_items()
+        self.assertEqual(items[0].shot_code, "0100")  # not "SH0100"
+
+    def test_auto_detect_does_not_flag_ref_or_edl_subfolders_as_shots(self):
+        # "sh10_ref"/"sh10_edl" reference/EDL folders named after the shot they
+        # belong to must NOT be mistaken for the shot folder itself.
+        self.assertIsNone(_detect_level("sh10_ref"))
+        self.assertIsNone(_detect_level("sh10_edl"))
+        self.assertEqual(_detect_level("SH0100"), LEVEL_SHOT)
+        self.assertEqual(_detect_level("sh100"), LEVEL_SHOT)
+
+    def test_default_whole_name_pattern_rule_does_not_match_ref_and_edl_siblings(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "sh10").mkdir(parents=True)
+        (tmp / "sh10_ref").mkdir(parents=True)
+        (tmp / "sh10_edl").mkdir(parents=True)
+
+        # match_scope defaults to "whole" -- this rule must ONLY match the
+        # exact shot folder, not its ref/edl siblings that merely start with
+        # the same "sh10" text.
+        rule = PatternRule(name="shot", pattern=r"(?i)^sh\d+$", is_regex=True,
+                            target="folder", action="level", level=LEVEL_SHOT)
+        mapper = FolderMapper(tmp)
+        mapper.set_pattern_rules([rule])
+
+        matched_names = {name for name, _ in mapper.sample_pattern_matches(rule, limit=10)}
+        self.assertEqual(matched_names, {"sh10"})
+
+    def test_pattern_rule_capture_group_extracts_letters_with_no_invented_prefix(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "gfg_010_a" / "PL01").mkdir(parents=True)
+        (tmp / "gfg_010_a" / "PL01" / "a.1001.exr").write_text("x")
+
+        # Capture just the part after "gfg_" -- keeps the letter suffix, no
+        # "SH"/"SQ" prefix invented anywhere.
+        rule = PatternRule(name="shot", pattern=r"(?i)^gfg_(\d+_[a-z])$", is_regex=True,
+                            target="folder", action="level", level=LEVEL_SHOT)
+        mapper = FolderMapper(tmp)
+        mapper.set_level(2, LEVEL_MEDIA_NAME)
+        mapper.set_pattern_rules([rule])
+
+        items = mapper.build_items()
+        self.assertEqual(items[0].shot_code, "010_a")
 
 
 if __name__ == "__main__":

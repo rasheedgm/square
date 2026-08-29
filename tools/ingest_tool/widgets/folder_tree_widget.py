@@ -24,7 +24,14 @@ from square_core.folder_mapper import (
     LEVEL_SEQ, LEVEL_SHOT, LEVEL_MEDIA_NAME, LEVEL_MEDIA_TYPE, LEVEL_VERSION,
     SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS,
 )
+from tools.ingest_tool.widgets.pattern_rule_dialog import PatternRuleEditDialog, PatternRuleDialog
 from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED, PEN_STYLE_NO_PEN
+
+
+def _suggest_pattern_from_name(name: str) -> str:
+    """Seed a sensible regex for a pattern-tag rule from one example name (digit runs -> \\d+)."""
+    escaped = re.escape(name)
+    return re.sub(r"\d+", r"\\d+", escaped)
 
 # ── Colours for tagged-folder text ──────────────────────────────────
 LEVEL_FG = {
@@ -221,6 +228,12 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._refresh_preset_combo()
         self._preset_combo.activated.connect(self._on_preset_combo_activated)
 
+        self._patterns_btn = QtWidgets.QPushButton("Patterns…")
+        self._patterns_btn.setToolTip("Manage pattern-based tag rules for this incoming folder")
+        self._patterns_btn.setFixedHeight(28)
+        self._patterns_btn.setEnabled(False)
+        self._patterns_btn.clicked.connect(self._on_manage_patterns)
+
         self._clear_btn = QtWidgets.QPushButton("Clear")
         self._clear_btn.setToolTip("Remove all level tags")
         self._clear_btn.setFixedHeight(28)
@@ -229,6 +242,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
         btn_row.addWidget(self._browse_btn)
         btn_row.addWidget(self._preset_combo, stretch=1)
+        btn_row.addWidget(self._patterns_btn)
         btn_row.addWidget(self._clear_btn)
         layout.addLayout(btn_row)
 
@@ -373,6 +387,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
             "font-size:10px; color:#64748B; background:transparent;"
         )
         self._clear_btn.setEnabled(True)
+        self._patterns_btn.setEnabled(True)
         self._load_btn.setEnabled(True)
         self._update_btn.setEnabled(True)
         self._drop_hint.hide()
@@ -517,7 +532,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
                 else:
                     mtype = self._mapper.get_media_type(p)
                     rule  = self._mapper.get_token_rule(p)
-                    ov    = self._mapper._item_overrides.get(self._mapper._norm_path(p))
+                    ov    = self._mapper.get_effective_item_override(p)
 
                     badge = mtype
                     if not badge and (rule or ov):
@@ -614,6 +629,10 @@ class FolderTreeWidget(QtWidgets.QWidget):
         token_act.triggered.connect(
             lambda checked=False, i=item, p=path: self._open_token_splitter(i, p)
         )
+        pattern_act = menu.addAction("🏷️ Tag by Pattern…")
+        pattern_act.triggered.connect(
+            lambda checked=False, p=path: self._open_pattern_editor(p, default_target="folder")
+        )
 
         menu.addSeparator()
         clear_act = menu.addAction("Clear tag")
@@ -629,11 +648,11 @@ class FolderTreeWidget(QtWidgets.QWidget):
             menu.exec_(gp)
 
     def _refresh_preset_combo(self):
-        """Refreshes the hierarchy preset dropdown list with options + Save action."""
+        """Refreshes the Ingest Preset dropdown list with options + Save action."""
         self._preset_combo.blockSignals(True)
         self._preset_combo.clear()
         self._preset_combo.addItem("Presets ▼")
-        for name in self.config.hierarchy_presets.keys():
+        for name in self.config.ingest_presets.keys():
             self._preset_combo.addItem(f"  {name}")
         self._preset_combo.addItem("💾 Save Tagging as Preset…")
         self._preset_combo.blockSignals(False)
@@ -641,7 +660,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
     def _on_preset_combo_activated(self, index):
         text = self._preset_combo.itemText(index).strip()
         if text.startswith("💾 Save"):
-            self._on_save_hierarchy_preset()
+            self._on_save_ingest_preset()
         elif text.startswith("Presets"):
             return
         else:
@@ -649,49 +668,58 @@ class FolderTreeWidget(QtWidgets.QWidget):
             self._on_preset_selected(preset_name)
 
     def _on_preset_selected(self, preset_name):
-        """Applies a selected Tag Hierarchy Preset to the tree."""
-        if not self._mapper or preset_name not in self.config.hierarchy_presets:
+        """Applies a selected Ingest Preset (depth rules + pattern rules) to the tree."""
+        if not self._mapper or preset_name not in self.config.ingest_presets:
             return
 
-        data = self.config.hierarchy_presets[preset_name]
-        level_mappings = data.get("level_mappings", {})
+        data = self.config.ingest_presets[preset_name]
+        depth_rules = data.get("depth_rules", data.get("level_mappings", {}))
 
-        # Clear existing level tags
+        # Clear existing tags before applying the preset
         self._mapper.clear_all_levels()
 
-        # Apply level mappings
-        for depth_str, rule in level_mappings.items():
+        # Apply depth rules — "direct" tags the whole depth; "token_preset" parses
+        # every folder at that depth with a saved multi-field token rule.
+        for depth_str, rule in depth_rules.items():
             depth = int(depth_str)
             rule_type = rule.get("type", "direct")
             if rule_type == "direct" and "tag" in rule:
                 self._mapper.set_level(depth, rule["tag"])
+            elif rule_type == "token_preset" and "preset_name" in rule:
+                token_rule = self.config.token_presets.get(rule["preset_name"])
+                if token_rule:
+                    self._mapper.apply_depth_token_preset(depth, token_rule)
+
+        # Apply pattern rules (any-depth tagging)
+        self._mapper.set_pattern_rules(data.get("pattern_rules", []))
 
         self._mapper.save()
-        self.config.active_hierarchy_preset = preset_name
+        self.config.active_ingest_preset = preset_name
         self.config.save()
 
         self._refresh_item_colours()
         self._update_map_label()
 
-    def _on_save_hierarchy_preset(self):
-        """Saves current tree folder depth tags as a new Hierarchy Preset."""
+    def _on_save_ingest_preset(self):
+        """Saves the current tree's depth tags + pattern rules as a new Ingest Preset."""
         if not self._mapper:
             QtWidgets.QMessageBox.information(self, "Save Preset", "Please load a folder tree first before saving a preset.")
             return
 
-        text, ok = QtWidgets.QInputDialog.getText(self, "Save Tag Hierarchy Preset", "Preset Name:")
+        text, ok = QtWidgets.QInputDialog.getText(self, "Save Ingest Preset", "Preset Name:")
         if ok and text.strip():
             preset_name = text.strip()
-            level_mappings = {}
-            for depth, tag in self._mapper._depth_map.items():
-                level_mappings[str(depth)] = {"type": "direct", "tag": tag}
-
+            depth_rules = {
+                str(depth): {"type": "direct", "tag": tag}
+                for depth, tag in self._mapper._depth_map.items()
+            }
             preset_data = {
                 "name": preset_name,
-                "level_mappings": level_mappings
+                "depth_rules": depth_rules,
+                "pattern_rules": [r.to_dict() for r in self._mapper.get_pattern_rules()],
             }
-            self.config.hierarchy_presets[preset_name] = preset_data
-            self.config.active_hierarchy_preset = preset_name
+            self.config.ingest_presets[preset_name] = preset_data
+            self.config.active_ingest_preset = preset_name
             self.config.save()
 
             self._refresh_preset_combo()
@@ -726,6 +754,10 @@ class FolderTreeWidget(QtWidgets.QWidget):
         token_act = menu.addAction("🏷️ Tag Name Tokens…")
         token_act.triggered.connect(
             lambda checked=False, i=item, p=path: self._open_token_splitter(i, p)
+        )
+        pattern_act = menu.addAction("🏷️ Tag by Pattern…")
+        pattern_act.triggered.connect(
+            lambda checked=False, p=path: self._open_pattern_editor(p, default_target="file")
         )
 
         has_tags = bool(current_type or (self._mapper and (self._mapper.get_token_rule(path) or self._mapper._item_overrides.get(self._mapper._norm_path(path)))))
@@ -795,6 +827,26 @@ class FolderTreeWidget(QtWidgets.QWidget):
             if self._mapper:
                 self._mapper.save()
             self._refresh_item_colours()
+
+    def _open_pattern_editor(self, path: Path, default_target="folder"):
+        """Open the pattern-rule editor seeded from one example folder/file name."""
+        if not self._mapper:
+            return
+        seed = _suggest_pattern_from_name(path.name)
+        dlg = PatternRuleEditDialog(self._mapper, seed_text=seed, default_target=default_target, parent=self)
+        res = dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
+        if res == DIALOG_ACCEPTED and dlg.result_rule:
+            self._mapper.add_pattern_rule(dlg.result_rule)
+            self._mapper.save()
+            self._refresh_item_colours()
+
+    def _on_manage_patterns(self):
+        """Open the full list of active pattern rules for this root."""
+        if not self._mapper:
+            return
+        dlg = PatternRuleDialog(self._mapper, parent=self)
+        dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
+        self._refresh_item_colours()
 
     def _set_media_type(self, item, path: Path, type_name):
         """Assign or clear a media type label on a media tree item."""

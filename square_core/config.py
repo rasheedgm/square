@@ -20,6 +20,14 @@ DEFAULT_SHOT_TASKS = [
     "Comp"
 ]
 
+# Copy engine defaults
+DEFAULT_COPY_WORKERS = 4
+VALID_TRANSFER_MODES = ("copy", "hardlink", "symlink")
+
+# Media types that get a low-res preview MOV generated + uploaded to Kitsu.
+# Non-visual types (Audio, LUT, Matte, ...) are skipped unless added here.
+DEFAULT_PREVIEW_ENABLED_MEDIA_TYPES = ["Plate", "Ref", "BG Plate", "Comp Render", "Precomp"]
+
 # Naming Convention Regex Templates
 REGEX_SEQUENCE = r"(?i)(?:SQ|seq)[-_]?(\d{3,4})"
 REGEX_SHOT = r"(?i)(?:SH|shot)[-_]?(\d{3,4})"
@@ -178,21 +186,38 @@ DEFAULT_TOKEN_PRESETS = {
     }
 }
 
-DEFAULT_HIERARCHY_PRESETS = {
+# Ingest Presets — the reusable, saveable unit of "how do I tag this delivery".
+# Each preset bundles depth rules (apply to every folder at a given depth) and
+# pattern rules (apply anywhere in the tree, any depth, by regex/glob match on
+# name) so a whole incoming-folder convention can be captured once and
+# re-applied to every future batch that follows the same convention.
+DEFAULT_INGEST_PRESETS = {
     "VFX Standard 3-Level": {
         "name": "VFX Standard 3-Level",
-        "level_mappings": {
+        "depth_rules": {
             "1": {"type": "direct", "tag": "seq"},
             "2": {"type": "direct", "tag": "shot"},
             "3": {"type": "direct", "tag": "media_name"}
-        }
+        },
+        "pattern_rules": []
     },
     "Nested Sequence + Combined File": {
         "name": "Nested Sequence + Combined File",
-        "level_mappings": {
+        "depth_rules": {
             "1": {"type": "direct", "tag": "seq"},
             "2": {"type": "token_preset", "preset_name": "Shot_Media_Version"}
-        }
+        },
+        "pattern_rules": []
+    },
+    "Pattern-Based (SEQ/SHOT Anywhere)": {
+        "name": "Pattern-Based (SEQ/SHOT Anywhere)",
+        "depth_rules": {},
+        "pattern_rules": [
+            {"name": "Sequence folders anywhere", "pattern": r"(?i)^(?:SQ|seq)[-_]?\d{2,4}$", "is_regex": True,
+             "target": "folder", "min_depth": None, "max_depth": None, "action": "level", "level": "seq"},
+            {"name": "Shot folders anywhere", "pattern": r"(?i)^(?:SH|shot)[-_]?\d{2,4}$", "is_regex": True,
+             "target": "folder", "min_depth": None, "max_depth": None, "action": "level", "level": "shot"}
+        ]
     }
 }
 
@@ -236,9 +261,12 @@ class StudioConfig:
         self.dry_run = True
 
         self.token_presets = dict(DEFAULT_TOKEN_PRESETS)
-        self.hierarchy_presets = dict(DEFAULT_HIERARCHY_PRESETS)
-        self.active_hierarchy_preset = "VFX Standard 3-Level"
+        self.ingest_presets = dict(DEFAULT_INGEST_PRESETS)
+        self.active_ingest_preset = "VFX Standard 3-Level"
         self.media_type_configs = dict(DEFAULT_MEDIA_TYPE_CONFIGS)
+        self.preview_enabled_media_types = list(DEFAULT_PREVIEW_ENABLED_MEDIA_TYPES)
+        self.copy_workers = DEFAULT_COPY_WORKERS
+        self.transfer_mode = "copy"
 
         self.load()
 
@@ -267,15 +295,52 @@ class StudioConfig:
                     self.nas_dir_template = data.get("nas_dir_template", self.nas_dir_template)
                     self.shot_folder_structure = data.get("shot_folder_structure", self.shot_folder_structure)
                     self.dry_run = data.get("dry_run", self.dry_run)
+                    self.tasks = data.get("tasks", self.tasks)
                     self.token_presets = data.get("token_presets", self.token_presets)
-                    self.hierarchy_presets = data.get("hierarchy_presets", self.hierarchy_presets)
-                    self.active_hierarchy_preset = data.get("active_hierarchy_preset", self.active_hierarchy_preset)
                     self.media_type_configs = data.get("media_type_configs", self.media_type_configs)
+                    self.preview_enabled_media_types = data.get(
+                        "preview_enabled_media_types", self.preview_enabled_media_types
+                    )
+                    self.copy_workers = data.get("copy_workers", self.copy_workers)
+                    self.transfer_mode = data.get("transfer_mode", self.transfer_mode)
+
+                    # ingest_presets replaces the older hierarchy_presets key (depth rules only,
+                    # no pattern rules). Read the new key when present; fall back to migrating
+                    # an old config's hierarchy_presets so nobody's saved presets vanish.
+                    if "ingest_presets" in data:
+                        self.ingest_presets = data["ingest_presets"]
+                    elif "hierarchy_presets" in data:
+                        self.ingest_presets = {
+                            name: {
+                                "name": preset.get("name", name),
+                                "depth_rules": preset.get("level_mappings", preset.get("depth_rules", {})),
+                                "pattern_rules": preset.get("pattern_rules", []),
+                            }
+                            for name, preset in data["hierarchy_presets"].items()
+                        }
+                    self.active_ingest_preset = data.get(
+                        "active_ingest_preset", data.get("active_hierarchy_preset", self.active_ingest_preset)
+                    )
             except Exception as e:
                 print(f"[StudioConfig] Error loading config: {e}")
 
     def save(self):
-        data = {
+        """
+        Merge-on-write: re-reads the file on disk first and updates it with
+        this instance's fields, rather than blindly overwriting the whole
+        file. Two dialogs (e.g. Settings + Token Tagging) can hold their own
+        StudioConfig() snapshot at once; without this, whichever saves last
+        would silently wipe out the other's unrelated changes.
+        """
+        on_disk = {}
+        if self.config_path.exists():
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    on_disk = json.load(f)
+            except Exception:
+                on_disk = {}
+
+        on_disk.update({
             "kitsu_url": self.clean_url(self.kitsu_url),
             "kitsu_user": self.kitsu_user,
             "kitsu_password": self.kitsu_password,
@@ -285,10 +350,18 @@ class StudioConfig:
             "nas_dir_template": self.nas_dir_template,
             "shot_folder_structure": self.shot_folder_structure,
             "dry_run": self.dry_run,
+            "tasks": self.tasks,
             "token_presets": self.token_presets,
-            "hierarchy_presets": self.hierarchy_presets,
-            "active_hierarchy_preset": self.active_hierarchy_preset,
-            "media_type_configs": self.media_type_configs
-        }
+            "ingest_presets": self.ingest_presets,
+            "active_ingest_preset": self.active_ingest_preset,
+            "media_type_configs": self.media_type_configs,
+            "preview_enabled_media_types": self.preview_enabled_media_types,
+            "copy_workers": self.copy_workers,
+            "transfer_mode": self.transfer_mode,
+        })
+        # Drop the legacy keys once migrated so they don't linger stale forever.
+        on_disk.pop("hierarchy_presets", None)
+        on_disk.pop("active_hierarchy_preset", None)
+
         with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
+            json.dump(on_disk, f, indent=4)

@@ -19,6 +19,7 @@ class IngestSequenceItem:
         self.shot_code     = ""
         self.media_name    = ""
         self.media_type    = ""
+        self.version       = 1
 
         self.start_frame   = 1001
         self.end_frame     = 1001

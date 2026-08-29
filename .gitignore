@@ -72,3 +72,6 @@ local_cache/
 temp_proxies/
 test_data/
 .square_ingest_map.json
+
+# Local runtime studio config (has live credentials) — ship studio_config.template.json instead
+studio_config.json

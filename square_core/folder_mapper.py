@@ -783,8 +783,11 @@ class FolderMapper:
                 "start_frame": getattr(item, "start_frame", 1001),
                 "end_frame": getattr(item, "end_frame", 1001),
                 "fps": getattr(item, "fps", 24.0),
+                "width": getattr(item, "width", 1920),
+                "height": getattr(item, "height", 1080),
                 "resolution": getattr(item, "resolution", "1920x1080"),
-                "colorspace": getattr(item, "colorspace", "ACEScg")
+                "colorspace": getattr(item, "colorspace", "ACEScg"),
+                "timecode": getattr(item, "timecode", "01:00:00:00"),
             })
         self._table_state = table_data
         self.save()
@@ -805,8 +808,11 @@ class FolderMapper:
             item.start_frame   = d.get("start_frame", 1001)
             item.end_frame     = d.get("end_frame", 1001)
             item.fps           = d.get("fps", 24.0)
+            item.width         = d.get("width", 1920)
+            item.height        = d.get("height", 1080)
             item.resolution    = d.get("resolution", "1920x1080")
             item.colorspace    = d.get("colorspace", "ACEScg")
+            item.timecode      = d.get("timecode", "01:00:00:00")
             items.append(item)
         return items
 

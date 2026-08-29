@@ -25,11 +25,15 @@ class IngestSequenceItem:
         self.end_frame     = 1001
         self.missing_frames = []
         self.frame_count   = len(files)
+        self.width         = 1920
+        self.height        = 1080
         self.fps           = 24.0
         self.resolution    = "1920x1080"
         self.colorspace    = "ACEScg"
+        self.timecode      = "01:00:00:00"
 
         self.parse_frames()
+        self.extract_metadata()
 
     @property
     def plate_name(self):
@@ -64,6 +68,30 @@ class IngestSequenceItem:
     def infer_naming(self):
         """Disabled auto pattern matching as instructed."""
         pass
+
+    def extract_metadata(self):
+        """
+        Reads real resolution/fps/colorspace/timecode from one representative
+        file (the first frame of a sequence, or the video file itself).
+        Failures are non-fatal -- the hardcoded defaults set in __init__
+        stay in place if the file can't be inspected (missing, unreadable,
+        no backend installed for its format).
+        """
+        if not self.files:
+            return
+        try:
+            from square_core.metadata_extractor import MetadataExtractor
+            meta = MetadataExtractor.extract_metadata(self.files[0])
+        except Exception:
+            return
+        if not meta:
+            return
+        self.width = meta.get("width", self.width)
+        self.height = meta.get("height", self.height)
+        self.resolution = meta.get("resolution", self.resolution)
+        self.fps = meta.get("fps", self.fps)
+        self.colorspace = meta.get("colorspace", self.colorspace)
+        self.timecode = meta.get("timecode", self.timecode)
 
     @property
     def frame_range_str(self):

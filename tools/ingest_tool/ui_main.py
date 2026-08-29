@@ -13,19 +13,19 @@ from square_core.folder_mapper import FolderMapper
 from square_core.nas_manager import NASManager
 from square_core.proxy_generator import ProxyGenerator
 
-from tools.ingest_tool.widgets.scanner_widget import ScannerWidget
 from tools.ingest_tool.widgets.folder_tree_widget import FolderTreeWidget
 from tools.ingest_tool.widgets.table_widget import IngestTableWidget
 from tools.ingest_tool.widgets.progress_dialog import IngestProgressDialog
 from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
 from tools.ingest_tool.widgets.results_dialog import DryRunResultsDialog
+from tools.ingest_tool.widgets.task_selection_dialog import TaskSelectionDialog
 from tools.qt_compat import FONT_BOLD, ALIGN_CENTER, ORIENTATION_HORIZONTAL, DIALOG_ACCEPTED
 
 logger = logging.getLogger("IngestMainUI")
 
 
 class CreateProjectDialog(QtWidgets.QDialog):
-    """Dialog to create a new project in Kitsu with customizable Task Types."""
+    """Dialog to create a new project in Kitsu."""
 
     def __init__(self, kitsu_client, parent=None):
         super(CreateProjectDialog, self).__init__(parent)
@@ -33,7 +33,6 @@ class CreateProjectDialog(QtWidgets.QDialog):
         self.setMinimumWidth(400)
         self.kitsu = kitsu_client
         self.created_project = None
-        self.task_checkboxes = {}
         self.setup_ui()
 
     def setup_ui(self):
@@ -51,18 +50,12 @@ class CreateProjectDialog(QtWidgets.QDialog):
 
         layout.addLayout(form)
 
-        tasks_group = QtWidgets.QGroupBox("Project Task Types Pipeline")
-        tasks_layout = QtWidgets.QVBoxLayout()
-
-        default_tasks = ["Ingest", "Prep", "Roto", "Matchmove", "3D", "Comp"]
-        for t_name in default_tasks:
-            cb = QtWidgets.QCheckBox(t_name)
-            cb.setChecked(True)
-            self.task_checkboxes[t_name] = cb
-            tasks_layout.addWidget(cb)
-
-        tasks_group.setLayout(tasks_layout)
-        layout.addWidget(tasks_group)
+        hint = QtWidgets.QLabel(
+            "Task types are chosen per ingest batch (Start Ingest will ask), not per project."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#94A3B8; font-size:11px;")
+        layout.addWidget(hint)
 
         btn_box = QtWidgets.QHBoxLayout()
         self.create_btn = QtWidgets.QPushButton("Create Project")
@@ -76,9 +69,6 @@ class CreateProjectDialog(QtWidgets.QDialog):
         btn_box.addWidget(self.cancel_btn)
         btn_box.addWidget(self.create_btn)
         layout.addLayout(btn_box)
-
-    def get_selected_tasks(self):
-        return [t_name for t_name, cb in self.task_checkboxes.items() if cb.isChecked()]
 
     def on_create(self):
         name = self.name_edit.text().strip()
@@ -119,10 +109,14 @@ class IngestWorkerThread(QtCore.QThread):
     """Background worker: copy files + push to Kitsu."""
 
     progress_signal = QtCore.Signal(int, str)
+    item_progress_signal = QtCore.Signal(object, str, int)   # item, stage, percent
     finished_signal = QtCore.Signal(bool, str, object)
 
     def __init__(self, items_with_versions, project_data, nas_root,
-                 dry_run=True, kitsu_host=None, kitsu_user=None, kitsu_pass=None):
+                 dry_run=True, kitsu_host=None, kitsu_user=None, kitsu_pass=None,
+                 task_types=None, filename_template=None,
+                 transfer_mode="copy", copy_workers=4,
+                 preview_enabled_media_types=None):
         super(IngestWorkerThread, self).__init__()
         self.items_with_versions = items_with_versions   # list of (item, version_int)
         self.project_data = project_data
@@ -131,6 +125,14 @@ class IngestWorkerThread(QtCore.QThread):
         self.kitsu_host   = kitsu_host
         self.kitsu_user   = kitsu_user
         self.kitsu_pass   = kitsu_pass
+        self.task_types   = task_types
+        self.filename_template = filename_template
+        self.transfer_mode = transfer_mode
+        self.copy_workers = copy_workers
+        self.preview_enabled_media_types = (
+            preview_enabled_media_types if preview_enabled_media_types is not None
+            else ["Plate", "Ref", "BG Plate", "Comp Render", "Precomp"]
+        )
 
     def run(self):
         try:
@@ -139,15 +141,21 @@ class IngestWorkerThread(QtCore.QThread):
                 self.finished_signal.emit(True, "No items to ingest.")
                 return
 
+            # Dry-Run must guarantee zero live side effects -- including on Kitsu.
+            # Previously this always connected live regardless of the checkbox, so
+            # checking "Dry-Run" still created real sequences/shots/tasks/previews.
             kitsu = KitsuClient(
                 host=self.kitsu_host,
                 email=self.kitsu_user,
                 password=self.kitsu_pass,
-                dry_run=False
+                dry_run=self.dry_run
             )
             kitsu.connect()
 
-            nas       = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
+            nas = NASManager(
+                nas_root=self.nas_root, dry_run=self.dry_run,
+                transfer_mode=self.transfer_mode, workers=self.copy_workers
+            )
             proxy_gen = ProxyGenerator(dry_run=self.dry_run)
 
             proj_data = self.project_data or {"id": "11111111-1111-1111-1111-111111111111",
@@ -155,86 +163,140 @@ class IngestWorkerThread(QtCore.QThread):
             proj_code = proj_data.get("code", "PROJ")
 
             from square_core.config import DEFAULT_FILE_NAME_TEMPLATE, format_dest_filename
+            tmpl = self.filename_template or DEFAULT_FILE_NAME_TEMPLATE
 
             summary = {
                 "is_dry_run": self.dry_run,
                 "project_code": proj_code,
                 "total_items": total,
                 "total_files": sum(len(item.files) for item, _ in self.items_with_versions),
+                "task_types": self.task_types or [],
+                "transfer_mode": self.transfer_mode,
                 "items": []
             }
 
             for idx, (item, version_num) in enumerate(self.items_with_versions):
                 step_pct = int((idx / total) * 100)
-                dest_dir = nas.get_dest_dir(
-                    proj_code, item.sequence_code,
-                    item.shot_code, item.plate_name,
-                    version=version_num,
-                    media_type=getattr(item, "media_type", "Plate"),
-                    resolution=getattr(item, "resolution", "1920x1080")
-                )
+                item_status = "Ingested Successfully" if not self.dry_run else "Dry-Run Simulated"
 
-                # Kitsu sync
-                self.progress_signal.emit(step_pct,
-                    f"Syncing Kitsu: {item.shot_code} / {item.plate_name} v{version_num:03d}")
-                seq_obj  = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
-                shot_obj = kitsu.get_or_create_shot(
-                    proj_data, seq_obj, item.shot_code,
-                    plate_name=item.plate_name,
-                    frame_in=item.start_frame, frame_out=item.end_frame,
-                    fps=item.fps, resolution=item.resolution,
-                    colorspace=item.colorspace, nas_path=str(dest_dir)
-                )
-                tasks = kitsu.create_default_tasks(shot_obj)
+                try:
+                    dest_dir = nas.get_dest_dir(
+                        proj_code, item.sequence_code,
+                        item.shot_code, item.plate_name,
+                        version=version_num,
+                        media_type=getattr(item, "media_type", "Plate"),
+                        resolution=getattr(item, "resolution", "1920x1080")
+                    )
 
-                # File copy
-                self.progress_signal.emit(step_pct + 20,
-                    f"Copying {len(item.files)} files → v{version_num:03d}")
-                nas.create_shot_structure(dest_dir)
-                tmpl = getattr(self, "filename_template", None) or DEFAULT_FILE_NAME_TEMPLATE
-                copied = nas.copy_sequence(item, dest_dir, filename_template=tmpl, version_num=version_num, proj_code=proj_code)
+                    # Kitsu sync
+                    self.progress_signal.emit(step_pct,
+                        f"Syncing Kitsu: {item.shot_code} / {item.plate_name} v{version_num:03d}")
+                    self.item_progress_signal.emit(item, "Kitsu Sync", 20)
+                    seq_obj  = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
+                    shot_obj = kitsu.get_or_create_shot(
+                        proj_data, seq_obj, item.shot_code,
+                        plate_name=item.plate_name,
+                        frame_in=item.start_frame, frame_out=item.end_frame,
+                        fps=item.fps, resolution=item.resolution,
+                        colorspace=item.colorspace, nas_path=str(dest_dir)
+                    )
+                    tasks = kitsu.create_default_tasks(shot_obj, task_types=self.task_types)
 
-                # Proxy + upload
-                self.progress_signal.emit(step_pct + 50, "Generating preview...")
-                proxy_path = proxy_gen.generate_proxy(item)
-                if proxy_path and tasks:
+                    # File copy
+                    self.progress_signal.emit(step_pct + 20,
+                        f"Copying {len(item.files)} files → v{version_num:03d}")
+                    nas.create_shot_structure(dest_dir)
+
+                    def _copy_progress(done, copy_total, _name, _item=item):
+                        pct = 20 + int((done / copy_total) * 60) if copy_total else 80
+                        self.item_progress_signal.emit(_item, "Copying", pct)
+
+                    copied = nas.copy_sequence(
+                        item, dest_dir, filename_template=tmpl,
+                        version_num=version_num, proj_code=proj_code,
+                        progress_callback=_copy_progress
+                    )
+                    checksum = None
+                    if copied and self.transfer_mode == "copy" and not self.dry_run:
+                        checksum = nas.calculate_checksum(copied[0])
+
+                    # Preview + version metadata -- only visual media types get a
+                    # generated preview; every ingested version still gets a
+                    # self-describing metadata comment either way.
+                    self.item_progress_signal.emit(item, "Preview", 85)
+                    mtype = getattr(item, "media_type", "Plate") or "Plate"
+                    wants_preview = mtype in self.preview_enabled_media_types
                     ingest_task = next(
                         (t for t in tasks
                          if (t.get("name") or t.get("task_type_name")) in ("Ingest", "Prep")),
-                        tasks[0]
+                        tasks[0] if tasks else None
                     )
-                    task_name = ingest_task.get("name") or "Ingest"
-                    self.progress_signal.emit(step_pct + 70,
-                        f"Uploading preview to '{task_name}' & setting thumbnail...")
-                    kitsu.upload_preview_proxy(
-                        ingest_task, proxy_path,
-                        comment=f"Plate Ingest v{version_num:03d} ({item.plate_name})"
+                    comment = KitsuClient.build_version_comment(
+                        item, version_num, dest_dir, transfer_mode=self.transfer_mode, checksum=checksum
                     )
 
-                sample_fn = format_dest_filename(
-                    tmpl, proj_code, item.sequence_code, item.shot_code,
-                    getattr(item, "media_type", "Plate"), item.plate_name,
-                    version_num, frame="1001" if not item.is_video else None, ext=item.ext
-                )
-                summary["items"].append({
-                    "source_name": item.name,
-                    "sequence_code": item.sequence_code,
-                    "shot_code": item.shot_code,
-                    "media_type": getattr(item, "media_type", "Plate"),
-                    "plate_name": item.plate_name,
-                    "version": version_num,
-                    "resolution": item.resolution,
-                    "frame_count": len(item.files),
-                    "dest_dir": str(dest_dir),
-                    "sample_dest_file": str(dest_dir / sample_fn),
-                    "status": "Dry-Run Simulated" if self.dry_run else "Ingested Successfully"
-                })
+                    if ingest_task:
+                        if wants_preview:
+                            self.progress_signal.emit(step_pct + 70, "Generating preview...")
+                            proxy_path = proxy_gen.generate_proxy(item)
+                            if proxy_path:
+                                task_name = ingest_task.get("name") or "Ingest"
+                                self.progress_signal.emit(step_pct + 80,
+                                    f"Uploading preview to '{task_name}' & setting thumbnail...")
+                                kitsu.upload_preview_proxy(ingest_task, proxy_path, comment=comment)
+                            else:
+                                kitsu.add_version_comment(ingest_task, comment)
+                        else:
+                            kitsu.add_version_comment(ingest_task, comment)
 
-            msg = f"Dry-Run completed for {total} items." if self.dry_run else f"Successfully ingested {total} items."
+                    sample_fn = format_dest_filename(
+                        tmpl, proj_code, item.sequence_code, item.shot_code,
+                        mtype, item.plate_name,
+                        version_num, frame="1001" if not item.is_video else None, ext=item.ext
+                    )
+                    summary["items"].append({
+                        "source_name": item.name,
+                        "sequence_code": item.sequence_code,
+                        "shot_code": item.shot_code,
+                        "media_type": mtype,
+                        "plate_name": item.plate_name,
+                        "version": version_num,
+                        "resolution": item.resolution,
+                        "frame_count": len(item.files),
+                        "dest_dir": str(dest_dir),
+                        "sample_dest_file": str(dest_dir / sample_fn),
+                        "status": item_status
+                    })
+                    self.item_progress_signal.emit(item, "Done", 100)
+
+                except Exception as item_err:
+                    # A single bad item (network hiccup, permission error on one file)
+                    # must not sink the rest of the batch -- record it and continue.
+                    logger.error(f"[IngestWorkerThread] Item '{item.name}' failed: {item_err}", exc_info=True)
+                    self.item_progress_signal.emit(item, "Error", 100)
+                    summary["items"].append({
+                        "source_name": item.name,
+                        "sequence_code": item.sequence_code,
+                        "shot_code": item.shot_code,
+                        "media_type": getattr(item, "media_type", "Plate"),
+                        "plate_name": item.plate_name,
+                        "version": version_num,
+                        "resolution": getattr(item, "resolution", ""),
+                        "frame_count": len(item.files),
+                        "dest_dir": "",
+                        "sample_dest_file": "",
+                        "status": f"Error: {item_err}"
+                    })
+
+            failed = sum(1 for i in summary["items"] if i["status"].startswith("Error"))
+            if failed:
+                msg = f"Completed with {failed} of {total} item(s) failed -- see results for details."
+            else:
+                msg = f"Dry-Run completed for {total} items." if self.dry_run else f"Successfully ingested {total} items."
             self.finished_signal.emit(True, msg, summary)
 
         except Exception as e:
-            logger.error(f"Ingestion worker failed: {e}")
+            logger.error(f"Ingestion worker failed: {e}", exc_info=True)
             self.finished_signal.emit(False, f"Ingestion Error: {str(e)}", None)
 
 
@@ -336,7 +398,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_btn.clicked.connect(self.load_projects)
 
         self.dry_run_check = QtWidgets.QCheckBox("Dry-Run")
-        self.dry_run_check.setToolTip("Dry-Run: simulate transfer & path generation without copying files")
+        self.dry_run_check.setToolTip(
+            "Dry-Run: simulate everything (paths, Kitsu sync, previews) with zero live "
+            "side effects -- no files copied, nothing written to the Kitsu server."
+        )
         self.dry_run_check.setChecked(self.config.dry_run)
         self.dry_run_check.setStyleSheet("color:#64748B; background:transparent;")
         self.dry_run_check.stateChanged.connect(self._update_ingest_btn_style)
@@ -609,6 +674,12 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
+        task_dialog = TaskSelectionDialog(self.config.tasks, kitsu_client=self.kitsu, parent=self)
+        res = task_dialog.exec() if hasattr(task_dialog, "exec") else task_dialog.exec_()
+        if res != DIALOG_ACCEPTED:
+            return
+        task_types = task_dialog.get_selected_tasks()
+
         items_with_versions = valid_items
 
         self.progress_dialog = IngestProgressDialog(self)
@@ -621,9 +692,15 @@ class MainWindow(QtWidgets.QMainWindow):
             dry_run=self.dry_run_check.isChecked(),
             kitsu_host=self.config.kitsu_url,
             kitsu_user=self.config.kitsu_user,
-            kitsu_pass=self.config.kitsu_password
+            kitsu_pass=self.config.kitsu_password,
+            task_types=task_types,
+            filename_template=self.config.filename_template,
+            transfer_mode=self.config.transfer_mode,
+            copy_workers=self.config.copy_workers,
+            preview_enabled_media_types=self.config.preview_enabled_media_types,
         )
         self.worker.progress_signal.connect(self.progress_dialog.update_progress)
+        self.worker.item_progress_signal.connect(self.table_widget.update_ingest_progress)
         self.worker.finished_signal.connect(self.on_ingest_finished)
         self.worker.start()
 

@@ -45,8 +45,12 @@ class DryRunResultsDialog(QtWidgets.QDialog):
         lbl_title.setStyleSheet("font-size:15px; font-weight:bold; color:white;")
         b_layout.addWidget(lbl_title)
 
+        transfer_mode = self.summary.get("transfer_mode", "copy")
+        task_types = self.summary.get("task_types", [])
+        task_str = ", ".join(task_types) if task_types else "(none configured)"
         lbl_sub = QtWidgets.QLabel(
-            f"Project: {proj_code}   ·   Items: {total_items}   ·   Files: {total_files} frames"
+            f"Project: {proj_code}   ·   Items: {total_items}   ·   Files: {total_files} frames   ·   "
+            f"Transfer: {transfer_mode}   ·   Tasks: {task_str}"
         )
         lbl_sub.setStyleSheet("font-size:12px; color:#CBD5E1;")
         b_layout.addWidget(lbl_sub)
@@ -55,7 +59,7 @@ class DryRunResultsDialog(QtWidgets.QDialog):
 
         # ── Summary Table ──
         table = QtWidgets.QTableWidget()
-        table.setColumnCount(8)
+        table.setColumnCount(9)
         table.setHorizontalHeaderLabels([
             "Source Item",
             "Seq / Shot",
@@ -64,7 +68,8 @@ class DryRunResultsDialog(QtWidgets.QDialog):
             "Ver",
             "Res",
             "Target Destination Directory",
-            "Sample Target File"
+            "Sample Target File",
+            "Status"
         ])
         table.setStyleSheet("""
             QTableWidget {
@@ -111,6 +116,15 @@ class DryRunResultsDialog(QtWidgets.QDialog):
             file_item.setToolTip(full_fn)
             table.setItem(row_idx, 7, file_item)
 
+            status = item.get("status", "")
+            status_item = QtWidgets.QTableWidgetItem(status)
+            if status.startswith("Error"):
+                status_item.setForeground(QtGui.QColor("#EF4444"))
+                status_item.setToolTip(status)
+            else:
+                status_item.setForeground(QtGui.QColor("#10B981"))
+            table.setItem(row_idx, 8, status_item)
+
         table.setColumnWidth(0, 150)
         table.setColumnWidth(1, 110)
         table.setColumnWidth(2, 65)
@@ -119,6 +133,7 @@ class DryRunResultsDialog(QtWidgets.QDialog):
         table.setColumnWidth(5, 80)
         table.setColumnWidth(6, 260)
         table.setColumnWidth(7, 180)
+        table.setColumnWidth(8, 140)
 
         layout.addWidget(table, stretch=1)
 

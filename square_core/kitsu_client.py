@@ -234,6 +234,57 @@ class KitsuClient:
             created_tasks.append({"id": task_id, "name": tt, "shot_id": shot_arg.get("id")})
         return created_tasks
 
+    @staticmethod
+    def build_version_comment(item, version_num, dest_dir, transfer_mode="copy", checksum=None):
+        """
+        Builds a self-describing comment body for one ingested version --
+        posted on every version (with or without a preview attached), so
+        each version's own record carries its copied path and details
+        instead of only the shot-level data blob being updated.
+        """
+        lines = [
+            f"Plate Ingest v{version_num:03d} ({getattr(item, 'plate_name', '') or getattr(item, 'media_name', '')})",
+            "",
+            f"NAS Path: {dest_dir}",
+            f"Media Type: {getattr(item, 'media_type', '') or 'Plate'}",
+            f"Resolution: {getattr(item, 'resolution', '')} | FPS: {getattr(item, 'fps', '')} | Colorspace: {getattr(item, 'colorspace', '')}",
+            f"Frame Range: {item.frame_range_str if hasattr(item, 'frame_range_str') else ''}",
+            f"Transfer Mode: {transfer_mode}",
+        ]
+        if checksum:
+            lines.append(f"Checksum (first file, xxHash/MD5): {checksum}")
+        if getattr(item, "files", None):
+            lines.append(f"Source: {os.path.basename(item.files[0])}")
+        return "\n".join(lines)
+
+    def add_version_comment(self, task, comment):
+        """
+        Posts a text-only metadata comment to a task -- used for media
+        types that don't get a preview generated, so every ingested
+        version still gets its own self-describing Kitsu record even
+        without a video attached.
+        """
+        task_arg = task if isinstance(task, dict) else {"id": str(task)}
+
+        if self.gazu and self.is_connected:
+            try:
+                task_id = str(task_arg.get("id", ""))
+                if "mock" in task_id or len(task_id) != 36:
+                    logger.info(f"[Mock Kitsu] Skipping live comment for non-UUID task ID '{task_id}'")
+                    return {"id": str(uuid.uuid4()), "task_id": task_id, "comment": comment}
+
+                status = task_arg.get("task_status_id") or self.gazu.task.get_default_task_status()
+                if not status:
+                    statuses = self.gazu.task.all_task_statuses()
+                    status = statuses[0] if statuses else "todo"
+
+                return self.gazu.task.add_comment(task_arg, status, comment=comment)
+            except Exception as e:
+                logger.error(f"[Kitsu Live Error] Failed to add version comment: {e}")
+
+        logger.info(f"[Mock Kitsu] Added version metadata comment to task {task_arg.get('id')}")
+        return {"id": str(uuid.uuid4()), "task_id": task_arg.get("id"), "comment": comment}
+
     def upload_preview_proxy(self, task, preview_file_path, comment="Plate Ingest Preview v001"):
         """Uploads a low-res MP4 preview to a Kitsu task and registers it as the main Shot Thumbnail."""
         task_arg = task if isinstance(task, dict) else {"id": str(task)}

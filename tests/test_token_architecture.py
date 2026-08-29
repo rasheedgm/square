@@ -99,10 +99,10 @@ class TestTokenArchitecture(unittest.TestCase):
         self.assertEqual(h_rule.level_mappings["2"]["preset_name"], "Shot_Media_Version")
 
     def test_studio_config_presets_persistence(self):
-        """Test that StudioConfig stores and loads token and hierarchy presets."""
+        """Test that StudioConfig stores and loads token and ingest presets."""
         cfg = StudioConfig()
         self.assertIn("Shot_Media_Version", cfg.token_presets)
-        self.assertIn("VFX Standard 3-Level", cfg.hierarchy_presets)
+        self.assertIn("VFX Standard 3-Level", cfg.ingest_presets)
 
     def test_token_splitter_dialog_instantiation(self):
         """Test GUI instantiation of TokenSplitterDialog modal."""
@@ -110,6 +110,27 @@ class TestTokenArchitecture(unittest.TestCase):
         self.assertIsNotNone(dlg)
         res = dlg.get_parsed_result()
         self.assertIsInstance(res, dict)
+
+    def test_token_splitter_fixed_media_type_quick_tag(self):
+        """
+        The 'Tag as {type}' quick-menu (e.g. "Tag as Ref") must record that
+        literal type regardless of what the underlying chip text says --
+        previously every entry in that menu called the same generic handler
+        and ignored which type was actually clicked.
+        """
+        dlg = TokenSplitterDialog("SQ010_SH0100_PL_v001.mov")
+        # Chip index 2 is "PL" -- tag it as media_type with a fixed literal
+        # value of "Ref", as the "Tag as Ref" menu action now does.
+        for btn in dlg.chip_buttons:
+            if btn.token_index == 2:
+                btn.setChecked(True)
+        dlg.assign_role_to_selected("media_type", fixed_value="Ref")
+
+        res = dlg.get_parsed_result()
+        self.assertEqual(res.get("media_type"), "Ref")
+
+        tagged_btn = next(b for b in dlg.chip_buttons if b.token_index == 2)
+        self.assertEqual(tagged_btn.fixed_value, "Ref")
 
 
 if __name__ == "__main__":

@@ -11,20 +11,25 @@ from pathlib import Path
 class TokenRule:
     """Defines how to split and parse a string into Sequence, Shot, Plate, Version, and Category."""
 
-    def __init__(self, name="Custom Token Rule", delimiter="_", mapping=None, merged_ranges=None):
+    def __init__(self, name="Custom Token Rule", delimiter="_", mapping=None, merged_ranges=None, fixed_values=None):
         self.name = name
         self.delimiter = delimiter
         # mapping dict format: { "sequence_code": [0, 1], "shot_code": [2], "plate_name": [3], "version": [4], "media_type": [5] }
         self.mapping = mapping or {}
         # list of [start_idx, end_idx] pairs that were merged
         self.merged_ranges = merged_ranges or []
+        # per-role literal overrides: { "media_type": { "5": "Ref" } } -- lets a chip whose own
+        # text is e.g. "PL" still resolve to a specific canonical value like "Plate", instead of
+        # always using the chip's raw text for that role.
+        self.fixed_values = fixed_values or {}
 
     def to_dict(self):
         return {
             "name": self.name,
             "delimiter": self.delimiter,
             "mapping": self.mapping,
-            "merged_ranges": self.merged_ranges
+            "merged_ranges": self.merged_ranges,
+            "fixed_values": self.fixed_values,
         }
 
     @classmethod
@@ -35,7 +40,8 @@ class TokenRule:
             name=data.get("name", "Custom Token Rule"),
             delimiter=data.get("delimiter", "_"),
             mapping=data.get("mapping", {}),
-            merged_ranges=data.get("merged_ranges", [])
+            merged_ranges=data.get("merged_ranges", []),
+            fixed_values=data.get("fixed_values", {}),
         )
 
 
@@ -119,17 +125,22 @@ def parse_string_with_token_rule(text, token_rule):
             tokens = merge_token_indices(tokens, start_idx, end_idx, token_rule.delimiter)
 
     mapping = token_rule.mapping
+    fixed_values = getattr(token_rule, "fixed_values", {}) or {}
 
-    def get_joined_token_val(indices):
+    def get_joined_token_val(indices, role=None):
+        role_fixed = fixed_values.get(role, {}) if role else {}
         valid_vals = []
         for idx in indices:
-            if 0 <= idx < len(tokens):
+            fixed = role_fixed.get(str(idx))
+            if fixed is not None:
+                valid_vals.append(str(fixed))
+            elif 0 <= idx < len(tokens):
                 valid_vals.append(tokens[idx])
         return "_".join(valid_vals) if valid_vals else None
 
     # 1. Sequence Code
     if "sequence_code" in mapping and mapping["sequence_code"]:
-        raw_sq = get_joined_token_val(mapping["sequence_code"])
+        raw_sq = get_joined_token_val(mapping["sequence_code"], role="sequence_code")
         if raw_sq:
             digits = re.search(r"\d+", raw_sq)
             if digits:
@@ -139,7 +150,7 @@ def parse_string_with_token_rule(text, token_rule):
 
     # 2. Shot Code
     if "shot_code" in mapping and mapping["shot_code"]:
-        raw_sh = get_joined_token_val(mapping["shot_code"])
+        raw_sh = get_joined_token_val(mapping["shot_code"], role="shot_code")
         if raw_sh:
             digits = re.search(r"\d+", raw_sh)
             if digits:
@@ -150,29 +161,36 @@ def parse_string_with_token_rule(text, token_rule):
     # 3. Media Name
     key_name = "media_name" if "media_name" in mapping else ("plate_name" if "plate_name" in mapping else None)
     if key_name and mapping[key_name]:
-        raw_pl = get_joined_token_val(mapping[key_name])
+        raw_pl = get_joined_token_val(mapping[key_name], role=key_name)
         if raw_pl:
             res["media_name"] = raw_pl.upper()
             res["plate_name"] = raw_pl.upper()
 
     # 4. Version
     if "version" in mapping and mapping["version"]:
-        raw_ver = get_joined_token_val(mapping["version"])
+        raw_ver = get_joined_token_val(mapping["version"], role="version")
         if raw_ver:
             digits = re.search(r"\d+", raw_ver)
             if digits:
                 res["version"] = int(digits.group(0))
 
-    # 5. Media Type
+    # 5. Media Type -- a fixed_values override (from the "Tag as {mt}" quick menu) takes the
+    # literal type name as-is; otherwise the chip's own text is matched against known types.
     if "media_type" in mapping and mapping["media_type"]:
-        raw_type = get_joined_token_val(mapping["media_type"])
-        if raw_type:
-            try:
-                from square_core.config import StudioConfig
-                cfg = StudioConfig()
-                canonical = next((k for k in cfg.media_type_configs.keys() if k.lower() == raw_type.lower()), None)
-                res["media_type"] = canonical if canonical else raw_type
-            except Exception:
+        role_fixed = fixed_values.get("media_type", {})
+        if role_fixed and any(str(i) in role_fixed for i in mapping["media_type"]):
+            raw_type = get_joined_token_val(mapping["media_type"], role="media_type")
+            if raw_type:
                 res["media_type"] = raw_type
+        else:
+            raw_type = get_joined_token_val(mapping["media_type"])
+            if raw_type:
+                try:
+                    from square_core.config import StudioConfig
+                    cfg = StudioConfig()
+                    canonical = next((k for k in cfg.media_type_configs.keys() if k.lower() == raw_type.lower()), None)
+                    res["media_type"] = canonical if canonical else raw_type
+                except Exception:
+                    res["media_type"] = raw_type
 
     return res

@@ -34,11 +34,13 @@ class TokenChipButton(QPushButton):
         self.token_index = index
         self.token_text = text
         self.role_tag = None  # "sequence_code" | "shot_code" | "plate_name" | "version" | "media_type"
+        self.fixed_value = None  # literal value override, e.g. media_type="Ref" regardless of token_text
         self.setCheckable(True)
         self.update_chip_style()
 
-    def set_role_tag(self, role):
+    def set_role_tag(self, role, fixed_value=None):
         self.role_tag = role
+        self.fixed_value = fixed_value if role else None
         self.update_chip_style()
 
     def update_chip_style(self):
@@ -54,7 +56,8 @@ class TokenChipButton(QPushButton):
 
         if self.role_tag in badge_colors:
             bg, fg, label = badge_colors[self.role_tag]
-            display = f"{self.token_text}  [{label}]"
+            shown_text = f"{self.token_text} → {self.fixed_value}" if self.fixed_value else self.token_text
+            display = f"{shown_text}  [{label}]"
             style = f"""
                 QPushButton {{
                     background-color: {bg};
@@ -133,9 +136,10 @@ class TokenSplitterDialog(QDialog):
 
         for role, indices in self.current_rule.mapping.items():
             if isinstance(indices, (list, tuple)):
+                role_fixed = self.current_rule.fixed_values.get(role, {})
                 for idx in indices:
                     if 0 <= idx < len(self.chip_buttons):
-                        self.chip_buttons[idx].set_role_tag(role)
+                        self.chip_buttons[idx].set_role_tag(role, fixed_value=role_fixed.get(str(idx)))
 
         self.update_preview()
 
@@ -209,7 +213,7 @@ class TokenSplitterDialog(QDialog):
         mtypes = list(self.config.media_type_configs.keys()) if hasattr(self, "config") and self.config else ["Plate", "Ref", "BG Plate", "Comp Render", "Precomp", "Element", "LUT", "Audio", "Matte"]
         for mt in mtypes:
             act = media_menu.addAction(f"Tag as {mt}")
-            act.triggered.connect(lambda checked=False, t=mt: self.assign_role_to_selected("plate_name"))
+            act.triggered.connect(lambda checked=False, t=mt: self.assign_role_to_selected("media_type", fixed_value=t))
 
         self.btn_tag_media.setMenu(media_menu)
         act_layout.addWidget(self.btn_tag_media)
@@ -238,11 +242,14 @@ class TokenSplitterDialog(QDialog):
         self.lbl_prev_pl.setStyleSheet("color: #FBBF24; font-weight: bold;")
         self.lbl_prev_ver = QLabel("-")
         self.lbl_prev_ver.setStyleSheet("color: #C084FC; font-weight: bold;")
+        self.lbl_prev_type = QLabel("-")
+        self.lbl_prev_type.setStyleSheet("color: #2DD4BF; font-weight: bold;")
 
         p_layout.addRow("Sequence Code:", self.lbl_prev_seq)
         p_layout.addRow("Shot Code:", self.lbl_prev_sh)
         p_layout.addRow("Plate Name:", self.lbl_prev_pl)
         p_layout.addRow("Version Number:", self.lbl_prev_ver)
+        p_layout.addRow("Media Type:", self.lbl_prev_type)
 
         layout.addWidget(prev_box)
 
@@ -314,25 +321,33 @@ class TokenSplitterDialog(QDialog):
         self.current_rule.merged_ranges.append([start_idx, end_idx])
         self.update_preview()
 
-    def assign_role_to_selected(self, role_name):
+    def assign_role_to_selected(self, role_name, fixed_value=None):
         selected_indices = self.get_selected_chip_indices()
         if not selected_indices:
             return
 
         # Update mapping dict in current_rule
         if role_name:
-            # Remove this role from any previous indices
             self.current_rule.mapping[role_name] = selected_indices
+            if fixed_value is not None:
+                role_fixed = self.current_rule.fixed_values.setdefault(role_name, {})
+                for idx in selected_indices:
+                    role_fixed[str(idx)] = fixed_value
+            else:
+                # A plain (non-fixed) re-tag of this role replaces any earlier fixed-value
+                # overrides for it -- otherwise a stale "Tag as Ref" would linger invisibly.
+                self.current_rule.fixed_values.pop(role_name, None)
         else:
             # Clear role
             for key, val in list(self.current_rule.mapping.items()):
                 if any(idx in selected_indices for idx in val):
                     del self.current_rule.mapping[key]
+                    self.current_rule.fixed_values.pop(key, None)
 
         # Update chip styles
         for btn in self.chip_buttons:
             if btn.token_index in selected_indices:
-                btn.set_role_tag(role_name)
+                btn.set_role_tag(role_name, fixed_value=fixed_value)
                 btn.setChecked(False)
 
         self.update_preview()
@@ -343,6 +358,7 @@ class TokenSplitterDialog(QDialog):
         self.lbl_prev_sh.setText(res.get("shot_code") or "-")
         self.lbl_prev_pl.setText(res.get("plate_name") or "-")
         self.lbl_prev_ver.setText(str(res.get("version")) if res.get("version") is not None else "-")
+        self.lbl_prev_type.setText(res.get("media_type") or "-")
 
     def get_parsed_result(self):
         return parse_string_with_token_rule(self.raw_text, self.current_rule)
@@ -364,11 +380,8 @@ class TokenSplitterDialog(QDialog):
             data = self.config.token_presets[preset_name]
             self.current_rule = TokenRule.from_dict(data)
 
-            # Re-apply roles to chips
-            for btn in self.chip_buttons:
-                btn.set_role_tag(None)
-                for role, indices in self.current_rule.mapping.items():
-                    if btn.token_index in indices:
-                        btn.set_role_tag(role)
-
-            self.update_preview()
+            # Rebuild chips from scratch (undoing any merges from a previously-selected
+            # preset) then restore this preset's merges, roles, AND fixed-value overrides
+            # in one consistent pass -- same logic used at dialog construction time.
+            self.build_chips()
+            self.restore_rule_to_chips()

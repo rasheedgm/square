@@ -49,6 +49,7 @@ COL_RES        = 9
 COL_CS         = 10
 COL_VERSION    = 11
 COL_STATUS     = 12
+COL_PROGRESS   = 13
 
 HEADERS = [
     "",             # checkbox
@@ -64,7 +65,25 @@ HEADERS = [
     "Colorspace",
     "Version",
     "Status",
+    "Progress",
 ]
+
+# Ingest pipeline stages, in order, for the per-row progress bar.
+STAGE_QUEUED   = "Queued"
+STAGE_KITSU    = "Kitsu Sync"
+STAGE_COPYING  = "Copying"
+STAGE_PROXY    = "Preview"
+STAGE_DONE     = "Done"
+STAGE_ERROR    = "Error"
+
+STAGE_PERCENT = {
+    STAGE_QUEUED:  0,
+    STAGE_KITSU:   20,
+    STAGE_COPYING: 45,
+    STAGE_PROXY:   80,
+    STAGE_DONE:    100,
+    STAGE_ERROR:   100,
+}
 
 
 class IngestTableWidget(QtWidgets.QWidget):
@@ -83,6 +102,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_status  = {}        # id(item) -> status string
         self.item_version = {}        # id(item) -> version int
         self.item_discarded = set()   # id(item) -> discarded
+        self.item_progress = {}       # id(item) -> (stage str, percent int) -- live ingest progress
         self._project_code = ""
         self._nas_root = "X:/projects"
         self._filename_template = ""
@@ -107,6 +127,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_status  = {id(i): STATUS_CHECKING for i in items}
         self.item_version = {id(i): 1 for i in items}
         self.item_discarded = set()
+        self.item_progress = {}
         self._refresh_table()
 
     def update_table(self, new_items):
@@ -142,6 +163,37 @@ class IngestTableWidget(QtWidgets.QWidget):
     def populate_items(self, items):
         """Alias for backward compatibility."""
         self.populate_table(items)
+
+    def update_ingest_progress(self, item, stage: str, percent=None):
+        """
+        Called from the ingest worker thread (via a queued signal) as each
+        item moves through the pipeline (Kitsu Sync -> Copying -> Preview ->
+        Done/Error). Updates the row's progress bar directly instead of
+        rebuilding the whole table, so it stays smooth across many quick
+        per-file ticks.
+        """
+        key = id(item)
+        pct = percent if percent is not None else STAGE_PERCENT.get(stage, 0)
+        self.item_progress[key] = (stage, pct)
+
+        row = self._row_for_key(key)
+        if row is None:
+            return
+        bar = self._table.cellWidget(row, COL_PROGRESS)
+        if isinstance(bar, QtWidgets.QProgressBar):
+            bar.setValue(pct)
+            bar.setFormat(f"{stage}  %p%")
+            chunk_colour = "#EF4444" if stage == STAGE_ERROR else ("#10B981" if stage == STAGE_DONE else "#3B82F6")
+            bar.setStyleSheet(
+                "QProgressBar { background:#1A2035; border:none; border-radius:3px; color:#E2E8F0; font-size:10px; }"
+                f"QProgressBar::chunk {{ background:{chunk_colour}; border-radius:3px; }}"
+            )
+
+    def _row_for_key(self, key):
+        for row, item in enumerate(self.items_data):
+            if id(item) == key:
+                return row
+        return None
 
     def apply_version_results(self, results: dict):
         """
@@ -255,6 +307,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._table.setColumnWidth(COL_RES, 90)
         self._table.setColumnWidth(COL_CS, 80)
         self._table.setColumnWidth(COL_VERSION, 120)
+        self._table.setColumnWidth(COL_PROGRESS, 150)
         layout.addWidget(self._table, stretch=1)
         # Re-check conflicts whenever the user edits a cell
         self._table.itemChanged.connect(self._on_cell_edited)
@@ -275,7 +328,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._tmpl_edit = QtWidgets.QLineEdit()
         self._tmpl_edit.setPlaceholderText("Rename template: {seq}_{shot} or {original}")
         self._tmpl_edit.setToolTip(
-            "Wildcards: {project} {seq} {shot} {plate} {original} {date} {version}"
+            "Wildcards: {project} {seq} {shot} {plate} {media_type} {original} {date} {version}"
         )
         self._tmpl_edit.setMinimumWidth(220)
 
@@ -285,7 +338,7 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         # Which column to rename
         self._target_combo = QtWidgets.QComboBox()
-        self._target_combo.addItems(["Shot", "Media Name", "Sequence"])
+        self._target_combo.addItems(["Shot", "Media Name", "Sequence", "Media Type"])
 
         apply_btn = QtWidgets.QPushButton("Apply Rename")
         apply_btn.setStyleSheet("background:#2563EB; color:white; font-weight:bold; padding:4px 10px;")
@@ -307,6 +360,20 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         bar_layout.addWidget(caps_btn)
         bar_layout.addWidget(lower_btn)
+
+        bar_layout.addSpacing(10)
+
+        # Batch version control -- version is a number with its own per-row
+        # dropdown, so it gets a dedicated "set to N" control rather than
+        # being shoved through the free-text rename template.
+        self._batch_version_spin = QtWidgets.QSpinBox()
+        self._batch_version_spin.setRange(1, 999)
+        self._batch_version_spin.setPrefix("v")
+        self._batch_version_spin.setToolTip("Batch-set the version number for all/selected rows")
+        set_version_btn = QtWidgets.QPushButton("Set Version")
+        set_version_btn.clicked.connect(self._on_batch_set_version)
+        bar_layout.addWidget(self._batch_version_spin)
+        bar_layout.addWidget(set_version_btn)
 
         bar_layout.addSpacing(10)
 
@@ -413,6 +480,10 @@ class IngestTableWidget(QtWidgets.QWidget):
             # ── Status pill ──
             self._table.setItem(row_idx, COL_STATUS, self._mk_status_cell(status))
 
+            # ── Live ingest progress bar ──
+            stage, percent = self.item_progress.get(key, (STAGE_QUEUED, 0))
+            self._table.setCellWidget(row_idx, COL_PROGRESS, self._mk_progress_bar(stage, percent))
+
             # ── Row-level dim/highlight ──
             self._style_row(row_idx, status, discarded)
 
@@ -425,6 +496,19 @@ class IngestTableWidget(QtWidgets.QWidget):
         if not editable:
             cell.setFlags(ITEM_IS_SELECTABLE | ITEM_IS_ENABLED)
         return cell
+
+    def _mk_progress_bar(self, stage, percent):
+        bar = QtWidgets.QProgressBar()
+        bar.setRange(0, 100)
+        bar.setValue(percent)
+        bar.setFormat(f"{stage}  %p%")
+        bar.setTextVisible(True)
+        chunk_colour = "#EF4444" if stage == STAGE_ERROR else ("#10B981" if stage == STAGE_DONE else "#3B82F6")
+        bar.setStyleSheet(
+            "QProgressBar { background:#1A2035; border:none; border-radius:3px; color:#E2E8F0; font-size:10px; }"
+            f"QProgressBar::chunk {{ background:{chunk_colour}; border-radius:3px; }}"
+        )
+        return bar
 
     def _mk_status_cell(self, status):
         cell = QtWidgets.QTableWidgetItem(status)
@@ -519,13 +603,14 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         for item in items_to_apply:
             new_val = template
-            new_val = new_val.replace("{project}",  self._project_code or "PROJ")
-            new_val = new_val.replace("{seq}",       item.sequence_code)
-            new_val = new_val.replace("{shot}",      item.shot_code)
-            new_val = new_val.replace("{plate}",     item.plate_name)
-            new_val = new_val.replace("{original}",  item.name)
-            new_val = new_val.replace("{date}",      today)
-            new_val = new_val.replace("{version}",   f"v{self.item_version.get(id(item), 1):03d}")
+            new_val = new_val.replace("{project}",    self._project_code or "PROJ")
+            new_val = new_val.replace("{seq}",        item.sequence_code)
+            new_val = new_val.replace("{shot}",       item.shot_code)
+            new_val = new_val.replace("{plate}",      item.plate_name)
+            new_val = new_val.replace("{media_type}", getattr(item, "media_type", "") or "")
+            new_val = new_val.replace("{original}",   item.name)
+            new_val = new_val.replace("{date}",       today)
+            new_val = new_val.replace("{version}",    f"v{self.item_version.get(id(item), 1):03d}")
 
             if target == "shot":
                 item.shot_code = new_val
@@ -534,6 +619,8 @@ class IngestTableWidget(QtWidgets.QWidget):
                 item.plate_name = new_val
             elif target == "sequence":
                 item.sequence_code = new_val
+            elif target == "media type":
+                item.media_type = new_val
 
         self._run_conflict_detection()
         self._refresh_table()
@@ -547,10 +634,25 @@ class IngestTableWidget(QtWidgets.QWidget):
                 item.shot_code     = item.shot_code.upper()
                 item.plate_name    = item.plate_name.upper()
                 item.sequence_code = item.sequence_code.upper()
+                item.media_type    = (item.media_type or "").upper()
             else:
                 item.shot_code     = item.shot_code.lower()
                 item.plate_name    = item.plate_name.lower()
                 item.sequence_code = item.sequence_code.lower()
+                item.media_type    = (item.media_type or "").lower()
+        self._refresh_table()
+
+    def _on_batch_set_version(self):
+        """Batch-set the version number for all/selected rows (version lives in
+        item_version, the same dict the per-row dropdown edits, not on the
+        item itself -- so this stays consistent with single-row edits)."""
+        self._sync_edits_from_table()
+        new_version = self._batch_version_spin.value()
+        selected = self._get_selected_items_in_table()
+        items_to_apply = selected if selected else self.items_data
+        for item in items_to_apply:
+            self.item_version[id(item)] = new_version
+        self._run_conflict_detection()
         self._refresh_table()
 
     def _on_discard_selected(self):

@@ -1,7 +1,10 @@
 import unittest
 from Qt import QtWidgets
 
-from tools.ingest_tool.widgets.table_widget import IngestTableWidget, STATUS_CONFLICT, STATUS_NEW, STATUS_DISCARDED
+from tools.ingest_tool.widgets.table_widget import (
+    IngestTableWidget, STATUS_CONFLICT, STATUS_NEW, STATUS_DISCARDED,
+    COL_PROGRESS, STAGE_QUEUED, STAGE_COPYING, STAGE_DONE,
+)
 from square_core.plate_scanner import IngestSequenceItem
 
 
@@ -56,6 +59,54 @@ class TestTableWidgetConflicts(unittest.TestCase):
 
         self.table._on_checkbox_changed(id(item1), 0)
         self.assertFalse(self.table.has_unresolved_conflicts())
+
+
+class TestTableWidgetProgressAndBatchTools(unittest.TestCase):
+    """Per-row live ingest progress + the Media Type / batch-version tools."""
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_progress_bar_updates_without_full_rebuild(self):
+        item = _make_item("a", "SQ010", "SH0100", "Plate", "PL01", "/tmp/a.mov")
+        self.table.populate_table([item])
+
+        bar = self.table._table.cellWidget(0, COL_PROGRESS)
+        self.assertEqual(bar.value(), 0)
+
+        self.table.update_ingest_progress(item, STAGE_COPYING, 50)
+        bar = self.table._table.cellWidget(0, COL_PROGRESS)
+        self.assertEqual(bar.value(), 50)
+
+        self.table.update_ingest_progress(item, STAGE_DONE)
+        bar = self.table._table.cellWidget(0, COL_PROGRESS)
+        self.assertEqual(bar.value(), 100)
+
+    def test_batch_set_version(self):
+        item1 = _make_item("a", "SQ010", "SH0100", "Plate", "PL01", "/tmp/a.mov")
+        item2 = _make_item("b", "SQ020", "SH0200", "Plate", "PL02", "/tmp/b.mov")
+        self.table.populate_table([item1, item2])
+
+        self.table._batch_version_spin.setValue(7)
+        self.table._on_batch_set_version()
+
+        self.assertEqual(self.table.item_version[id(item1)], 7)
+        self.assertEqual(self.table.item_version[id(item2)], 7)
+
+    def test_batch_rename_media_type_and_case(self):
+        item = _make_item("a", "SQ010", "SH0100", "plate", "PL01", "/tmp/a.mov")
+        self.table.populate_table([item])
+
+        self.table._tmpl_edit.setText("BG Plate")
+        self.table._target_combo.setCurrentText("Media Type")
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._on_apply_rename()
+        self.assertEqual(item.media_type, "BG Plate")
+
+        self.table._apply_case("upper")
+        self.assertEqual(item.media_type, "BG PLATE")
 
 
 if __name__ == "__main__":

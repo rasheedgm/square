@@ -3,18 +3,19 @@ import re
 import shutil
 import hashlib
 import logging
+import threading
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from square_core.config import (
     SHOT_DIRECTORY_TEMPLATE,
     SHOT_FOLDER_STRUCTURE,
     DEFAULT_FILE_NAME_TEMPLATE,
+    DEFAULT_COPY_WORKERS,
+    VALID_TRANSFER_MODES,
     format_dest_filename
 )
 
 logger = logging.getLogger("SquareNAS")
-
-DEFAULT_COPY_WORKERS = 4
 
 try:
     import xxhash
@@ -26,9 +27,11 @@ except ImportError:
 class NASManager:
     """Handles NAS directory creation, plate versioning, and checksum-verified file transfers."""
 
-    def __init__(self, nas_root=None, dry_run=True):
+    def __init__(self, nas_root=None, dry_run=True, transfer_mode="copy", workers=None):
         self.nas_root = Path(nas_root) if nas_root else Path("X:/projects")
         self.dry_run = dry_run
+        self.transfer_mode = transfer_mode if transfer_mode in VALID_TRANSFER_MODES else "copy"
+        self.workers = workers if workers and workers > 0 else DEFAULT_COPY_WORKERS
 
     def calculate_checksum(self, filepath):
         """Calculates xxHash (fast) or MD5 for a file."""
@@ -159,26 +162,76 @@ class NASManager:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def copy_sequence(self, item, dest_dir, filename_template=None, version_num=1, proj_code="PROJ", progress_callback=None):
-        """Copies sequence files to dest_dir with optional renaming and checksum verification."""
-        tmpl = filename_template or DEFAULT_FILE_NAME_TEMPLATE
-        copied_files = []
-        total_files = len(item.files)
+    def _transfer_one_file(self, src_file: Path, dest_file: Path):
+        """
+        Transfers a single file using self.transfer_mode, with a safe
+        cascading fallback: symlink -> hardlink -> full copy. A hardlink
+        can't cross filesystems/volumes and a symlink can fail on Windows
+        without the right privilege -- either failure just drops to the
+        next safer mode rather than aborting the whole ingest, and always
+        logs what actually happened so it's never silent.
 
+        Returns the transfer mode that was actually used ("symlink" /
+        "hardlink" / "copy"). Checksum verification only applies to real
+        copies -- a hardlink/symlink's "destination" IS the same
+        underlying file, so hashing it again would be redundant.
+        """
+        mode = self.transfer_mode
+
+        if mode == "symlink":
+            try:
+                if dest_file.exists() or dest_file.is_symlink():
+                    dest_file.unlink()
+                os.symlink(src_file, dest_file)
+                return "symlink"
+            except OSError as e:
+                logger.warning(f"[NASManager] symlink failed for {dest_file.name} ({e}); falling back to hardlink")
+                mode = "hardlink"
+
+        if mode == "hardlink":
+            try:
+                if dest_file.exists():
+                    dest_file.unlink()
+                os.link(src_file, dest_file)
+                return "hardlink"
+            except OSError as e:
+                logger.warning(f"[NASManager] hardlink failed for {dest_file.name} ({e}); falling back to full copy")
+
+        shutil.copy2(src_file, dest_file)
+        src_hash = self.calculate_checksum(src_file)
+        dest_hash = self.calculate_checksum(dest_file)
+        if src_hash and dest_hash and src_hash != dest_hash:
+            raise IOError(f"Checksum mismatch for file {dest_file.name}! Src: {src_hash}, Dest: {dest_hash}")
+        return "copy"
+
+    def copy_sequence(self, item, dest_dir, filename_template=None, version_num=1, proj_code="PROJ", progress_callback=None):
+        """
+        Transfers sequence files to dest_dir (renaming per the filename
+        template) using self.transfer_mode. Files are transferred in
+        parallel across self.workers threads -- a single sequence's own
+        frames, not just separate sequences, since that's the common case
+        that actually needs to be faster (one shot with hundreds of
+        frames, not hundreds of one-frame shots).
+        """
+        tmpl = filename_template or DEFAULT_FILE_NAME_TEMPLATE
+        total_files = len(item.files)
         re_frame = re.compile(r"(?:[._]|^)(\d{3,7})\.[^.]+$")
 
-        if self.dry_run:
-            logger.info(f"[Mock NAS] Copying {total_files} files for plate '{item.plate_name}' to '{dest_dir}'")
-            for idx, src_file in enumerate(item.files):
-                filename = os.path.basename(src_file)
-                m_frame  = re_frame.search(filename)
-                frame_val = m_frame.group(1) if (m_frame and not item.is_video) else None
+        def _target_name(src_file):
+            filename = os.path.basename(src_file)
+            m_frame = re_frame.search(filename)
+            frame_val = m_frame.group(1) if (m_frame and not item.is_video) else None
+            return format_dest_filename(
+                tmpl, proj_code, item.sequence_code, item.shot_code,
+                getattr(item, "media_type", "") or "", item.plate_name,
+                version_num, frame=frame_val, ext=item.ext, media_name=item.media_name
+            )
 
-                target_name = format_dest_filename(
-                    tmpl, proj_code, item.sequence_code, item.shot_code,
-                    getattr(item, "media_type", "") or "", item.plate_name,
-                    version_num, frame=frame_val, ext=item.ext, media_name=item.media_name
-                )
+        if self.dry_run:
+            logger.info(f"[Mock NAS] {self.transfer_mode}: {total_files} files for plate '{item.plate_name}' -> '{dest_dir}'")
+            copied_files = []
+            for idx, src_file in enumerate(item.files):
+                target_name = _target_name(src_file)
                 dest_file = dest_dir / target_name
                 copied_files.append(str(dest_file))
                 if progress_callback:
@@ -187,32 +240,28 @@ class NASManager:
 
         os.makedirs(dest_dir, exist_ok=True)
 
-        for idx, src_file in enumerate(item.files):
-            filename = os.path.basename(src_file)
-            m_frame  = re_frame.search(filename)
-            frame_val = m_frame.group(1) if (m_frame and not item.is_video) else None
+        copied_files = [None] * total_files
+        progress_lock = threading.Lock()
+        done_count = 0
 
-            target_name = format_dest_filename(
-                tmpl, proj_code, item.sequence_code, item.shot_code,
-                getattr(item, "media_type", "") or "", item.plate_name,
-                version_num, frame=frame_val, ext=item.ext, media_name=item.media_name
-            )
+        def _do_transfer(idx, src_file):
+            target_name = _target_name(src_file)
             dest_file = dest_dir / target_name
+            mode_used = self._transfer_one_file(Path(src_file), dest_file)
+            return idx, str(dest_file), target_name, mode_used
 
-            shutil.copy2(src_file, dest_file)
+        workers = max(1, min(self.workers, total_files))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(_do_transfer, idx, f) for idx, f in enumerate(item.files)]
+            for future in as_completed(futures):
+                idx, dest_path, target_name, mode_used = future.result()
+                copied_files[idx] = dest_path
+                with progress_lock:
+                    done_count += 1
+                    if progress_callback:
+                        progress_callback(done_count, total_files, target_name)
 
-            # Perform checksum check
-            src_hash = self.calculate_checksum(src_file)
-            dest_hash = self.calculate_checksum(dest_file)
-
-            if src_hash and dest_hash and src_hash != dest_hash:
-                raise IOError(f"Checksum mismatch for file {target_name}! Src: {src_hash}, Dest: {dest_hash}")
-
-            copied_files.append(str(dest_file))
-            if progress_callback:
-                progress_callback(idx + 1, total_files, target_name)
-
-        logger.info(f"[NASManager] Copied {len(copied_files)} files to {dest_dir}")
+        logger.info(f"[NASManager] Transferred {len(copied_files)} files to {dest_dir} (mode={self.transfer_mode}, workers={workers})")
         return copied_files
 
     def check_all_plates(self, items, proj_code, progress_callback=None):
@@ -229,7 +278,7 @@ class NASManager:
                 proj_code, item.sequence_code, item.shot_code, mname, item=item
             )
 
-        with ThreadPoolExecutor(max_workers=min(DEFAULT_COPY_WORKERS, total or 1)) as pool:
+        with ThreadPoolExecutor(max_workers=min(self.workers, total or 1)) as pool:
             futures = {pool.submit(_check, item): item for item in items}
             done = 0
             for future in as_completed(futures):
@@ -242,23 +291,3 @@ class NASManager:
 
     check_all_media = check_all_plates
     get_media_version_info = get_plate_version_info
-
-    def copy_sequence_parallel(self, items_dest_pairs, workers=DEFAULT_COPY_WORKERS, progress_callback=None):
-        """
-        Copy multiple plate sequences in parallel.
-        items_dest_pairs: list of (item, dest_dir)
-        progress_callback(item, copied_files) called per completed plate.
-        """
-        results = []
-
-        def _copy(item, dest_dir):
-            return item, self.copy_sequence(item, dest_dir)
-
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_copy, item, dest): (item, dest) for item, dest in items_dest_pairs}
-            for future in as_completed(futures):
-                item, copied = future.result()
-                results.append((item, copied))
-                if progress_callback:
-                    progress_callback(item, copied)
-        return results

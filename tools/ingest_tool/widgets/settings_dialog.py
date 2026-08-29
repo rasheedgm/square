@@ -1,7 +1,7 @@
 from Qt import QtWidgets, QtCore, QtGui
-from square_core.config import StudioConfig
+from square_core.config import StudioConfig, VALID_TRANSFER_MODES
 from square_core.kitsu_client import KitsuClient
-from tools.qt_compat import ECHO_MODE_PASSWORD, HEADER_RESIZE_STRETCH
+from tools.qt_compat import ECHO_MODE_PASSWORD, HEADER_RESIZE_STRETCH, ALIGN_CENTER
 
 class SettingsDialog(QtWidgets.QDialog):
     """Settings modal for configuring Kitsu credentials and NAS storage paths."""
@@ -67,6 +67,33 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(nas_box)
 
+        # Copy Engine Group Box
+        copy_box = QtWidgets.QGroupBox("Copy Engine")
+        c_layout = QtWidgets.QFormLayout(copy_box)
+        c_layout.setSpacing(10)
+
+        self.transfer_mode_combo = QtWidgets.QComboBox()
+        self.transfer_mode_combo.addItem("Copy (safe default)", "copy")
+        self.transfer_mode_combo.addItem("Hardlink (same volume only, falls back to copy)", "hardlink")
+        self.transfer_mode_combo.addItem("Symlink (falls back to hardlink, then copy)", "symlink")
+        idx = self.transfer_mode_combo.findData(self.config.transfer_mode)
+        self.transfer_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.transfer_mode_combo.setToolTip(
+            "Copy is the only mode safe against the source file changing later, and the only\n"
+            "one that works across volumes/NAS boundaries. Hardlink/symlink save time and disk\n"
+            "space when the incoming drive and NAS root are on the same volume."
+        )
+
+        self.copy_workers_spin = QtWidgets.QSpinBox()
+        self.copy_workers_spin.setRange(1, 32)
+        self.copy_workers_spin.setValue(self.config.copy_workers)
+        self.copy_workers_spin.setToolTip("How many files to transfer in parallel per sequence")
+
+        c_layout.addRow("Transfer Mode:", self.transfer_mode_combo)
+        c_layout.addRow("Parallel Workers:", self.copy_workers_spin)
+
+        layout.addWidget(copy_box)
+
         # Pipeline Naming & Folder Templates Group Box
         tmpl_box = QtWidgets.QGroupBox("Pipeline Naming & Folder Structure Templates")
         t_layout = QtWidgets.QFormLayout(tmpl_box)
@@ -83,9 +110,13 @@ class SettingsDialog(QtWidgets.QDialog):
         self.shot_struct_edit.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
         self.shot_struct_edit.setPlainText("\n".join(self.config.shot_folder_structure))
 
+        self.default_tasks_edit = QtWidgets.QLineEdit(", ".join(self.config.tasks))
+        self.default_tasks_edit.setToolTip("Comma-separated default Kitsu task types offered when selecting tasks for an ingest batch")
+
         t_layout.addRow("File Naming Pattern:", self.filename_tmpl_edit)
         t_layout.addRow("Default Directory Pattern:", self.nas_dir_tmpl_edit)
         t_layout.addRow("Shot Folder Structure:", self.shot_struct_edit)
+        t_layout.addRow("Default Shot Tasks:", self.default_tasks_edit)
 
         layout.addWidget(tmpl_box)
 
@@ -94,10 +125,16 @@ class SettingsDialog(QtWidgets.QDialog):
         mt_layout = QtWidgets.QVBoxLayout(mt_box)
         mt_layout.setSpacing(6)
 
+        mt_hint = QtWidgets.QLabel("\"Preview\" controls whether that media type gets a low-res MOV generated and uploaded to Kitsu on ingest.")
+        mt_hint.setWordWrap(True)
+        mt_hint.setStyleSheet("color:#94A3B8; font-size:11px;")
+        mt_layout.addWidget(mt_hint)
+
         self.media_types_table = QtWidgets.QTableWidget()
-        self.media_types_table.setColumnCount(2)
-        self.media_types_table.setHorizontalHeaderLabels(["Media Type", "NAS Directory Path Pattern Template"])
+        self.media_types_table.setColumnCount(3)
+        self.media_types_table.setHorizontalHeaderLabels(["Media Type", "NAS Directory Path Pattern Template", "Preview"])
         self.media_types_table.horizontalHeader().setSectionResizeMode(1, HEADER_RESIZE_STRETCH)
+        self.media_types_table.setColumnWidth(2, 60)
         self.media_types_table.setMinimumHeight(120)
 
         self._populate_media_types_table()
@@ -129,21 +166,33 @@ class SettingsDialog(QtWidgets.QDialog):
         btn_layout.addWidget(self.save_btn)
         layout.addLayout(btn_layout)
 
+    def _mk_preview_checkbox(self, checked):
+        cell_w = QtWidgets.QWidget()
+        cell_l = QtWidgets.QHBoxLayout(cell_w)
+        cell_l.setContentsMargins(0, 0, 0, 0)
+        cell_l.setAlignment(ALIGN_CENTER)
+        chk = QtWidgets.QCheckBox()
+        chk.setChecked(checked)
+        cell_l.addWidget(chk)
+        cell_w.checkbox = chk
+        return cell_w
+
     def _populate_media_types_table(self):
         self.media_types_table.setRowCount(0)
         configs = getattr(self.config, "media_type_configs", {})
+        preview_types = set(getattr(self.config, "preview_enabled_media_types", []))
         for row_idx, (mtype, tmpl) in enumerate(configs.items()):
             self.media_types_table.insertRow(row_idx)
-            item_type = QtWidgets.QTableWidgetItem(mtype)
-            item_tmpl = QtWidgets.QTableWidgetItem(tmpl)
-            self.media_types_table.setItem(row_idx, 0, item_type)
-            self.media_types_table.setItem(row_idx, 1, item_tmpl)
+            self.media_types_table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(mtype))
+            self.media_types_table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(tmpl))
+            self.media_types_table.setCellWidget(row_idx, 2, self._mk_preview_checkbox(mtype in preview_types))
 
     def _on_add_media_type(self):
         row = self.media_types_table.rowCount()
         self.media_types_table.insertRow(row)
         self.media_types_table.setItem(row, 0, QtWidgets.QTableWidgetItem("NewType"))
         self.media_types_table.setItem(row, 1, QtWidgets.QTableWidgetItem("{nas_root}/{project_code}/shots/{seq}/{shot}/newtype/{name}"))
+        self.media_types_table.setCellWidget(row, 2, self._mk_preview_checkbox(False))
 
     def _on_remove_media_type(self):
         selected = self.media_types_table.selectedIndexes()
@@ -178,6 +227,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.config.cache_root = self.cache_root_edit.text().strip()
         self.config.filename_template = self.filename_tmpl_edit.text().strip()
         self.config.nas_dir_template = self.nas_dir_tmpl_edit.text().strip()
+        self.config.transfer_mode = self.transfer_mode_combo.currentData() or "copy"
+        self.config.copy_workers = self.copy_workers_spin.value()
+        self.config.tasks = [t.strip() for t in self.default_tasks_edit.text().split(",") if t.strip()]
 
         struct_lines = [
             line.strip() for line in self.shot_struct_edit.toPlainText().splitlines()
@@ -186,12 +238,18 @@ class SettingsDialog(QtWidgets.QDialog):
         self.config.shot_folder_structure = struct_lines
 
         configs = {}
+        preview_types = []
         for r in range(self.media_types_table.rowCount()):
             type_item = self.media_types_table.item(r, 0)
             pat_item  = self.media_types_table.item(r, 1)
+            preview_widget = self.media_types_table.cellWidget(r, 2)
             if type_item and pat_item and type_item.text().strip():
-                configs[type_item.text().strip()] = pat_item.text().strip()
+                mtype = type_item.text().strip()
+                configs[mtype] = pat_item.text().strip()
+                if preview_widget is not None and preview_widget.checkbox.isChecked():
+                    preview_types.append(mtype)
         self.config.media_type_configs = configs
+        self.config.preview_enabled_media_types = preview_types
 
         self.config.save()
         self.config_saved.emit()

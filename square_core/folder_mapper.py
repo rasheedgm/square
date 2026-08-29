@@ -738,23 +738,13 @@ class FolderMapper:
         try:
             with open(sidecar, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if "depth_map" in data:
-                self._depth_map        = {int(k): v for k, v in data.get("depth_map", {}).items()}
-                self._folder_overrides = data.get("folder_overrides", {})
-                self._media_types      = data.get("media_types", {})
-                self._token_rules      = data.get("token_rules", {})
-                self._item_overrides   = data.get("item_overrides", {})
-                self._pattern_rules    = data.get("pattern_rules", [])
-                self._table_state      = data.get("table_state", [])
-            else:
-                # Legacy flat depth dict
-                self._depth_map = {int(k): v for k, v in data.items()}
-                self._folder_overrides = {}
-                self._media_types      = {}
-                self._token_rules      = {}
-                self._item_overrides   = {}
-                self._pattern_rules    = []
-                self._table_state      = []
+            self._depth_map        = {int(k): v for k, v in data.get("depth_map", {}).items()}
+            self._folder_overrides = data.get("folder_overrides", {})
+            self._media_types      = data.get("media_types", {})
+            self._token_rules      = data.get("token_rules", {})
+            self._item_overrides   = data.get("item_overrides", {})
+            self._pattern_rules    = data.get("pattern_rules", [])
+            self._table_state      = data.get("table_state", [])
 
             if self._pattern_rules:
                 self.apply_pattern_rules()

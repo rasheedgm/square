@@ -304,23 +304,8 @@ class StudioConfig:
                     self.copy_workers = data.get("copy_workers", self.copy_workers)
                     self.transfer_mode = data.get("transfer_mode", self.transfer_mode)
 
-                    # ingest_presets replaces the older hierarchy_presets key (depth rules only,
-                    # no pattern rules). Read the new key when present; fall back to migrating
-                    # an old config's hierarchy_presets so nobody's saved presets vanish.
-                    if "ingest_presets" in data:
-                        self.ingest_presets = data["ingest_presets"]
-                    elif "hierarchy_presets" in data:
-                        self.ingest_presets = {
-                            name: {
-                                "name": preset.get("name", name),
-                                "depth_rules": preset.get("level_mappings", preset.get("depth_rules", {})),
-                                "pattern_rules": preset.get("pattern_rules", []),
-                            }
-                            for name, preset in data["hierarchy_presets"].items()
-                        }
-                    self.active_ingest_preset = data.get(
-                        "active_ingest_preset", data.get("active_hierarchy_preset", self.active_ingest_preset)
-                    )
+                    self.ingest_presets = data.get("ingest_presets", self.ingest_presets)
+                    self.active_ingest_preset = data.get("active_ingest_preset", self.active_ingest_preset)
             except Exception as e:
                 print(f"[StudioConfig] Error loading config: {e}")
 
@@ -359,9 +344,6 @@ class StudioConfig:
             "copy_workers": self.copy_workers,
             "transfer_mode": self.transfer_mode,
         })
-        # Drop the legacy keys once migrated so they don't linger stale forever.
-        on_disk.pop("hierarchy_presets", None)
-        on_disk.pop("active_hierarchy_preset", None)
 
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(on_disk, f, indent=4)

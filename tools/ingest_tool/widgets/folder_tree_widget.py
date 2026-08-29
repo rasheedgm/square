@@ -192,7 +192,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
     # Signal emitted when user clicks Load (is_update=False) or Update (is_update=True)
     # Signal signature: (root_path: str, mapper: FolderMapper, selected_paths: set/None, is_update: bool)
     load_requested = QtCore.Signal(str, object, object, bool)
-    scan_requested = load_requested   # back-compat alias
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -234,6 +233,12 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._patterns_btn.setEnabled(False)
         self._patterns_btn.clicked.connect(self._on_manage_patterns)
 
+        self._auto_detect_btn = QtWidgets.QPushButton("Auto-Detect")
+        self._auto_detect_btn.setToolTip("Guess Sequence/Shot/Media Name depth tags from folder naming conventions")
+        self._auto_detect_btn.setFixedHeight(28)
+        self._auto_detect_btn.setEnabled(False)
+        self._auto_detect_btn.clicked.connect(self._on_auto_detect)
+
         self._clear_btn = QtWidgets.QPushButton("Clear")
         self._clear_btn.setToolTip("Remove all level tags")
         self._clear_btn.setFixedHeight(28)
@@ -243,6 +248,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         btn_row.addWidget(self._browse_btn)
         btn_row.addWidget(self._preset_combo, stretch=1)
         btn_row.addWidget(self._patterns_btn)
+        btn_row.addWidget(self._auto_detect_btn)
         btn_row.addWidget(self._clear_btn)
         layout.addLayout(btn_row)
 
@@ -388,6 +394,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         )
         self._clear_btn.setEnabled(True)
         self._patterns_btn.setEnabled(True)
+        self._auto_detect_btn.setEnabled(True)
         self._load_btn.setEnabled(True)
         self._update_btn.setEnabled(True)
         self._drop_hint.hide()
@@ -974,9 +981,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         if self._root_path and self._mapper:
             selected_paths = self.get_selected_file_paths()
             self.load_requested.emit(self._root_path, self._mapper, selected_paths, is_update)
-
-    def _on_analyse(self):
-        self._on_load(is_update=False)
 
     # ------------------------------------------------------------------
     # Helpers

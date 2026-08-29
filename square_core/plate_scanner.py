@@ -154,6 +154,3 @@ class PlateScanner:
 
         items.extend(single_videos)
         return items
-
-
-MediaScanner = PlateScanner

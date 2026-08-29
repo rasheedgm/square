@@ -8,7 +8,7 @@ from Qt import QtCore, QtWidgets, QtGui
 from square_core import __version__
 from square_core.config import StudioConfig
 from square_core.kitsu_client import KitsuClient
-from square_core.plate_scanner import MediaScanner
+from square_core.plate_scanner import PlateScanner
 from square_core.nas_manager import NASManager
 from square_core.proxy_generator import ProxyGenerator
 
@@ -581,7 +581,7 @@ class MainWindow(QtWidgets.QMainWindow):
             elif folder_mapper and folder_mapper._table_state and not is_update:
                 items = folder_mapper.get_saved_table_items()
             else:
-                scanner = MediaScanner(root_path)
+                scanner = PlateScanner(root_path)
                 items   = scanner.scan()
                 if selected_paths:
                     filtered = []
@@ -605,10 +605,6 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             logger.error(f"[IngestMainUI] Error in on_load_media: {e}", exc_info=True)
             raise e
-
-    def on_scan_folder(self, root_path, folder_mapper=None, selected_paths=None, is_update=False):
-        """Alias for backward compatibility."""
-        self.on_load_media(root_path, folder_mapper, selected_paths, is_update)
 
     def _start_nas_check(self, items):
         """Launch background NAS duplicate/version check."""

@@ -51,7 +51,7 @@ def test_full_gui_flow():
     # fresh in a temp dir rather than depending on a committed test_data folder.
     sample_dir = create_sample_media(base_dir=Path(tempfile.mkdtemp()) / "incoming_plates")
     log_step(f"[GUI Test] Starting scan folder: {sample_dir}")
-    window.on_scan_folder(str(sample_dir))
+    window.on_load_media(str(sample_dir))
     log_step(f"[GUI Test] Table populated with {window.table_widget.rowCount()} rows.")
     assert window.table_widget.rowCount() > 0
 

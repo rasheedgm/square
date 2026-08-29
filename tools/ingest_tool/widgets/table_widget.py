@@ -160,10 +160,6 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._run_conflict_detection()
         self._refresh_table()
 
-    def populate_items(self, items):
-        """Alias for backward compatibility."""
-        self.populate_table(items)
-
     def update_ingest_progress(self, item, stage: str, percent=None):
         """
         Called from the ingest worker thread (via a queued signal) as each

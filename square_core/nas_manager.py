@@ -288,6 +288,3 @@ class NASManager:
                 if progress_callback:
                     progress_callback(done, total)
         return results
-
-    check_all_media = check_all_plates
-    get_media_version_info = get_plate_version_info

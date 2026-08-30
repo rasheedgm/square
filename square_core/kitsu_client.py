@@ -255,6 +255,9 @@ class KitsuClient:
             lines.append(f"Checksum (first file, xxHash/MD5): {checksum}")
         if getattr(item, "files", None):
             lines.append(f"Source: {os.path.basename(item.files[0])}")
+        extra_tags = getattr(item, "extra_tags", None)
+        if extra_tags:
+            lines.append("Tags: " + ", ".join(f"{k}={v}" for k, v in extra_tags.items()))
         return "\n".join(lines)
 
     def add_version_comment(self, task, comment):

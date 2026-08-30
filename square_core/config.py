@@ -171,49 +171,17 @@ SHOT_RENDER_TEMPLATE = os.path.join(
 )
 
 
-DEFAULT_TOKEN_PRESETS = {
-    "Shot_Media_Version": {
-        "name": "Shot_Media_Version",
-        "delimiter": "_",
-        "mapping": {"shot_code": [0], "media_name": [1], "version": [2]},
-        "merged_ranges": []
-    },
-    "Seq_Shot_Media_Version": {
-        "name": "Seq_Shot_Media_Version",
-        "delimiter": "_",
-        "mapping": {"sequence_code": [0], "shot_code": [1], "media_name": [2], "version": [3]},
-        "merged_ranges": []
-    }
-}
-
-# Ingest Presets — the reusable, saveable unit of "how do I tag this delivery".
-# Each preset bundles depth rules (apply to every folder at a given depth) and
-# pattern rules (apply anywhere in the tree, any depth, by regex/glob match on
-# name) so a whole incoming-folder convention can be captured once and
-# re-applied to every future batch that follows the same convention.
-DEFAULT_INGEST_PRESETS = {
-    "VFX Standard 3-Level": {
-        "name": "VFX Standard 3-Level",
-        "depth_rules": {
-            "1": {"type": "direct", "tag": "seq"},
-            "2": {"type": "direct", "tag": "shot"},
-            "3": {"type": "direct", "tag": "media_name"}
-        },
-        "pattern_rules": []
-    },
-    "Nested Sequence + Combined File": {
-        "name": "Nested Sequence + Combined File",
-        "depth_rules": {
-            "1": {"type": "direct", "tag": "seq"},
-            "2": {"type": "token_preset", "preset_name": "Shot_Media_Version"}
-        },
-        "pattern_rules": []
-    },
-}
-# Deliberately no shipped example of a pattern-based preset: there is no
-# universal shot/seq naming convention (prefix or none, numeric or with
-# letters), so a real one is only meaningful once a studio builds and saves
-# it for their own footage via the Pattern Rule editor ("Tag by Pattern...").
+# Ingest Presets — the reusable, saveable unit of "how do I tag this
+# delivery": an ordered list of Path Pattern template strings (see
+# path_pattern.py), tried in order with the first match winning, so a whole
+# incoming-folder convention -- including its exceptions -- can be captured
+# once and re-applied to every future batch that follows it.
+#
+# Deliberately shipped empty: there is no universal delivery shape (folder
+# depth, naming convention, prefix or none) for a default preset to assume.
+# A real one is only meaningful once a studio builds and saves it for their
+# own footage via the Path Pattern builder ("Build Path Pattern...").
+DEFAULT_INGEST_PRESETS = {}
 
 DEFAULT_MEDIA_TYPE_CONFIGS = {
     "Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/plates/{media_name}_v{version:03d}",
@@ -254,7 +222,6 @@ class StudioConfig:
         self.tasks = DEFAULT_SHOT_TASKS
         self.dry_run = True
 
-        self.token_presets = dict(DEFAULT_TOKEN_PRESETS)
         self.ingest_presets = dict(DEFAULT_INGEST_PRESETS)
         self.active_ingest_preset = "VFX Standard 3-Level"
         self.media_type_configs = dict(DEFAULT_MEDIA_TYPE_CONFIGS)
@@ -290,7 +257,6 @@ class StudioConfig:
                     self.shot_folder_structure = data.get("shot_folder_structure", self.shot_folder_structure)
                     self.dry_run = data.get("dry_run", self.dry_run)
                     self.tasks = data.get("tasks", self.tasks)
-                    self.token_presets = data.get("token_presets", self.token_presets)
                     self.media_type_configs = data.get("media_type_configs", self.media_type_configs)
                     self.preview_enabled_media_types = data.get(
                         "preview_enabled_media_types", self.preview_enabled_media_types
@@ -330,7 +296,6 @@ class StudioConfig:
             "shot_folder_structure": self.shot_folder_structure,
             "dry_run": self.dry_run,
             "tasks": self.tasks,
-            "token_presets": self.token_presets,
             "ingest_presets": self.ingest_presets,
             "active_ingest_preset": self.active_ingest_preset,
             "media_type_configs": self.media_type_configs,

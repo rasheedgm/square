@@ -26,9 +26,9 @@ class TestIngestPipeline(unittest.TestCase):
 
     def test_01_scanner(self):
         from square_core.folder_mapper import FolderMapper
+        from square_core.path_pattern import PathPattern
         mapper = FolderMapper(self.test_media_dir)
-        mapper.set_level(1, "seq")
-        mapper.set_level(2, "shot")
+        mapper.add_path_pattern(PathPattern(template="<sequence>/*/*"))
         items = mapper.build_items()
         
         self.assertGreater(len(items), 0, "Mapper should discover media items")

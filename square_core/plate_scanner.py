@@ -20,6 +20,7 @@ class IngestSequenceItem:
         self.media_name    = ""
         self.media_type    = ""
         self.version       = 1
+        self.extra_tags    = {}   # custom Path Pattern tags that aren't one of the 5 canonical fields
 
         self.start_frame   = 1001
         self.end_frame     = 1001

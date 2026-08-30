@@ -42,14 +42,15 @@ COL_SEQ        = 2
 COL_SHOT       = 3
 COL_TYPE       = 4
 COL_MEDIA_NAME = 5
-COL_DEST       = 6
-COL_FRAMES     = 7
-COL_FPS        = 8
-COL_RES        = 9
-COL_CS         = 10
-COL_VERSION    = 11
-COL_STATUS     = 12
-COL_PROGRESS   = 13
+COL_EXTRA      = 6
+COL_DEST       = 7
+COL_FRAMES     = 8
+COL_FPS        = 9
+COL_RES        = 10
+COL_CS         = 11
+COL_VERSION    = 12
+COL_STATUS     = 13
+COL_PROGRESS   = 14
 
 HEADERS = [
     "",             # checkbox
@@ -58,6 +59,7 @@ HEADERS = [
     "Shot",
     "Media Type",
     "Media Name",
+    "Extra Tags",
     "Destination",
     "Frames",
     "FPS",
@@ -297,6 +299,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._table.setColumnWidth(COL_SHOT, 80)
         self._table.setColumnWidth(COL_TYPE, 85)
         self._table.setColumnWidth(COL_MEDIA_NAME, 90)
+        self._table.setColumnWidth(COL_EXTRA, 140)
         self._table.setColumnWidth(COL_DEST, 220)
         self._table.setColumnWidth(COL_FRAMES, 130)
         self._table.setColumnWidth(COL_FPS, 45)
@@ -433,6 +436,15 @@ class IngestTableWidget(QtWidgets.QWidget):
             self._table.setItem(row_idx, COL_SHOT,       self._mk_cell(item.shot_code or ""))
             self._table.setItem(row_idx, COL_TYPE,       self._mk_cell(getattr(item, "media_type", "") or ""))
             self._table.setItem(row_idx, COL_MEDIA_NAME, self._mk_cell(getattr(item, "media_name", "") or ""))
+
+            # ── Extra Tags (read-only) -- anything a Path Pattern captured that
+            # isn't one of the 5 built-in fields (camera, shoot date, colorspace...) ──
+            extra_tags = getattr(item, "extra_tags", None) or {}
+            extra_text = ", ".join(f"{k}={v}" for k, v in extra_tags.items())
+            extra_cell = self._mk_cell(extra_text, editable=False)
+            if extra_text:
+                extra_cell.setToolTip(extra_text)
+            self._table.setItem(row_idx, COL_EXTRA, extra_cell)
 
             # ── Destination cell (Filename in cell, full destination path in tooltip) ──
             from square_core.config import DEFAULT_FILE_NAME_TEMPLATE, format_dest_filename

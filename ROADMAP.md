@@ -49,13 +49,13 @@ The pipeline tools will be built around a lightweight Python core library (`squa
 
 ### 1.1 Key Features & Workflow
 - **Folder Scanner:** Drag & drop or browse incoming raw plates (EXR, DPX, ProRes, RED/ARRI raw).
-- **Smart Sequence Parsing:** Regex engine to auto-detect Sequence (`SQ010`), Shot (`SH0100`), Plate Code (`PL01`), and Frame Range (`1001-1150`).
+- **Path Pattern Tagging:** No hardcoded naming convention -- there isn't a universal one across clients/vendors. Instead, tag one real example file's whole path (every folder plus the filename), piece by piece, and that becomes a reusable template matched against every other file under the root. Frame Range is still auto-parsed from the frame-numbered files themselves.
 - **Metadata Extraction:** Extract EXR/DPX headers using `OpenImageIO` / `ffprobe` / `PyOpenColorIO`:
   - Resolution, Aspect Ratio, Frame Rate (FPS)
   - Color Space (ACEScg, Rec.709, ARRI LogC)
   - Timecode & Frame Range
 - **Interactive PyQt UI:**
-  - Table grid showing detected sequences, shots, and plate details.
+  - Table grid showing detected sequences, shots, and media details.
   - Inline editing for overriding sequence/shot codes, frame range, or metadata before commit.
   - Validation indicators (flagging missing frames or unsupported formats).
 - **Execution & Ingestion Pipeline:**
@@ -66,8 +66,8 @@ The pipeline tools will be built around a lightweight Python core library (`squa
        ├── shots/
        │   └── {seq}/
        │       └── {shot}/
-       │           ├── plates/{plate_name}/
-       │           │   └── v001/{shot}_{plate_name}_v001.####.exr
+       │           ├── plates/{media_name}/
+       │           │   └── v001/{shot}_{media_name}_v001.####.exr
        │           ├── work/
        │           │   ├── comp/
        │           │   ├── roto/
@@ -77,7 +77,7 @@ The pipeline tools will be built around a lightweight Python core library (`squa
        └── assets/
      ```
   3. **High-Speed Copy & Verification:** Copy plates to designated NAS folders with xxHash / MD5 checksum verification.
-  4. **Low-Res Proxy Generation:** Generate H.264/MP4 preview proxies using `ffmpeg` with burnt-in frame numbers and TC (timecode).
+  4. **Low-Res Proxy Generation:** Generate H.264/MP4 preview proxies using `ffmpeg` (falls back to a static info slate when the source can't be decoded). Burnt-in frame/timecode overlay is not implemented yet.
   5. **Kitsu Preview Attachment:** Attach low-res proxy preview to Kitsu shot entry for instant web browser review.
 
 ---

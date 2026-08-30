@@ -4,6 +4,13 @@
 **Status:** Completed & Verified  
 **Git Commit:** `2314fe4` (`Phase 1: Implement square_core package, PyQt6 Ingest Tool with Qt.py, and unit test suite`)
 
+> **Note:** This is a point-in-time record of the initial Phase 1 build. The
+> tagging approach described below (regex-guessed Sequence/Shot/Plate at
+> scan time) and a few other details have since been reworked -- see
+> `implementation_plan.md` for the current architecture. Corrected below
+> only where this doc asserted something that's no longer true; left as a
+> historical record otherwise.
+
 ---
 
 ## Accomplishments
@@ -19,16 +26,16 @@
 ### 2. Core VFX Library (`square_core`)
 - **`config.py`**: Studio configuration manager with NAS paths (`X:/projects`), Kitsu API endpoints, and folder templates.
 - **`kitsu_client.py`**: Kitsu wrapper with gazu API + Mock/Dry-Run support for creating projects, sequences, shots, default tasks (`Prep`, `Roto`, `Matchmove`, `3D`, `Comp`), and uploading preview MP4s.
-- **`plate_scanner.py`**: Smart sequence & video scanner with regex pattern matching (`SQ010`, `SH0100`, `PL01`), start/end frame parsing, and missing frame warning detection.
+- **`plate_scanner.py`**: Sequence & video scanner -- groups frame files into sequence objects with start/end frame parsing and missing frame detection. Sequence/Shot/Media Name are no longer guessed here via regex; that's `folder_mapper.py` + `path_pattern.py`'s job now (build-by-example Path Pattern tagging, not a hardcoded naming convention).
 - **`metadata_extractor.py`**: Reads width, height, resolution, FPS, timecode, and color space metadata from headers.
-- **`nas_manager.py`**: Generates NAS directory structures (`{nas_root}/{project}/shots/{seq}/{shot}/plates/{plate}/v001/`) and executes file copies with **xxHash** checksum verification.
-- **`proxy_generator.py`**: Low-res H.264 MP4 proxy generator with burnt-in frame counter & timecode overlay (with static slate image fallback).
+- **`nas_manager.py`**: Generates NAS directory structures (`{nas_root}/{project}/shots/{seq}/{shot}/plates/{media_name}/v001/`) and executes file copies with **xxHash** checksum verification.
+- **`proxy_generator.py`**: Low-res H.264 MP4 proxy generator (static slate image fallback when the source can't be decoded). No burnt-in frame counter/timecode overlay is actually implemented.
 
 ### 3. Desktop Application (`tools/ingest_tool`)
 - **Built with `Qt.py`** for full cross-binding portability.
 - **Dark Studio Theme (`style.qss`)**: Slate dark theme with rounded cards, custom headers, and vibrant badges.
-- **Scanner Widget**: Drag-and-drop zone + file browser for incoming plate folders.
-- **Interactive Table Widget**: Editable grid showing detected sequences, shots, plates, frame ranges, missing frame alerts, FPS, and colorspace.
+- **Folder Tree Widget**: Drag-and-drop zone + file browser for incoming media folders, with Path Pattern tagging on real leaf items (current tagging workflow documented in `implementation_plan.md`).
+- **Interactive Table Widget**: Editable grid showing detected sequences, shots, media names, frame ranges, missing frame alerts, FPS, and colorspace.
 - **Progress Modal & Threaded Worker**: Multi-step background execution keeping the UI smooth and responsive.
 
 ---

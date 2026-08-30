@@ -8,7 +8,6 @@ DEFAULT_KITSU_PASSWORD = os.getenv("KITSU_PASSWORD", "12345678")
 
 # NAS Storage Settings
 DEFAULT_NAS_ROOT = os.getenv("SQUARE_NAS_ROOT", "X:/projects")
-DEFAULT_LOCAL_CACHE_ROOT = os.getenv("SQUARE_CACHE_ROOT", "C:/cache/square")
 
 # Default Tasks created for new shots (Ingest first)
 DEFAULT_SHOT_TASKS = [
@@ -207,7 +206,6 @@ class StudioConfig:
         self.kitsu_user = DEFAULT_KITSU_USER
         self.kitsu_password = DEFAULT_KITSU_PASSWORD
         self.nas_root = DEFAULT_NAS_ROOT
-        self.cache_root = DEFAULT_LOCAL_CACHE_ROOT
         self.filename_template = DEFAULT_FILE_NAME_TEMPLATE
         self.nas_dir_template = SHOT_DIRECTORY_TEMPLATE
         self.shot_folder_structure = list(SHOT_FOLDER_STRUCTURE)
@@ -243,7 +241,6 @@ class StudioConfig:
                     self.kitsu_user = data.get("kitsu_user", self.kitsu_user)
                     self.kitsu_password = data.get("kitsu_password", self.kitsu_password)
                     self.nas_root = data.get("nas_root", self.nas_root)
-                    self.cache_root = data.get("cache_root", self.cache_root)
                     self.filename_template = data.get("filename_template", self.filename_template)
                     self.nas_dir_template = data.get("nas_dir_template", self.nas_dir_template)
                     self.shot_folder_structure = data.get("shot_folder_structure", self.shot_folder_structure)
@@ -282,7 +279,6 @@ class StudioConfig:
             "kitsu_user": self.kitsu_user,
             "kitsu_password": self.kitsu_password,
             "nas_root": self.nas_root,
-            "cache_root": self.cache_root,
             "filename_template": self.filename_template,
             "nas_dir_template": self.nas_dir_template,
             "shot_folder_structure": self.shot_folder_structure,

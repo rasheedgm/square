@@ -30,7 +30,7 @@ class SettingsDialog(QtWidgets.QDialog):
         k_layout.setSpacing(10)
 
         self.kitsu_url_edit = QtWidgets.QLineEdit(self.config.kitsu_url)
-        self.kitsu_url_edit.setPlaceholderText("https://kitsu.squarevfx.com/api")
+        self.kitsu_url_edit.setPlaceholderText("http://kitsu-host/api  (use https:// only if your server actually has SSL)")
 
         self.kitsu_user_edit = QtWidgets.QLineEdit(self.config.kitsu_user)
         self.kitsu_user_edit.setPlaceholderText("pipeline@squarevfx.com")
@@ -45,6 +45,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.lbl_conn_result = QtWidgets.QLabel("")
         self.lbl_conn_result.setStyleSheet("font-size: 12px; font-weight: bold;")
+        self.lbl_conn_result.setWordWrap(True)
 
         k_layout.addRow("Kitsu Server Host URL:", self.kitsu_url_edit)
         k_layout.addRow("Kitsu User Email:", self.kitsu_user_edit)
@@ -55,15 +56,13 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(kitsu_box)
 
         # NAS Storage Group Box
-        nas_box = QtWidgets.QGroupBox("NAS Storage & Local Cache Settings")
+        nas_box = QtWidgets.QGroupBox("NAS Storage Settings")
         n_layout = QtWidgets.QFormLayout(nas_box)
         n_layout.setSpacing(10)
 
         self.nas_root_edit = QtWidgets.QLineEdit(self.config.nas_root)
-        self.cache_root_edit = QtWidgets.QLineEdit(self.config.cache_root)
 
         n_layout.addRow("NAS Storage Root:", self.nas_root_edit)
-        n_layout.addRow("Local SSD Cache Root:", self.cache_root_edit)
 
         layout.addWidget(nas_box)
 
@@ -215,16 +214,21 @@ class SettingsDialog(QtWidgets.QDialog):
         if success and client.gazu:
             self.lbl_conn_result.setText("✅ Connected Successfully to Kitsu!")
             self.lbl_conn_result.setStyleSheet("color: #10B981; font-weight: bold;")
+            self.lbl_conn_result.setToolTip("")
         else:
-            self.lbl_conn_result.setText("❌ Connection Failed. Check URL / Login credentials or server status.")
+            reason = client.last_error or "Check URL / login credentials or server status."
+            hint = ""
+            if "ssl" in reason.lower() and url.lower().startswith("https://"):
+                hint = " (Tip: if this Kitsu server doesn't have SSL, try http:// instead of https://.)"
+            self.lbl_conn_result.setText(f"❌ Connection Failed: {reason}{hint}")
             self.lbl_conn_result.setStyleSheet("color: #EF4444; font-weight: bold;")
+            self.lbl_conn_result.setToolTip(reason)
 
     def on_save(self):
         self.config.kitsu_url = self.kitsu_url_edit.text().strip()
         self.config.kitsu_user = self.kitsu_user_edit.text().strip()
         self.config.kitsu_password = self.kitsu_pass_edit.text().strip()
         self.config.nas_root = self.nas_root_edit.text().strip()
-        self.config.cache_root = self.cache_root_edit.text().strip()
         self.config.filename_template = self.filename_tmpl_edit.text().strip()
         self.config.nas_dir_template = self.nas_dir_tmpl_edit.text().strip()
         self.config.transfer_mode = self.transfer_mode_combo.currentData() or "copy"

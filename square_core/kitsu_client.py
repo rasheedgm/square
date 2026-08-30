@@ -8,12 +8,13 @@ class KitsuClient:
     """Wrapper around CGWire gazu API for live Kitsu DB operations."""
 
     def __init__(self, host=None, email=None, password=None, dry_run=False):
-        self.host = host or "https://kitsu.squarevfx.com/api"
+        self.host = host or "http://localhost/api"
         self.email = email or "pipeline@squarevfx.com"
         self.password = password or "secret"
         self.dry_run = dry_run
         self.is_connected = False
         self.gazu = None
+        self.last_error = None   # the real exception from the last failed connect(), for surfacing in the UI
         self._mock_projects = [
             {"id": "11111111-1111-1111-1111-111111111111", "name": "Feature Film Alpha", "code": "FFA"},
             {"id": "22222222-2222-2222-2222-222222222222", "name": "Commercial Brand X", "code": "CBX"},
@@ -22,6 +23,7 @@ class KitsuClient:
 
     def connect(self):
         """Attempts to connect to Kitsu via gazu API using configured host and credentials."""
+        self.last_error = None
         if self.dry_run:
             logger.info("[KitsuClient] Operating in DRY-RUN / MOCK mode.")
             self.is_connected = True
@@ -36,6 +38,11 @@ class KitsuClient:
             logger.info(f"[KitsuClient] Successfully connected to Kitsu at {self.host}")
             return True
         except Exception as e:
+            # Kept on the instance (not just logged) so the UI -- Settings'
+            # "Test Connection" button, the main window's status indicator --
+            # can show the real reason (SSL, DNS, wrong credentials, refused
+            # connection, ...) instead of a one-size-fits-all failure message.
+            self.last_error = str(e)
             logger.warning(f"[KitsuClient] Could not connect to live Kitsu server ({self.host}): {e}. Operating in offline mock mode.")
             self.is_connected = False
             return False

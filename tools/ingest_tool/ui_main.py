@@ -519,9 +519,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.is_kitsu_live:
             self.status_indicator.setText("Connected to Kitsu")
             self.status_indicator.setStyleSheet("color:#10B981; font-weight:bold;")
+            self.status_indicator.setToolTip("")
         else:
             self.status_indicator.setText("Offline / Mock Mode")
             self.status_indicator.setStyleSheet("color:#F59E0B; font-weight:bold;")
+            reason = getattr(self.kitsu, "last_error", None)
+            self.status_indicator.setToolTip(f"Could not connect to Kitsu: {reason}" if reason else "")
 
     def load_projects(self):
         self.project_combo.clear()

@@ -64,7 +64,7 @@ class DryRunResultsDialog(QtWidgets.QDialog):
             "Source Item",
             "Seq / Shot",
             "Type",
-            "Plate",
+            "Media Name",
             "Ver",
             "Res",
             "Target Destination Directory",
@@ -93,7 +93,7 @@ class DryRunResultsDialog(QtWidgets.QDialog):
             src_name  = item.get("source_name", "")
             seq_shot  = f"{item.get('sequence_code')} / {item.get('shot_code')}"
             mtype     = item.get("media_type", "Plate")
-            plate_n   = item.get("plate_name", "")
+            media_n   = item.get("media_name", "")
             ver_str   = f"v{item.get('version', 1):03d}"
             res_str   = item.get("resolution", "")
             dest_dir  = item.get("dest_dir", "")
@@ -103,7 +103,7 @@ class DryRunResultsDialog(QtWidgets.QDialog):
             table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(src_name))
             table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(seq_shot))
             table.setItem(row_idx, 2, QtWidgets.QTableWidgetItem(mtype))
-            table.setItem(row_idx, 3, QtWidgets.QTableWidgetItem(plate_n))
+            table.setItem(row_idx, 3, QtWidgets.QTableWidgetItem(media_n))
             table.setItem(row_idx, 4, QtWidgets.QTableWidgetItem(ver_str))
             table.setItem(row_idx, 5, QtWidgets.QTableWidgetItem(res_str))
 

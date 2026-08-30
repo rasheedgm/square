@@ -28,20 +28,14 @@ VALID_TRANSFER_MODES = ("copy", "hardlink", "symlink")
 # Non-visual types (Audio, LUT, Matte, ...) are skipped unless added here.
 DEFAULT_PREVIEW_ENABLED_MEDIA_TYPES = ["Plate", "Ref", "BG Plate", "Comp Render", "Precomp"]
 
-# Naming Convention Regex Templates
-REGEX_SEQUENCE = r"(?i)(?:SQ|seq)[-_]?(\d{3,4})"
-REGEX_SHOT = r"(?i)(?:SH|shot)[-_]?(\d{3,4})"
-REGEX_MEDIA_NAME = r"(?i)(?:PL|plate|media|name)[-_]?(\w+|\d+)"
-REGEX_FRAME = r"\.(\d{4,7})\.(exr|dpx|png|jpg|jpeg|tif|tiff)$"
-
 # Default File Naming Template
 # Variables: {project}, {seq}, {shot}, {type}, {name}, {version}, {frame}, {ext}
 DEFAULT_FILE_NAME_TEMPLATE = "{seq}_{shot}_{type}_{name}_v{version:03d}.{frame}{ext}"
 
 
-def format_dest_filename(template, proj_code, sequence_code, shot_code, media_type, plate_name=None, version_num=1, frame=None, ext=".exr", media_name=None):
+def format_dest_filename(template, proj_code, sequence_code, shot_code, media_type, media_name=None, version_num=1, frame=None, ext=".exr"):
     mtype = (media_type or "").strip()
-    mname = (media_name or plate_name or "").strip()
+    mname = (media_name or "").strip()
     clean_ext = ext if (ext and ext.startswith(".")) else (f".{ext}" if ext else ".exr")
 
     res = template or DEFAULT_FILE_NAME_TEMPLATE
@@ -49,10 +43,8 @@ def format_dest_filename(template, proj_code, sequence_code, shot_code, media_ty
     res = res.replace("{seq}", sequence_code or "")
     res = res.replace("{shot}", shot_code or "")
     res = res.replace("{media_type}", mtype)
-    res = res.replace("{plate_type}", mtype)
     res = res.replace("{type}", mtype)
     res = res.replace("{media_name}", mname)
-    res = res.replace("{plate_name}", mname)
     res = res.replace("{name}", mname)
     res = res.replace("{version:03d}", f"{version_num:03d}")
     res = res.replace("{version}", f"{version_num:03d}")
@@ -67,7 +59,7 @@ def format_dest_filename(template, proj_code, sequence_code, shot_code, media_ty
     return res
 
 # NAS Directory Template
-# Formats into: X:/projects/PROJ_NAME/shots/SQ010/SH0100/input/{plate_type}_{plate_name}/v{version:03d}/{resolution}
+# Formats into: X:/projects/PROJ_NAME/shots/SQ010/SH0100/input/{media_type}_{media_name}/v{version:03d}/{resolution}
 SHOT_DIRECTORY_TEMPLATE = os.path.join(
     "{nas_root}",
     "{project_code}",
@@ -75,7 +67,7 @@ SHOT_DIRECTORY_TEMPLATE = os.path.join(
     "{sequence_code}",
     "{shot_code}",
     "input",
-    "{plate_type}_{plate_name}",
+    "{media_type}_{media_name}",
     "v{version:03d}",
     "{resolution}"
 )

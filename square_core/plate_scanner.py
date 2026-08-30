@@ -36,14 +36,6 @@ class IngestSequenceItem:
         self.parse_frames()
         self.extract_metadata()
 
-    @property
-    def plate_name(self):
-        return self.media_name
-
-    @plate_name.setter
-    def plate_name(self, value):
-        self.media_name = value
-
     def parse_frames(self):
         if self.is_video or not self.files:
             return

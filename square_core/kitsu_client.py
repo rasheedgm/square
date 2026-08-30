@@ -101,13 +101,13 @@ class KitsuClient:
             "project_id": project_arg.get("id")
         }
 
-    def get_or_create_shot(self, project, sequence, shot_name, plate_name="PL01", frame_in=1001, frame_out=1100, fps=24.0, resolution="1920x1080", colorspace="ACEScg", nas_path="", description=""):
-        """Fetches shot or creates it in Kitsu DB with frame range & structured plate metadata."""
+    def get_or_create_shot(self, project, sequence, shot_name, media_name="PL01", frame_in=1001, frame_out=1100, fps=24.0, resolution="1920x1080", colorspace="ACEScg", nas_path="", description=""):
+        """Fetches shot or creates it in Kitsu DB with frame range & structured media metadata."""
         project_arg = project if isinstance(project, dict) else {"id": str(project)}
         sequence_arg = sequence if isinstance(sequence, dict) else {"id": str(sequence)}
 
-        new_plate_info = {
-            "plate_name": plate_name,
+        new_media_info = {
+            "media_name": media_name,
             "nas_path": nas_path,
             "frame_range": f"{frame_in}-{frame_out}",
             "fps": fps,
@@ -124,12 +124,12 @@ class KitsuClient:
                         "frame_in": frame_in,
                         "frame_out": frame_out,
                         "fps": fps,
-                        "plate_name": plate_name,
+                        "media_name": media_name,
                         "resolution": resolution,
                         "colorspace": colorspace,
                         "nas_path": nas_path,
                         "description": description,
-                        "plates": {plate_name: new_plate_info}
+                        "media_items": {media_name: new_media_info}
                     }
                     shot = self.gazu.shot.new_shot(
                         project_arg,
@@ -141,20 +141,20 @@ class KitsuClient:
                 else:
                     logger.info(f"[Kitsu Live] Updating metadata on shot '{shot_name}'...")
                     existing_data = shot.get("data") or {}
-                    existing_plates = existing_data.get("plates") or {}
-                    existing_plates[plate_name] = new_plate_info
-                    
+                    existing_media_items = existing_data.get("media_items") or {}
+                    existing_media_items[media_name] = new_media_info
+
                     updated_data = {
                         **existing_data,
                         "frame_in": frame_in,
                         "frame_out": frame_out,
                         "fps": fps,
-                        "plate_name": plate_name,
+                        "media_name": media_name,
                         "resolution": resolution,
                         "colorspace": colorspace,
                         "nas_path": nas_path,
                         "description": description,
-                        "plates": existing_plates
+                        "media_items": existing_media_items
                     }
                     try:
                         shot = self.gazu.shot.update_shot_data(shot, updated_data)
@@ -168,12 +168,12 @@ class KitsuClient:
             "frame_in": frame_in,
             "frame_out": frame_out,
             "fps": fps,
-            "plate_name": plate_name,
+            "media_name": media_name,
             "resolution": resolution,
             "colorspace": colorspace,
             "nas_path": nas_path,
             "description": description,
-            "plates": {plate_name: new_plate_info}
+            "media_items": {media_name: new_media_info}
         }
         return {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"shot-{shot_name}")),
@@ -243,7 +243,7 @@ class KitsuClient:
         instead of only the shot-level data blob being updated.
         """
         lines = [
-            f"Plate Ingest v{version_num:03d} ({getattr(item, 'plate_name', '') or getattr(item, 'media_name', '')})",
+            f"Media Ingest v{version_num:03d} ({getattr(item, 'media_name', '')})",
             "",
             f"NAS Path: {dest_dir}",
             f"Media Type: {getattr(item, 'media_type', '') or 'Plate'}",
@@ -288,7 +288,7 @@ class KitsuClient:
         logger.info(f"[Mock Kitsu] Added version metadata comment to task {task_arg.get('id')}")
         return {"id": str(uuid.uuid4()), "task_id": task_arg.get("id"), "comment": comment}
 
-    def upload_preview_proxy(self, task, preview_file_path, comment="Plate Ingest Preview v001"):
+    def upload_preview_proxy(self, task, preview_file_path, comment="Media Ingest Preview v001"):
         """Uploads a low-res MP4 preview to a Kitsu task and registers it as the main Shot Thumbnail."""
         task_arg = task if isinstance(task, dict) else {"id": str(task)}
 

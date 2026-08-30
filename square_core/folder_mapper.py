@@ -234,7 +234,6 @@ class FolderMapper:
         if canonical.get("media_type"):    item.media_type    = canonical["media_type"]
         if canonical.get("media_name"):
             item.media_name = canonical["media_name"]
-            item.plate_name = canonical["media_name"]
         if canonical.get("version"):
             m_v = re.search(r"\d+", canonical["version"])
             if m_v:
@@ -288,7 +287,7 @@ class FolderMapper:
         """Saves current table items state to sidecar file."""
         table_data = []
         for item in items:
-            mname = getattr(item, "media_name", getattr(item, "plate_name", "")) or ""
+            mname = getattr(item, "media_name", "") or ""
             table_data.append({
                 "name": item.name,
                 "files": item.files,
@@ -297,7 +296,6 @@ class FolderMapper:
                 "sequence_code": getattr(item, "sequence_code", "") or "",
                 "shot_code": getattr(item, "shot_code", "") or "",
                 "media_name": mname,
-                "plate_name": mname,
                 "media_type": getattr(item, "media_type", "Plate") or "Plate",
                 "version": getattr(item, "version", 1),
                 "start_frame": getattr(item, "start_frame", 1001),
@@ -321,9 +319,7 @@ class FolderMapper:
             item = IngestSequenceItem(d["name"], d.get("files", []), d.get("ext", ".exr"), is_video=d.get("is_video", False))
             item.sequence_code = d.get("sequence_code", "")
             item.shot_code     = d.get("shot_code", "")
-            mname              = d.get("media_name") or d.get("plate_name", "")
-            item.media_name    = mname
-            item.plate_name    = mname
+            item.media_name    = d.get("media_name", "")
             item.media_type    = d.get("media_type", "Plate")
             item.version       = d.get("version", 1)
             item.start_frame   = d.get("start_frame", 1001)

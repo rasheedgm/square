@@ -67,7 +67,7 @@ class TestIngestPipeline(unittest.TestCase):
         items = scanner.scan()
         item = items[0]
         
-        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.plate_name)
+        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.media_name)
         self.assertIn("DEMO", str(dest_dir))
         
         copied = nas.copy_sequence(item, dest_dir)
@@ -80,7 +80,7 @@ class TestIngestPipeline(unittest.TestCase):
         items = scanner.scan()
         item = items[0]  # SQ010
 
-        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.plate_name)
+        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.media_name)
         nas.create_shot_structure(dest_dir)
         
         copied = nas.copy_sequence(item, dest_dir)

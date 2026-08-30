@@ -103,7 +103,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.filename_tmpl_edit.setToolTip("Tokens: {project}, {seq}, {shot}, {type}, {name}, {version}, {frame}, {ext}")
 
         self.nas_dir_tmpl_edit = QtWidgets.QLineEdit(self.config.nas_dir_template)
-        self.nas_dir_tmpl_edit.setToolTip("Tokens: {nas_root}, {project_code}, {sequence_code}, {shot_code}, {plate_type}, {plate_name}, {version}, {resolution}")
+        self.nas_dir_tmpl_edit.setToolTip("Tokens: {nas_root}, {project_code}, {sequence_code}, {shot_code}, {media_type}, {media_name}, {version}, {resolution}")
 
         self.shot_struct_edit = QtWidgets.QTextEdit()
         self.shot_struct_edit.setFixedHeight(70)

@@ -41,7 +41,7 @@ class TestLiveIngestFlow(unittest.TestCase):
         )
         item.sequence_code = "SQ010"
         item.shot_code = "SH0100"
-        item.plate_name = "PL01"
+        item.media_name = "PL01"
 
         mp4_path = self.proxy_gen.generate_proxy(item, "slate_test_preview.mp4")
         self.assertIsNotNone(mp4_path)

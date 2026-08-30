@@ -60,21 +60,21 @@ def run_live_ingestion_test():
     nas = NASManager(nas_root=nas_root, dry_run=False)
     proxy_gen = ProxyGenerator(output_dir=nas_root / "temp_proxies", dry_run=False)
 
-    print(f"\n[5/5] Executing Ingestion Pipeline on {len(items)} plates...")
+    print(f"\n[5/5] Executing Ingestion Pipeline on {len(items)} media items...")
     for idx, item in enumerate(items, 1):
-        print(f"\n--- Processing Item {idx}/{len(items)}: {item.sequence_code} | {item.shot_code} | {item.plate_name} ---")
-        
+        print(f"\n--- Processing Item {idx}/{len(items)}: {item.sequence_code} | {item.shot_code} | {item.media_name} ---")
+
         # Check Version & Existing Ingest
-        version_num, is_already_ingested = nas.get_plate_version_info(
-            proj_code, item.sequence_code, item.shot_code, item.plate_name, item=item
+        version_num, is_already_ingested = nas.get_media_version_info(
+            proj_code, item.sequence_code, item.shot_code, item.media_name, item=item
         )
-        dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.plate_name, version=version_num)
+        dest_dir = nas.get_dest_dir(proj_code, item.sequence_code, item.shot_code, item.media_name, version=version_num)
 
         # Sequence & Shot
         seq_obj = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
         shot_obj = kitsu.get_or_create_shot(
             proj_data, seq_obj, item.shot_code,
-            plate_name=item.plate_name,
+            media_name=item.media_name,
             frame_in=item.start_frame,
             frame_out=item.end_frame,
             fps=item.fps,
@@ -83,7 +83,7 @@ def run_live_ingestion_test():
             nas_path=str(dest_dir)
         )
         print(f"  [+] Kitsu Shot: '{shot_obj.get('name')}' (ID: {shot_obj.get('id')})")
-        print(f"  [+] Kitsu Shot Plates Data: {shot_obj.get('data', {}).get('plates')}")
+        print(f"  [+] Kitsu Shot Media Items Data: {shot_obj.get('data', {}).get('media_items')}")
 
         # Shot Tasks
         tasks = kitsu.create_default_tasks(shot_obj)
@@ -92,7 +92,7 @@ def run_live_ingestion_test():
 
         # NAS File Transfer or Skip
         if is_already_ingested:
-            print(f"  [SKIP] Plate '{item.plate_name}' (v{version_num:03d}) already ingested on NAS. Skipping duplicate copy and Kitsu upload.")
+            print(f"  [SKIP] Media '{item.media_name}' (v{version_num:03d}) already ingested on NAS. Skipping duplicate copy and Kitsu upload.")
             continue
 
         nas.create_shot_structure(dest_dir)
@@ -105,7 +105,7 @@ def run_live_ingestion_test():
         if tasks and mp4_path:
             ingest_task = next((t for t in tasks if (t.get("name") or t.get("task_type_name")) in ("Ingest", "Prep")), tasks[0])
             task_name = ingest_task.get("name") or ingest_task.get("task_type_name") or "Ingest"
-            preview_res = kitsu.upload_preview_proxy(ingest_task, mp4_path, comment=f"Plate Ingest Preview v{version_num:03d} ({item.plate_name})")
+            preview_res = kitsu.upload_preview_proxy(ingest_task, mp4_path, comment=f"Media Ingest Preview v{version_num:03d} ({item.media_name})")
             print(f"  [+] Uploaded Preview to Task '{task_name}' & Set Shot Thumbnail: Preview ID {preview_res.get('id')}")
 
     print("\n" + "=" * 60)

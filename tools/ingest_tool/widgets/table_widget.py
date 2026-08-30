@@ -149,7 +149,7 @@ class IngestTableWidget(QtWidgets.QWidget):
                 target = existing_map[key_files]
                 target.sequence_code = item.sequence_code
                 target.shot_code     = item.shot_code
-                target.plate_name    = item.plate_name
+                target.media_name    = item.media_name
                 target.media_type    = getattr(item, "media_type", "Plate")
             else:
                 # Create new row for newly loaded item
@@ -244,7 +244,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             seq = (item.sequence_code or "").strip()
             shot = (item.shot_code or "").strip()
             mtype = (getattr(item, "media_type", "") or "").strip()
-            name = (item.plate_name or "").strip()
+            name = (item.media_name or "").strip()
 
             if not (seq and shot and mtype and name):
                 continue
@@ -327,7 +327,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._tmpl_edit = QtWidgets.QLineEdit()
         self._tmpl_edit.setPlaceholderText("Rename template: {seq}_{shot} or {original}")
         self._tmpl_edit.setToolTip(
-            "Wildcards: {project} {seq} {shot} {plate} {media_type} {original} {date} {version}"
+            "Wildcards: {project} {seq} {shot} {media_name} {media_type} {original} {date} {version}"
         )
         self._tmpl_edit.setMinimumWidth(220)
 
@@ -405,7 +405,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             seq = (item.sequence_code or "").strip()
             shot = (item.shot_code or "").strip()
             mtype = (getattr(item, "media_type", "") or "").strip()
-            name = (item.plate_name or "").strip()
+            name = (item.media_name or "").strip()
 
             if not (seq and shot and mtype and name) and not discarded:
                 status = STATUS_MISSING_DETAILS
@@ -456,8 +456,8 @@ class IngestTableWidget(QtWidgets.QWidget):
             frame_sample = "####" if not item.is_video else None
             dest_filename = format_dest_filename(
                 tmpl, self._project_code or "PROJ", item.sequence_code,
-                item.shot_code, mtype, mname, ver,
-                frame=frame_sample, ext=item.ext, media_name=mname
+                item.shot_code, mtype, media_name=mname, version_num=ver,
+                frame=frame_sample, ext=item.ext
             )
             dest_dir = NASManager(nas_root=self._nas_root).get_dest_dir(
                 self._project_code or "PROJ", item.sequence_code,
@@ -579,7 +579,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             if col == COL_SEQ:        item.sequence_code = text
             if col == COL_SHOT:       item.shot_code     = text
             if col == COL_TYPE:       item.media_type    = text
-            if col == COL_MEDIA_NAME: item.media_name    = text; item.plate_name = text
+            if col == COL_MEDIA_NAME: item.media_name    = text
         self._run_conflict_detection()
         self._refresh_table()
 
@@ -590,7 +590,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         if m:
             self.item_version[key] = int(m.group(1))
         # Re-check conflicts when version changes — changing version
-        # can resolve a (seq, shot, plate, version) collision
+        # can resolve a (seq, shot, media, version) collision
         self._run_conflict_detection()
         self._refresh_table()
 
@@ -598,7 +598,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         template = self._tmpl_edit.text().strip()
         if not template:
             return
-        target = self._target_combo.currentText().lower()   # "shot", "plate", "sequence"
+        target = self._target_combo.currentText().lower()   # "shot", "media name", "sequence", "media type"
         scope  = self._scope_combo.currentText()
         all_rows = "All Rows" in scope
 
@@ -614,7 +614,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             new_val = new_val.replace("{project}",    self._project_code or "PROJ")
             new_val = new_val.replace("{seq}",        item.sequence_code)
             new_val = new_val.replace("{shot}",       item.shot_code)
-            new_val = new_val.replace("{plate}",      item.plate_name)
+            new_val = new_val.replace("{media_name}", item.media_name)
             new_val = new_val.replace("{media_type}", getattr(item, "media_type", "") or "")
             new_val = new_val.replace("{original}",   item.name)
             new_val = new_val.replace("{date}",       today)
@@ -622,9 +622,8 @@ class IngestTableWidget(QtWidgets.QWidget):
 
             if target == "shot":
                 item.shot_code = new_val
-            elif target in ("media name", "plate"):
+            elif target == "media name":
                 item.media_name = new_val
-                item.plate_name = new_val
             elif target == "sequence":
                 item.sequence_code = new_val
             elif target == "media type":
@@ -640,12 +639,12 @@ class IngestTableWidget(QtWidgets.QWidget):
         for item in items_to_apply:
             if mode == "upper":
                 item.shot_code     = item.shot_code.upper()
-                item.plate_name    = item.plate_name.upper()
+                item.media_name    = item.media_name.upper()
                 item.sequence_code = item.sequence_code.upper()
                 item.media_type    = (item.media_type or "").upper()
             else:
                 item.shot_code     = item.shot_code.lower()
-                item.plate_name    = item.plate_name.lower()
+                item.media_name    = item.media_name.lower()
                 item.sequence_code = item.sequence_code.lower()
                 item.media_type    = (item.media_type or "").lower()
         self._refresh_table()
@@ -683,15 +682,15 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         Conflict = two active (non-discarded, non-already-ingested) rows that
         would write to the SAME destination:
-          same (sequence, shot, plate, version) triple.
+          same (sequence, shot, media_type, media_name, version) triple.
 
-        Two rows with the same shot but DIFFERENT plate names are valid siblings
+        Two rows with the same shot but DIFFERENT media names are valid siblings
         and must NOT be flagged as conflicts.
         """
         id_to_item = {id(item): item for item in self.items_data}
 
-        # Group by (seq, shot, type, plate, version) — collision = true conflict
-        slot_map = {}   # (seq, shot, type, plate, version) -> [key, ...]
+        # Group by (seq, shot, type, media_name, version) — collision = true conflict
+        slot_map = {}   # (seq, shot, type, media_name, version) -> [key, ...]
         for item in self.items_data:
             key = id(item)
             version = self.item_version.get(key, 1)
@@ -700,7 +699,7 @@ class IngestTableWidget(QtWidgets.QWidget):
                 item.sequence_code.upper().strip(),
                 item.shot_code.upper().strip(),
                 media_type.upper().strip(),
-                item.plate_name.upper().strip(),
+                item.media_name.upper().strip(),
                 version,
             )
             slot_map.setdefault(slot, []).append(key)
@@ -752,7 +751,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             if seq_cell:   item.sequence_code = seq_cell.text().strip()
             if shot_cell:  item.shot_code     = shot_cell.text().strip()
             if type_cell:  item.media_type    = type_cell.text().strip()
-            if media_cell: item.media_name    = media_cell.text().strip(); item.plate_name = item.media_name
+            if media_cell: item.media_name    = media_cell.text().strip()
 
     def _get_selected_items_in_table(self):
         rows = {index.row() for index in self._table.selectedIndexes()}

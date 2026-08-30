@@ -96,7 +96,7 @@ class NASCheckWorker(QtCore.QThread):
 
     def run(self):
         nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
-        results = nas.check_all_plates(
+        results = nas.check_all_media(
             self.items,
             self.proj_code,
             progress_callback=lambda done, total: self.progress_signal.emit(done, total)
@@ -181,7 +181,7 @@ class IngestWorkerThread(QtCore.QThread):
                 try:
                     dest_dir = nas.get_dest_dir(
                         proj_code, item.sequence_code,
-                        item.shot_code, item.plate_name,
+                        item.shot_code, item.media_name,
                         version=version_num,
                         media_type=getattr(item, "media_type", "Plate"),
                         resolution=getattr(item, "resolution", "1920x1080")
@@ -189,12 +189,12 @@ class IngestWorkerThread(QtCore.QThread):
 
                     # Kitsu sync
                     self.progress_signal.emit(step_pct,
-                        f"Syncing Kitsu: {item.shot_code} / {item.plate_name} v{version_num:03d}")
+                        f"Syncing Kitsu: {item.shot_code} / {item.media_name} v{version_num:03d}")
                     self.item_progress_signal.emit(item, "Kitsu Sync", 20)
                     seq_obj  = kitsu.get_or_create_sequence(proj_data, item.sequence_code)
                     shot_obj = kitsu.get_or_create_shot(
                         proj_data, seq_obj, item.shot_code,
-                        plate_name=item.plate_name,
+                        media_name=item.media_name,
                         frame_in=item.start_frame, frame_out=item.end_frame,
                         fps=item.fps, resolution=item.resolution,
                         colorspace=item.colorspace, nas_path=str(dest_dir)
@@ -250,7 +250,7 @@ class IngestWorkerThread(QtCore.QThread):
 
                     sample_fn = format_dest_filename(
                         tmpl, proj_code, item.sequence_code, item.shot_code,
-                        mtype, item.plate_name,
+                        mtype, item.media_name,
                         version_num, frame="1001" if not item.is_video else None, ext=item.ext
                     )
                     summary["items"].append({
@@ -258,7 +258,7 @@ class IngestWorkerThread(QtCore.QThread):
                         "sequence_code": item.sequence_code,
                         "shot_code": item.shot_code,
                         "media_type": mtype,
-                        "plate_name": item.plate_name,
+                        "media_name": item.media_name,
                         "version": version_num,
                         "resolution": item.resolution,
                         "frame_count": len(item.files),
@@ -278,7 +278,7 @@ class IngestWorkerThread(QtCore.QThread):
                         "sequence_code": item.sequence_code,
                         "shot_code": item.shot_code,
                         "media_type": getattr(item, "media_type", "Plate"),
-                        "plate_name": item.plate_name,
+                        "media_name": item.media_name,
                         "version": version_num,
                         "resolution": getattr(item, "resolution", ""),
                         "frame_count": len(item.files),
@@ -349,7 +349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         logo_lbl.setStyleSheet(
             "font-size:20px; color:#3B82F6; background:transparent;"
         )
-        title_lbl = QtWidgets.QLabel("SQUARE VFX — PLATE INGEST")
+        title_lbl = QtWidgets.QLabel("SQUARE VFX — MEDIA INGEST")
         title_lbl.setFont(QtGui.QFont("Segoe UI", 11, FONT_BOLD))
         title_lbl.setStyleSheet(
             "color:#E2E8F0; letter-spacing:1px; background:transparent;"

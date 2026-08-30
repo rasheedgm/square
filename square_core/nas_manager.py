@@ -25,7 +25,7 @@ except ImportError:
 
 
 class NASManager:
-    """Handles NAS directory creation, plate versioning, and checksum-verified file transfers."""
+    """Handles NAS directory creation, media versioning, and checksum-verified file transfers."""
 
     def __init__(self, nas_root=None, dry_run=True, transfer_mode="copy", workers=None):
         self.nas_root = Path(nas_root) if nas_root else Path("X:/projects")
@@ -59,7 +59,7 @@ class NASManager:
             return resolution or "1920x1080"
         return mtype
 
-    def get_plate_version_info(self, project_code, sequence_code, shot_code, plate_name, item=None, media_type="Plate", resolution="1920x1080"):
+    def get_media_version_info(self, project_code, sequence_code, shot_code, media_name, item=None, media_type="Plate", resolution="1920x1080"):
         """
         Inspects existing version folders (v001, v002, ...) on NAS storage.
         Returns (version_number, is_already_ingested)
@@ -67,12 +67,12 @@ class NASManager:
         if item:
             media_type = getattr(item, "media_type", media_type)
             resolution = getattr(item, "resolution", resolution)
-            plate_name = getattr(item, "media_name", plate_name)
+            media_name = getattr(item, "media_name", media_name)
 
         seq_c  = (sequence_code or "").strip()
         shot_c = (shot_code or "").strip()
         p_type = (media_type or "").strip()
-        p_name = (plate_name or "").strip()
+        p_name = (media_name or "").strip()
 
         parent_dir = self.nas_root / (project_code or "PROJ") / "shots" / seq_c / shot_c / "input" / f"{p_type}_{p_name}"
 
@@ -99,12 +99,12 @@ class NASManager:
 
         return latest_version + 1, False
 
-    def get_dest_dir(self, project_code, sequence_code, shot_code, plate_name, version=1, media_type="", resolution="1920x1080", dir_template=None):
+    def get_dest_dir(self, project_code, sequence_code, shot_code, media_name, version=1, media_type="", resolution="1920x1080", dir_template=None):
         """
         Builds standardized NAS destination folder path based on per-media-type config template.
         """
         p_type = (media_type or "").strip()
-        p_name = (plate_name or "").strip()
+        p_name = (media_name or "").strip()
         res    = (resolution or "1920x1080").strip()
 
         from square_core.config import StudioConfig, SHOT_DIRECTORY_TEMPLATE
@@ -123,10 +123,8 @@ class NASManager:
                 seq=sequence_code or "SQ010",
                 shot=shot_code or "SH0100",
                 media_type=p_type,
-                plate_type=p_type,
                 type=p_type,
                 media_name=p_name,
-                plate_name=p_name,
                 name=p_name,
                 version=version or 1,
                 resolution=res
@@ -223,12 +221,12 @@ class NASManager:
             frame_val = m_frame.group(1) if (m_frame and not item.is_video) else None
             return format_dest_filename(
                 tmpl, proj_code, item.sequence_code, item.shot_code,
-                getattr(item, "media_type", "") or "", item.plate_name,
-                version_num, frame=frame_val, ext=item.ext, media_name=item.media_name
+                getattr(item, "media_type", "") or "", media_name=item.media_name,
+                version_num=version_num, frame=frame_val, ext=item.ext
             )
 
         if self.dry_run:
-            logger.info(f"[Mock NAS] {self.transfer_mode}: {total_files} files for plate '{item.plate_name}' -> '{dest_dir}'")
+            logger.info(f"[Mock NAS] {self.transfer_mode}: {total_files} files for media '{item.media_name}' -> '{dest_dir}'")
             copied_files = []
             for idx, src_file in enumerate(item.files):
                 target_name = _target_name(src_file)
@@ -264,7 +262,7 @@ class NASManager:
         logger.info(f"[NASManager] Transferred {len(copied_files)} files to {dest_dir} (mode={self.transfer_mode}, workers={workers})")
         return copied_files
 
-    def check_all_plates(self, items, proj_code, progress_callback=None):
+    def check_all_media(self, items, proj_code, progress_callback=None):
         """
         Check version / duplicate status for all items in parallel.
         Returns dict: id(item) -> (version_num, is_already_ingested)
@@ -273,8 +271,8 @@ class NASManager:
         total = len(items)
 
         def _check(item):
-            mname = getattr(item, "media_name", getattr(item, "plate_name", "")) or ""
-            return item, self.get_plate_version_info(
+            mname = getattr(item, "media_name", "") or ""
+            return item, self.get_media_version_info(
                 proj_code, item.sequence_code, item.shot_code, mname, item=item
             )
 

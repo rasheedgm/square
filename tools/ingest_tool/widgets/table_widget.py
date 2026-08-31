@@ -11,9 +11,16 @@ IngestTableWidget v2 — Full overhaul with:
 from Qt import QtWidgets, QtCore, QtGui
 from tools.qt_compat import (
     ITEM_IS_SELECTABLE, ITEM_IS_ENABLED,
-    HEADER_RESIZE_INTERACTIVE, SELECT_ROWS, ALIGN_CENTER,
+    HEADER_RESIZE_INTERACTIVE, HEADER_RESIZE_FIXED, SELECT_ROWS, ALIGN_CENTER,
     SELECTION_SELECT, SELECTION_ROWS
 )
+
+# A row with no cell widgets sizes itself from plain text; the moment ANY row
+# gets a combo box or progress bar (every row does -- Version, Progress), an
+# unconstrained default lets that widget's own sizeHint (which varies by
+# platform/DPI/style) dictate the row height instead. Pinning it keeps every
+# row -- and everything in it -- a fixed, predictable size.
+ROW_HEIGHT = 28
 
 # ── Status constants ──
 STATUS_NEW             = "New"
@@ -109,6 +116,13 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.items_data = []          # list of IngestSequenceItem
         self.item_status  = {}        # id(item) -> status string
         self.item_version = {}        # id(item) -> version int
+        # id(item) -> version number the last NAS check actually found (the
+        # "next available" slot). item_version can move away from this via a
+        # manual pick or batch Set Version; this stays put as the anchor for
+        # the dropdown's option range and the reference point for detecting
+        # a rollback onto an already-used version. Only apply_version_results
+        # moves it.
+        self.item_detected_version = {}
         self.item_discarded = set()   # id(item) -> discarded
         self.item_progress = {}       # id(item) -> (stage str, percent int) -- live ingest progress
         # id(item) for rows whose destination changed since their version was
@@ -145,6 +159,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.items_data   = list(items)
         self.item_status  = {id(i): STATUS_CHECKING for i in items}
         self.item_version = {id(i): 1 for i in items}
+        self.item_detected_version = {id(i): 1 for i in items}
         self.item_discarded = set()
         self.item_progress = {}
         self._pending_revalidation = set()
@@ -179,6 +194,7 @@ class IngestTableWidget(QtWidgets.QWidget):
                 k = id(item)
                 self.item_status[k]  = STATUS_CHECKING
                 self.item_version[k] = 1
+                self.item_detected_version[k] = 1
                 existing_map[key_files] = item
 
         self._run_conflict_detection()
@@ -226,6 +242,7 @@ class IngestTableWidget(QtWidgets.QWidget):
                 ver, already = results[key]
                 self._pending_revalidation.discard(key)
                 self.item_version[key] = ver
+                self.item_detected_version[key] = ver
                 if already:
                     self.item_status[key] = STATUS_ALREADY
                 elif ver > 1:
@@ -365,6 +382,13 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._table.setColumnWidth(COL_CS, 80)
         self._table.setColumnWidth(COL_VERSION, 120)
         self._table.setColumnWidth(COL_PROGRESS, 150)
+
+        # Fixed row height so the Version combo / progress bar can't stretch
+        # a row to their own sizeHint -- they get resized DOWN to fit the row
+        # instead, the same way every other cell already does.
+        row_header = self._table.verticalHeader()
+        row_header.setDefaultSectionSize(ROW_HEIGHT)
+        row_header.setSectionResizeMode(HEADER_RESIZE_FIXED)
         layout.addWidget(self._table, stretch=1)
         # Re-check conflicts whenever the user edits a cell
         self._table.itemChanged.connect(self._on_cell_edited)
@@ -424,9 +448,12 @@ class IngestTableWidget(QtWidgets.QWidget):
         bar_layout.addSpacing(10)
 
         # Quick buttons
+        case_tip = "Case-folds the field picked above (Target), for the rows Scope selects -- same two dropdowns Apply Rename uses."
         caps_btn = QtWidgets.QPushButton("ALL CAPS")
+        caps_btn.setToolTip(case_tip)
         caps_btn.clicked.connect(lambda: self._apply_case("upper"))
         lower_btn = QtWidgets.QPushButton("lowercase")
+        lower_btn.setToolTip(case_tip)
         lower_btn.clicked.connect(lambda: self._apply_case("lower"))
 
         bar_layout.addWidget(caps_btn)
@@ -566,17 +593,20 @@ class IngestTableWidget(QtWidgets.QWidget):
 
             # ── Version dropdown ──
             ver_combo = QtWidgets.QComboBox()
-            self._populate_version_combo(ver_combo, ver, status)
+            self._populate_version_combo(ver_combo, ver, status, self.item_detected_version.get(key, 1))
             ver_combo.currentIndexChanged.connect(
                 lambda idx, cb=ver_combo, k=key: self._on_version_changed(k, cb)
             )
             self._table.setCellWidget(row_idx, COL_VERSION, ver_combo)
 
-            # ── Status pill (Kitsu finding, if any, in the tooltip) ──
+            # ── Status pill (Kitsu finding or version-rollback, if any, in the tooltip) ──
             status_cell = self._mk_status_cell(status)
             issue = self.kitsu_issues.get(key)
+            rollback_msg = self._version_rollback_message(item)
             if issue and issue.get("message"):
                 status_cell.setToolTip(issue["message"])
+            elif rollback_msg:
+                status_cell.setToolTip(rollback_msg)
             self._table.setItem(row_idx, COL_STATUS, status_cell)
 
             # ── Live ingest progress bar ──
@@ -615,7 +645,28 @@ class IngestTableWidget(QtWidgets.QWidget):
         issue = self.kitsu_issues.get(key)
         if issue and issue.get("conflict"):
             return STATUS_CONFLICT
+        if self._version_rollback_message(item):
+            return STATUS_CONFLICT
         return self.item_status.get(key, STATUS_NEW)
+
+    def _version_rollback_message(self, item):
+        """
+        Set when this row's version was manually moved (per-row dropdown or
+        batch Set Version) below the version the last NAS check resolved.
+        That lower number already has a folder on the NAS -- the NAS check
+        only ever verifies the version it auto-picks, so rolling back to an
+        earlier one bypasses that check entirely and would silently write
+        into an existing version.
+        """
+        key = id(item)
+        detected = self.item_detected_version.get(key)
+        chosen = self.item_version.get(key, 1)
+        if detected is not None and chosen < detected:
+            return (
+                f"v{chosen:03d} already exists on the NAS (next available is "
+                f"v{detected:03d}). Ingesting now would write into that existing version."
+            )
+        return None
 
     def _mk_cell(self, text, editable=True):
         cell = QtWidgets.QTableWidgetItem(str(text))
@@ -644,23 +695,33 @@ class IngestTableWidget(QtWidgets.QWidget):
         cell.setForeground(QtGui.QBrush(QtGui.QColor(fg)))
         return cell
 
-    def _populate_version_combo(self, combo, ver_num, status):
+    def _populate_version_combo(self, combo, ver_num, status, detected_ver_num=1):
         """
-        Every row offers v001 up to a few past its detected version, with the
-        detected one selected and annotated. A "New" row used to offer
-        exactly one entry, so its own dropdown couldn't change the version at
-        all -- only the batch Set Version control could.
+        Every row offers v001 up to a few past its NAS-DETECTED version, with
+        the currently chosen one selected and annotated. The offered range is
+        anchored to detected_ver_num (what the last NAS check actually found),
+        not to ver_num (today's live selection) -- anchoring to the live
+        selection meant every pick became next rebuild's "current", so the
+        list grew by 3 more entries each time the dropdown was used. A "New"
+        row used to offer exactly one entry, so its own dropdown couldn't
+        change the version at all -- only the batch Set Version control could.
         """
         combo.clear()
         if status == STATUS_ALREADY:
             note = "exists — skip"
         elif status == STATUS_NEW_VERSION:
             note = "new version"
+        elif status == STATUS_CONFLICT:
+            note = "conflict"
         else:
             note = "new"
 
         current = max(int(ver_num or 1), 1)
-        options = list(range(1, current + 4))
+        anchor  = max(int(detected_ver_num or 1), 1)
+        # Union with {current} so a value picked from outside the normal
+        # range (e.g. a batch Set Version jump) still shows up as selected
+        # instead of silently snapping to the nearest in-range option.
+        options = sorted(set(range(1, anchor + 4)) | {current})
         for v in options:
             combo.addItem(f"v{v:03d}  ({note})" if v == current else f"v{v:03d}")
         combo.setCurrentIndex(options.index(current))
@@ -793,6 +854,7 @@ class IngestTableWidget(QtWidgets.QWidget):
                 "media_type": getattr(item, "media_type", ""),
                 "media_name": item.media_name,
                 "version": self.item_version.get(key),
+                "detected_version": self.item_detected_version.get(key),
                 "status": self.item_status.get(key),
                 "pending": key in self._pending_revalidation,
                 "kitsu_issue": self.kitsu_issues.get(key),
@@ -833,6 +895,8 @@ class IngestTableWidget(QtWidgets.QWidget):
             item.media_name    = snap["media_name"]
             if snap["version"] is not None:
                 self.item_version[key] = snap["version"]
+            if snap["detected_version"] is not None:
+                self.item_detected_version[key] = snap["detected_version"]
             if snap["status"] is not None:
                 self.item_status[key] = snap["status"]
             if snap["pending"]:
@@ -887,21 +951,31 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._refresh_table()
 
     def _apply_case(self, mode):
+        """
+        Case-folds ONE field -- whichever the Target dropdown has picked --
+        for the rows the Scope dropdown selects. Used to unconditionally
+        touch all four fields regardless of Target, so picking "Shot" and
+        clicking ALL CAPS silently also upper-cased Sequence/Media Type/
+        Media Name; it now follows the same target as Apply Rename.
+        """
         self._sync_edits_from_table()
         before = self._snapshot_identities()
+        target = self._target_combo.currentText().lower()
         items_to_apply = self._items_in_scope()
-        self._push_undo("ALL CAPS" if mode == "upper" else "lowercase", items_to_apply)
+        self._push_undo(
+            f"{'ALL CAPS' if mode == 'upper' else 'lowercase'}: {self._target_combo.currentText()}",
+            items_to_apply,
+        )
+        transform = str.upper if mode == "upper" else str.lower
         for item in items_to_apply:
-            if mode == "upper":
-                item.shot_code     = item.shot_code.upper()
-                item.media_name    = item.media_name.upper()
-                item.sequence_code = item.sequence_code.upper()
-                item.media_type    = (item.media_type or "").upper()
-            else:
-                item.shot_code     = item.shot_code.lower()
-                item.media_name    = item.media_name.lower()
-                item.sequence_code = item.sequence_code.lower()
-                item.media_type    = (item.media_type or "").lower()
+            if target == "shot":
+                item.shot_code = transform(item.shot_code or "")
+            elif target == "media name":
+                item.media_name = transform(item.media_name or "")
+            elif target == "sequence":
+                item.sequence_code = transform(item.sequence_code or "")
+            elif target == "media type":
+                item.media_type = transform(item.media_type or "")
         self._request_revalidation_for_changed(before)
         self._run_conflict_detection()
         self._refresh_table()

@@ -45,6 +45,7 @@ SCROLLBAR_ALWAYS_ON     = get_qt_enum(QtCore.Qt, "ScrollBarPolicy", "ScrollBarAl
 TOOLBUTTON_INSTANT_POPUP = get_qt_enum(QtWidgets.QToolButton, "ToolButtonPopupMode", "InstantPopup")
 HEADER_RESIZE_STRETCH   = get_qt_enum(QtWidgets.QHeaderView, "ResizeMode", "Stretch")
 HEADER_RESIZE_TO_CONTENTS = get_qt_enum(QtWidgets.QHeaderView, "ResizeMode", "ResizeToContents")
+HEADER_RESIZE_FIXED     = get_qt_enum(QtWidgets.QHeaderView, "ResizeMode", "Fixed")
 TEXT_SELECTABLE_BY_MOUSE = get_qt_enum(QtCore.Qt, "TextInteractionFlag", "TextSelectableByMouse")
 CURSOR_POINTING_HAND     = get_qt_enum(QtCore.Qt, "CursorShape", "PointingHandCursor")
 PEN_STYLE_NO_PEN         = get_qt_enum(QtCore.Qt, "PenStyle", "NoPen")

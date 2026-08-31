@@ -4,7 +4,7 @@ from Qt import QtWidgets
 from tools.ingest_tool.widgets.table_widget import (
     IngestTableWidget, STATUS_CONFLICT, STATUS_NEW, STATUS_DISCARDED,
     STATUS_CHECKING, COL_PROGRESS, COL_VERSION, COL_SHOT, COL_STATUS,
-    STAGE_QUEUED, STAGE_COPYING, STAGE_DONE,
+    STAGE_QUEUED, STAGE_COPYING, STAGE_DONE, ROW_HEIGHT,
 )
 from square_core.plate_scanner import IngestSequenceItem
 
@@ -470,12 +470,15 @@ class TestBatchUndo(unittest.TestCase):
         self.assertEqual(a.media_name, "BG")
 
     def test_undo_after_case_fold_and_set_version_share_one_stack(self):
+        # ALL CAPS now only touches the field Target has picked (see
+        # TestCaseFoldRespectsTarget below), so this exercises Shot alone.
         a = _make_item("a", "sq010", "sh0100", "plate", "bg", "/tmp/a.mov")
         self.table.populate_table([a])
         self.table.item_version[id(a)] = 1
+        self.table._target_combo.setCurrentText("Shot")
 
         self.table._apply_case("upper")
-        self.assertEqual((a.shot_code, a.media_name), ("SH0100", "BG"))
+        self.assertEqual(a.shot_code, "SH0100")
 
         self.table._batch_version_spin.setValue(9)
         self.table._on_batch_set_version()
@@ -484,7 +487,7 @@ class TestBatchUndo(unittest.TestCase):
         self.table._on_undo()   # undoes Set Version
         self.assertEqual(self.table.item_version[id(a)], 1)
         self.table._on_undo()   # undoes ALL CAPS
-        self.assertEqual((a.shot_code, a.media_name), ("sh0100", "bg"))
+        self.assertEqual(a.shot_code, "sh0100")
 
     def test_undo_restores_the_resolved_version_not_just_the_text(self):
         # Renaming a row onto a different slot knocks it back to
@@ -566,6 +569,195 @@ class TestBatchUndo(unittest.TestCase):
             self.table._tmpl_edit.setText(f"V{i}")
             self.table._on_apply_rename()
         self.assertEqual(len(self.table._undo_stack), 20)
+
+
+class TestCaseFoldRespectsTarget(unittest.TestCase):
+    """
+    ALL CAPS / lowercase used to unconditionally touch all four fields
+    (Shot, Sequence, Media Type, Media Name) no matter what the Target
+    dropdown next to them was set to -- picking "Shot" and clicking ALL
+    CAPS silently upper-cased the other three fields too. It now dispatches
+    on Target exactly like Apply Rename does.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+
+    def test_only_the_targeted_field_changes(self):
+        a = _make_item("a", "sq010", "sh0100", "plate", "bg", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._apply_case("upper")
+        self.assertEqual(a.shot_code, "SH0100")
+        self.assertEqual((a.sequence_code, a.media_type, a.media_name), ("sq010", "plate", "bg"))
+
+    def test_switching_target_switches_which_field_case_folds(self):
+        a = _make_item("a", "sq010", "sh0100", "plate", "bg", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table._target_combo.setCurrentText("Media Name")
+        self.table._apply_case("upper")
+        self.assertEqual(a.media_name, "BG")
+        self.assertEqual(a.shot_code, "sh0100")   # untouched this time
+
+    def test_each_of_the_four_targets_is_wired_up(self):
+        for target, field in [
+            ("Shot", "shot_code"), ("Sequence", "sequence_code"),
+            ("Media Type", "media_type"), ("Media Name", "media_name"),
+        ]:
+            a = _make_item("a", "sq010", "sh0100", "plate", "bg", "/tmp/a.mov")
+            self.table.populate_table([a])
+            self.table._target_combo.setCurrentText(target)
+            self.table._apply_case("upper")
+            self.assertTrue(getattr(a, field).isupper(), f"{target} did not fold {field}")
+
+
+class TestVersionDropdownAnchoring(unittest.TestCase):
+    """
+    The dropdown's offered range (v001..detected+3) must anchor to the
+    version the NAS check resolved, not to whatever is currently selected --
+    anchoring to the live selection meant every pick became the next
+    rebuild's "current", so the option list grew by 3 more entries every
+    time the dropdown was used.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_picking_the_top_option_does_not_grow_the_list(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (2, False)})
+        combo = self.table._table.cellWidget(0, COL_VERSION)
+        self.assertEqual(combo.count(), 5)   # v001..v005
+
+        combo.setCurrentIndex(combo.count() - 1)   # pick v005, the top option
+        combo_after = self.table._table.cellWidget(0, COL_VERSION)
+        self.assertEqual(combo_after.count(), 5, "range grew after a pick instead of staying anchored")
+
+    def test_a_fresh_nas_check_moves_the_anchor(self):
+        # The anchor SHOULD move when a genuinely new NAS result lands --
+        # only a user pick from the existing list must not move it.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (2, False)})
+        self.assertEqual(self.table._table.cellWidget(0, COL_VERSION).count(), 5)
+
+        self.table.apply_version_results({id(a): (6, False)})
+        self.assertEqual(self.table._table.cellWidget(0, COL_VERSION).count(), 9)   # v001..v009
+
+
+class TestVersionRollbackConflict(unittest.TestCase):
+    """
+    A row's version can be moved down -- per-row dropdown or batch Set
+    Version -- below the version the NAS check resolved. That lower number
+    already has a folder on the NAS (the resolved version IS "latest
+    existing + 1"), and neither control re-verifies the NAS before ingest,
+    so silently allowing it would write into an existing version. It must
+    read as a conflict, the same as a duplicate destination within the
+    table, and block ingest the same way.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_per_row_dropdown_rollback_is_flagged_and_blocked(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, False)})
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 3)])
+
+        combo = self.table._table.cellWidget(0, COL_VERSION)
+        v1_index = [combo.itemText(i).split()[0] for i in range(combo.count())].index("v001")
+        combo.setCurrentIndex(v1_index)
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertTrue(self.table.has_unresolved_conflicts())
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("v001", tip)
+        self.assertIn("v003", tip)
+
+    def test_batch_set_version_rollback_is_flagged_too(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (5, False)})
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(2)
+        self.table._on_batch_set_version()
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+    def test_moving_back_up_to_or_past_detected_clears_it(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (5, False)})
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+
+        self.table._batch_version_spin.setValue(2)
+        self.table._on_batch_set_version()
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+        self.table._batch_version_spin.setValue(5)
+        self.table._on_batch_set_version()
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+    def test_a_fresh_row_never_flagged_before_any_nas_check(self):
+        # detected_version defaults to 1, same as item_version -- must not
+        # spuriously conflict before check_all_media has even run.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+    def test_undo_restores_the_anchor_along_with_everything_else(self):
+        # A rename mid-flight can pick up a fresh NAS result for the new slot
+        # before it's undone; undoing must put the OLD anchor back too, or
+        # the restored row would misjudge a rollback against the wrong slot's
+        # detected version.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, False)})   # old slot: detected=3
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._tmpl_edit.setText("SH9900")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+        self.table.apply_version_results({id(a): (1, False)})   # new slot resolves: detected=1
+
+        self.table._on_undo()
+        self.assertEqual(self.table.item_detected_version[id(a)], 3)
+        self.assertEqual(self.table.item_version[id(a)], 3)
+
+
+class TestRowHeight(unittest.TestCase):
+    """
+    Row height used to be whatever Qt auto-sized it to from the tallest
+    cell widget's own sizeHint (the Version combo, the progress bar) --
+    which varies by platform/DPI/style, and on the reported setup came out
+    visibly taller than the row around it. It is now fixed explicitly.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_rows_are_a_uniform_fixed_height(self):
+        items = [
+            _make_item(f"i{i}", "SQ010", f"SH0{i}00", "Plate", "BG", f"/tmp/i{i}.mov")
+            for i in range(4)
+        ]
+        self.table.populate_table(items)
+        heights = {self.table._table.rowHeight(r) for r in range(4)}
+        self.assertEqual(len(heights), 1)
+        self.assertEqual(self.table._table.verticalHeader().defaultSectionSize(), ROW_HEIGHT)
 
 
 if __name__ == "__main__":

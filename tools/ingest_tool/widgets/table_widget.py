@@ -398,20 +398,9 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         for row_idx, item in enumerate(self.items_data):
             key = id(item)
-            status = self.item_status.get(key, STATUS_NEW)
             ver    = self.item_version.get(key, 1)
             discarded = key in self.item_discarded
-
-            seq = (item.sequence_code or "").strip()
-            shot = (item.shot_code or "").strip()
-            mtype = (getattr(item, "media_type", "") or "").strip()
-            name = (item.media_name or "").strip()
-
-            if not (seq and shot and mtype and name) and not discarded:
-                status = STATUS_MISSING_DETAILS
-
-            if discarded:
-                status = STATUS_DISCARDED
+            status = self._effective_status(item)
 
             self._table.insertRow(row_idx)
 
@@ -499,6 +488,26 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._update_status_bar()
         self.table_changed.emit()
 
+    def _effective_status(self, item):
+        """
+        The status actually shown for a row. Discarded wins over everything;
+        a row missing any required field reads as Missing Details regardless
+        of what the NAS/Kitsu check said. Both the rows and the summary line
+        go through this, so the counts can't drift from what's on screen.
+        """
+        key = id(item)
+        if key in self.item_discarded:
+            return STATUS_DISCARDED
+        required = (
+            (item.sequence_code or "").strip(),
+            (item.shot_code or "").strip(),
+            (getattr(item, "media_type", "") or "").strip(),
+            (item.media_name or "").strip(),
+        )
+        if not all(required):
+            return STATUS_MISSING_DETAILS
+        return self.item_status.get(key, STATUS_NEW)
+
     def _mk_cell(self, text, editable=True):
         cell = QtWidgets.QTableWidgetItem(str(text))
         if not editable:
@@ -527,15 +536,25 @@ class IngestTableWidget(QtWidgets.QWidget):
         return cell
 
     def _populate_version_combo(self, combo, ver_num, status):
+        """
+        Every row offers v001 up to a few past its detected version, with the
+        detected one selected and annotated. A "New" row used to offer
+        exactly one entry, so its own dropdown couldn't change the version at
+        all -- only the batch Set Version control could.
+        """
         combo.clear()
         if status == STATUS_ALREADY:
-            combo.addItem(f"v{ver_num:03d} (exists — skip)")
+            note = "exists — skip"
         elif status == STATUS_NEW_VERSION:
-            combo.addItem(f"v{ver_num:03d} (new version)")
-            for extra in range(ver_num + 1, ver_num + 4):
-                combo.addItem(f"v{extra:03d}")
+            note = "new version"
         else:
-            combo.addItem(f"v{ver_num:03d} (new)")
+            note = "new"
+
+        current = max(int(ver_num or 1), 1)
+        options = list(range(1, current + 4))
+        for v in options:
+            combo.addItem(f"v{v:03d}  ({note})" if v == current else f"v{v:03d}")
+        combo.setCurrentIndex(options.index(current))
 
     def _style_row(self, row_idx, status, discarded):
         dim = discarded or status == STATUS_ALREADY
@@ -594,20 +613,30 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._run_conflict_detection()
         self._refresh_table()
 
+    def _items_in_scope(self):
+        """
+        Which rows the batch tools act on, per the scope dropdown. All three
+        (Apply Rename, ALL CAPS/lowercase, Set Version) go through this --
+        the case and version tools used to ignore the dropdown entirely and
+        silently act on the selection instead, so "Apply to All Rows" with
+        one row highlighted only touched that row.
+        """
+        if "All Rows" in self._scope_combo.currentText():
+            return list(self.items_data)
+        return self._get_selected_items_in_table()
+
     def _on_apply_rename(self):
         template = self._tmpl_edit.text().strip()
         if not template:
             return
         target = self._target_combo.currentText().lower()   # "shot", "media name", "sequence", "media type"
-        scope  = self._scope_combo.currentText()
-        all_rows = "All Rows" in scope
 
         self._sync_edits_from_table()
 
         import datetime
         today = datetime.date.today().strftime("%Y%m%d")
 
-        items_to_apply = self.items_data if all_rows else self._get_selected_items_in_table()
+        items_to_apply = self._items_in_scope()
 
         for item in items_to_apply:
             new_val = template
@@ -634,8 +663,7 @@ class IngestTableWidget(QtWidgets.QWidget):
 
     def _apply_case(self, mode):
         self._sync_edits_from_table()
-        selected = self._get_selected_items_in_table()
-        items_to_apply = selected if selected else self.items_data
+        items_to_apply = self._items_in_scope()
         for item in items_to_apply:
             if mode == "upper":
                 item.shot_code     = item.shot_code.upper()
@@ -655,21 +683,27 @@ class IngestTableWidget(QtWidgets.QWidget):
         item itself -- so this stays consistent with single-row edits)."""
         self._sync_edits_from_table()
         new_version = self._batch_version_spin.value()
-        selected = self._get_selected_items_in_table()
-        items_to_apply = selected if selected else self.items_data
-        for item in items_to_apply:
+        for item in self._items_in_scope():
             self.item_version[id(item)] = new_version
         self._run_conflict_detection()
         self._refresh_table()
 
     def _on_discard_selected(self):
+        self._sync_edits_from_table()
         for item in self._get_selected_items_in_table():
             self.item_discarded.add(id(item))
+        # Same reason the row checkbox re-runs detection: discarding one side
+        # of a conflict resolves it, and without this the other row stays
+        # flagged and keeps the Ingest button blocked.
+        self._run_conflict_detection()
         self._refresh_table()
 
     def _on_restore_selected(self):
+        self._sync_edits_from_table()
         for item in self._get_selected_items_in_table():
             self.item_discarded.discard(id(item))
+        # Re-including a row can re-create a conflict it was hiding.
+        self._run_conflict_detection()
         self._refresh_table()
 
     # ------------------------------------------------------------------
@@ -687,8 +721,6 @@ class IngestTableWidget(QtWidgets.QWidget):
         Two rows with the same shot but DIFFERENT media names are valid siblings
         and must NOT be flagged as conflicts.
         """
-        id_to_item = {id(item): item for item in self.items_data}
-
         # Group by (seq, shot, type, media_name, version) — collision = true conflict
         slot_map = {}   # (seq, shot, type, media_name, version) -> [key, ...]
         for item in self.items_data:
@@ -758,17 +790,25 @@ class IngestTableWidget(QtWidgets.QWidget):
         return [self.items_data[r] for r in rows if r < len(self.items_data)]
 
     def _update_status_bar(self):
-        total = len(self.items_data)
-        new   = sum(1 for s in self.item_status.values() if s == STATUS_NEW)
-        vers  = sum(1 for s in self.item_status.values() if s == STATUS_NEW_VERSION)
-        skip  = sum(1 for s in self.item_status.values() if s == STATUS_ALREADY)
-        conf  = sum(1 for s in self.item_status.values() if s == STATUS_CONFLICT)
-        disc  = len(self.item_discarded)
+        # Counted from the same effective status the rows display -- reading
+        # item_status directly used to miss Missing Details entirely, so a
+        # row that couldn't be ingested showed a red pill while the summary
+        # reported nothing wrong.
+        statuses = [self._effective_status(i) for i in self.items_data]
+        total   = len(statuses)
+        new     = statuses.count(STATUS_NEW)
+        vers    = statuses.count(STATUS_NEW_VERSION)
+        skip    = statuses.count(STATUS_ALREADY)
+        conf    = statuses.count(STATUS_CONFLICT)
+        missing = statuses.count(STATUS_MISSING_DETAILS)
+        disc    = statuses.count(STATUS_DISCARDED)
         self._status_lbl.setText(
-            f"{total} items  |  {new} new  |  {vers} new version  |  "
-            f"{skip} skip  |  {conf} conflict  |  {disc} discarded"
+            f"{total} items  |  {new} new  |  {vers} new version  |  {skip} skip  |  "
+            f"{conf} conflict  |  {missing} missing details  |  {disc} discarded"
         )
         if conf > 0:
             self._status_lbl.setStyleSheet("color:#EF4444; font-size:11px; font-weight:bold; padding:2px 4px;")
+        elif missing > 0:
+            self._status_lbl.setStyleSheet("color:#F59E0B; font-size:11px; font-weight:bold; padding:2px 4px;")
         else:
             self._status_lbl.setStyleSheet("color:#94A3B8; font-size:11px; padding:2px 4px;")

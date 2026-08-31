@@ -438,7 +438,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.is_kitsu_live = self.kitsu.connect()
         self.project_data  = None
-        self._nas_check_worker = None
+        # Every NAS check (the initial batch load, a rename's revalidation,
+        # a manual version pick) used to share ONE worker slot and .terminate()
+        # whatever was already running there -- so a quick second action while
+        # a big initial check was still going killed it before it could
+        # report results for anything else it was checking, leaving those
+        # rows stuck on "Checking..." forever (and .terminate() is itself
+        # unsafe: the underlying OS thread doesn't necessarily stop before
+        # the Python object holding it is destroyed). Each check now gets
+        # its own worker and they run concurrently to completion.
+        self._nas_check_workers = []
+        self._nas_check_progress = {}   # id(worker) -> (done, total), for the shared progress bar
         self._kitsu_check_worker = None
 
         self.setup_ui()
@@ -736,32 +746,48 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _start_nas_check(self, items, forced_versions=None):
         """
-        Launch background NAS duplicate/version check. forced_versions, when
-        given, is {id(item): version_num} for rows whose version was picked
-        by hand -- those get verified at exactly that number instead of
-        having a fresh "best" version auto-computed for them.
-        """
-        if self._nas_check_worker and self._nas_check_worker.isRunning():
-            self._nas_check_worker.terminate()
+        Launch a background NAS duplicate/version check. forced_versions,
+        when given, is {id(item): version_num} for rows whose version was
+        picked by hand -- those get verified at exactly that number instead
+        of having a fresh "best" version auto-computed for them.
 
+        Runs alongside any other check already in flight rather than
+        replacing it -- a rename, a version pick, or another load can each
+        fire this while an earlier one (e.g. the initial batch check) is
+        still running, and that earlier one must still get to report its
+        own results instead of being cut off.
+        """
+        if not items:
+            return
         proj_code = (self.project_data or {}).get("code", "PROJ")
-        self._nas_check_worker = NASCheckWorker(
+        worker = NASCheckWorker(
             items=items,
             nas_root=self.config.nas_root,
             proj_code=proj_code,
             dry_run=self.dry_run_check.isChecked(),
             forced_versions=forced_versions,
         )
-        total = len(items)
-        self._check_bar.setMaximum(total)
-        self._check_bar.setValue(0)
+        self._nas_check_workers.append(worker)
+        self._nas_check_progress[id(worker)] = (0, len(items))
         self._check_bar.setVisible(True)
+        self._update_check_bar()
 
-        self._nas_check_worker.progress_signal.connect(
-            lambda done, tot: self._check_bar.setValue(done)
+        worker.progress_signal.connect(
+            lambda done, tot, w=worker: self._on_nas_check_progress(w, done, tot)
         )
-        self._nas_check_worker.results_ready.connect(self._on_nas_check_done)
-        self._nas_check_worker.start()
+        worker.results_ready.connect(lambda results, w=worker: self._on_nas_check_done(results, w))
+        worker.start()
+
+    def _on_nas_check_progress(self, worker, done, total):
+        self._nas_check_progress[id(worker)] = (done, total)
+        self._update_check_bar()
+
+    def _update_check_bar(self):
+        """Aggregates progress across every NAS check currently in flight onto the one shared bar."""
+        done  = sum(d for d, _t in self._nas_check_progress.values())
+        total = sum(t for _d, t in self._nas_check_progress.values())
+        self._check_bar.setMaximum(max(total, 1))
+        self._check_bar.setValue(done)
 
     def _on_revalidation_requested(self, items):
         """Re-run the NAS version check for rows whose destination changed."""
@@ -848,8 +874,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._check_bar.setMaximum(100)
         QtWidgets.QMessageBox.critical(self, "Check in Kitsu", f"Kitsu check failed:\n\n{message}")
 
-    def _on_nas_check_done(self, results):
-        self._check_bar.setVisible(False)
+    def _on_nas_check_done(self, results, worker):
+        self._nas_check_progress.pop(id(worker), None)
+        if worker in self._nas_check_workers:
+            self._nas_check_workers.remove(worker)
+        if self._nas_check_workers:
+            self._update_check_bar()
+        else:
+            self._check_bar.setVisible(False)
         self.table_widget.apply_version_results(results)
         self._update_conflict_badge()
 
@@ -933,7 +965,8 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.critical(self, "Ingestion Failed", message)
 
     def closeEvent(self, event):
-        if self._nas_check_worker and self._nas_check_worker.isRunning():
-            self._nas_check_worker.quit()
-            self._nas_check_worker.wait(1000)
+        for worker in list(self._nas_check_workers):
+            if worker.isRunning():
+                worker.quit()
+                worker.wait(1000)
         super(MainWindow, self).closeEvent(event)

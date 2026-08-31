@@ -413,5 +413,160 @@ class TestKitsuPreflightCheck(unittest.TestCase):
         self.assertIn("distinctive-message-xyz", cell.toolTip())
 
 
+class TestBatchUndo(unittest.TestCase):
+    """
+    Undo for the three batch tools that can silently trash many rows in one
+    click (Apply Rename, ALL CAPS/lowercase, Set Version). Each restores not
+    just the text fields but the version/status/pending-revalidation/Kitsu
+    state that went with them, so undoing a rename that had knocked a row
+    back to "Checking..." puts it back exactly as resolved, not stuck
+    re-querying a slot it no longer occupies.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+
+    def test_undo_button_starts_disabled(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.assertFalse(self.table._undo_btn.isEnabled())
+
+    def test_undo_reverts_a_rename(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+
+        self.table._tmpl_edit.setText("SH0200")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+        self.assertEqual(a.shot_code, "SH0200")
+        self.assertTrue(self.table._undo_btn.isEnabled())
+
+        self.table._on_undo()
+        self.assertEqual(a.shot_code, "SH0100")
+        self.assertFalse(self.table._undo_btn.isEnabled())
+
+    def test_multiple_renames_undo_one_step_at_a_time(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table._target_combo.setCurrentText("Media Name")
+
+        for value in ("V1", "V2", "V3"):
+            self.table._tmpl_edit.setText(value)
+            self.table._on_apply_rename()
+        self.assertEqual(a.media_name, "V3")
+
+        self.table._on_undo()
+        self.assertEqual(a.media_name, "V2")
+        self.table._on_undo()
+        self.assertEqual(a.media_name, "V1")
+        self.table._on_undo()
+        self.assertEqual(a.media_name, "BG")   # back to the original
+
+        # Stack is now empty -- a further click must be a safe no-op.
+        self.table._on_undo()
+        self.assertEqual(a.media_name, "BG")
+
+    def test_undo_after_case_fold_and_set_version_share_one_stack(self):
+        a = _make_item("a", "sq010", "sh0100", "plate", "bg", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.item_version[id(a)] = 1
+
+        self.table._apply_case("upper")
+        self.assertEqual((a.shot_code, a.media_name), ("SH0100", "BG"))
+
+        self.table._batch_version_spin.setValue(9)
+        self.table._on_batch_set_version()
+        self.assertEqual(self.table.item_version[id(a)], 9)
+
+        self.table._on_undo()   # undoes Set Version
+        self.assertEqual(self.table.item_version[id(a)], 1)
+        self.table._on_undo()   # undoes ALL CAPS
+        self.assertEqual((a.shot_code, a.media_name), ("sh0100", "bg"))
+
+    def test_undo_restores_the_resolved_version_not_just_the_text(self):
+        # Renaming a row onto a different slot knocks it back to
+        # "Checking..." pending a fresh NAS lookup (see the revalidation
+        # tests above). Undo must put back the ALREADY-RESOLVED version and
+        # status it had, not leave it stuck pending a check for a slot it no
+        # longer points at.
+        a = _make_item("a", "SQ099", "SH9900", "Plate", "XX", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, False)})
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 3)])
+
+        self.table._tmpl_edit.setText("SH0100")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+        self.assertEqual(self.table.get_valid_ingest_items(), [])   # pending, held back
+
+        self.table._on_undo()
+        self.assertEqual(a.shot_code, "SH9900")
+        self.assertEqual(self.table.item_version[id(a)], 3)
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 3)])
+
+    def test_undo_restores_a_kitsu_finding_the_rename_had_cleared(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_kitsu_check({
+            ("SQ010", "SH0100"): {"state": "wrong_sequence", "message": "wrong seq"}
+        })
+        self.assertTrue(self.table.has_unresolved_conflicts())
+
+        self.table._tmpl_edit.setText("SH0200")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+        self.assertFalse(self.table.has_unresolved_conflicts())   # moved off the flagged slot
+
+        self.table._on_undo()
+        self.assertTrue(self.table.has_unresolved_conflicts())
+        self.assertIn(id(a), self.table.kitsu_issues)
+
+    def test_selected_scope_with_nothing_selected_pushes_no_undo_entry(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table._scope_combo.setCurrentText("Apply to Selected Rows")
+        self.table._table.clearSelection()
+
+        self.table._tmpl_edit.setText("X")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+
+        self.assertEqual(a.shot_code, "SH0100")
+        self.assertEqual(len(self.table._undo_stack), 0)
+        self.assertFalse(self.table._undo_btn.isEnabled())
+
+    def test_blank_template_pushes_no_undo_entry(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table._tmpl_edit.setText("   ")
+        self.table._on_apply_rename()
+        self.assertEqual(len(self.table._undo_stack), 0)
+
+    def test_loading_a_new_batch_clears_the_undo_history(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table._tmpl_edit.setText("X")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+        self.assertEqual(len(self.table._undo_stack), 1)
+
+        b = _make_item("b", "SQ020", "SH0200", "Plate", "FG", "/tmp/b.mov")
+        self.table.populate_table([b])
+        self.assertEqual(len(self.table._undo_stack), 0)
+        self.assertFalse(self.table._undo_btn.isEnabled())
+
+    def test_undo_history_is_capped(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table._target_combo.setCurrentText("Media Name")
+        for i in range(25):
+            self.table._tmpl_edit.setText(f"V{i}")
+            self.table._on_apply_rename()
+        self.assertEqual(len(self.table._undo_stack), 20)
+
+
 if __name__ == "__main__":
     unittest.main()

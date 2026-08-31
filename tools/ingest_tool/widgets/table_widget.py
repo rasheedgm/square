@@ -118,6 +118,10 @@ class IngestTableWidget(QtWidgets.QWidget):
         # pre-flight. Kept apart from item_status so within-table conflict
         # detection, which re-derives statuses, can't quietly erase it.
         self.kitsu_issues = {}
+        # Restore points for the batch tools (Apply Rename, ALL CAPS/lowercase,
+        # Set Version) -- newest last, capped so a long session can't grow it
+        # unbounded. Each entry is {"label", "rows": [per-item snapshot, ...]}.
+        self._undo_stack = []
         self._project_code = ""
         self._nas_root = "X:/projects"
         self._filename_template = ""
@@ -145,6 +149,9 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_progress = {}
         self._pending_revalidation = set()
         self.kitsu_issues = {}
+        # A fresh load starts a new editing session -- nothing to undo into.
+        self._undo_stack = []
+        self._set_undo_button_state()
         self._refresh_table()
 
     def update_table(self, new_items):
@@ -438,6 +445,14 @@ class IngestTableWidget(QtWidgets.QWidget):
         set_version_btn.clicked.connect(self._on_batch_set_version)
         bar_layout.addWidget(self._batch_version_spin)
         bar_layout.addWidget(set_version_btn)
+
+        bar_layout.addSpacing(6)
+
+        self._undo_btn = QtWidgets.QPushButton("Undo")
+        self._undo_btn.setEnabled(False)
+        self._undo_btn.setToolTip("Nothing to undo")
+        self._undo_btn.clicked.connect(self._on_undo)
+        bar_layout.addWidget(self._undo_btn)
 
         bar_layout.addSpacing(10)
 
@@ -755,6 +770,83 @@ class IngestTableWidget(QtWidgets.QWidget):
                 self.item_status[key] = STATUS_CHECKING
         self.revalidation_requested.emit(changed)
 
+    # ------------------------------------------------------------------
+    # Undo (Apply Rename / ALL CAPS / lowercase / Set Version)
+    # ------------------------------------------------------------------
+
+    def _snapshot_for_undo(self, items):
+        """
+        Everything one of the three batch tools can change about a row,
+        captured before the mutation -- not just the four text fields, but
+        also the version and status it had and whether it was mid- or
+        pending-revalidation, so Undo puts back a row that was e.g. a
+        resolved "New Version" rather than leaving it stuck re-querying the
+        NAS for a slot it no longer occupies.
+        """
+        snaps = []
+        for item in items:
+            key = id(item)
+            snaps.append({
+                "item": item,
+                "sequence_code": item.sequence_code,
+                "shot_code": item.shot_code,
+                "media_type": getattr(item, "media_type", ""),
+                "media_name": item.media_name,
+                "version": self.item_version.get(key),
+                "status": self.item_status.get(key),
+                "pending": key in self._pending_revalidation,
+                "kitsu_issue": self.kitsu_issues.get(key),
+            })
+        return snaps
+
+    def _push_undo(self, label, items):
+        """Record a restore point before a batch tool mutates `items`."""
+        if not items:
+            return
+        self._undo_stack.append({"label": label, "rows": self._snapshot_for_undo(items)})
+        if len(self._undo_stack) > 20:
+            self._undo_stack.pop(0)
+        self._set_undo_button_state()
+
+    def _set_undo_button_state(self):
+        if self._undo_stack:
+            self._undo_btn.setEnabled(True)
+            self._undo_btn.setToolTip(f"Undo: {self._undo_stack[-1]['label']}")
+        else:
+            self._undo_btn.setEnabled(False)
+            self._undo_btn.setToolTip("Nothing to undo")
+
+    def _on_undo(self):
+        """
+        Pop the most recent batch action and put every field it touched back
+        exactly as it was. Repeatable -- each click undoes one more step.
+        """
+        if not self._undo_stack:
+            return
+        entry = self._undo_stack.pop()
+        for snap in entry["rows"]:
+            item = snap["item"]
+            key = id(item)
+            item.sequence_code = snap["sequence_code"]
+            item.shot_code     = snap["shot_code"]
+            item.media_type    = snap["media_type"]
+            item.media_name    = snap["media_name"]
+            if snap["version"] is not None:
+                self.item_version[key] = snap["version"]
+            if snap["status"] is not None:
+                self.item_status[key] = snap["status"]
+            if snap["pending"]:
+                self._pending_revalidation.add(key)
+            else:
+                self._pending_revalidation.discard(key)
+            if snap["kitsu_issue"] is not None:
+                self.kitsu_issues[key] = snap["kitsu_issue"]
+            else:
+                self.kitsu_issues.pop(key, None)
+        self._run_conflict_detection()
+        self._refresh_table()
+        self._set_undo_button_state()
+
     def _on_apply_rename(self):
         template = self._tmpl_edit.text().strip()
         if not template:
@@ -768,6 +860,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         today = datetime.date.today().strftime("%Y%m%d")
 
         items_to_apply = self._items_in_scope()
+        self._push_undo(f"Rename: {self._target_combo.currentText()}", items_to_apply)
 
         for item in items_to_apply:
             new_val = template
@@ -797,6 +890,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._sync_edits_from_table()
         before = self._snapshot_identities()
         items_to_apply = self._items_in_scope()
+        self._push_undo("ALL CAPS" if mode == "upper" else "lowercase", items_to_apply)
         for item in items_to_apply:
             if mode == "upper":
                 item.shot_code     = item.shot_code.upper()
@@ -818,7 +912,9 @@ class IngestTableWidget(QtWidgets.QWidget):
         item itself -- so this stays consistent with single-row edits)."""
         self._sync_edits_from_table()
         new_version = self._batch_version_spin.value()
-        for item in self._items_in_scope():
+        items = self._items_in_scope()
+        self._push_undo(f"Set Version v{new_version:03d}", items)
+        for item in items:
             self.item_version[id(item)] = new_version
         self._run_conflict_detection()
         self._refresh_table()

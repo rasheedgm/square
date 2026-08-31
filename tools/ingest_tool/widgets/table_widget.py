@@ -11,7 +11,8 @@ IngestTableWidget v2 — Full overhaul with:
 from Qt import QtWidgets, QtCore, QtGui
 from tools.qt_compat import (
     ITEM_IS_SELECTABLE, ITEM_IS_ENABLED,
-    HEADER_RESIZE_INTERACTIVE, SELECT_ROWS, ALIGN_CENTER
+    HEADER_RESIZE_INTERACTIVE, SELECT_ROWS, ALIGN_CENTER,
+    SELECTION_SELECT, SELECTION_ROWS
 )
 
 # ── Status constants ──
@@ -97,6 +98,11 @@ class IngestTableWidget(QtWidgets.QWidget):
     table_changed = QtCore.Signal()
     # Emitted when user clicks "Check Conflicts in Kitsu"
     kitsu_conflict_check_requested = QtCore.Signal()
+    # Emitted with the items whose destination changed (rename, case fold, or a
+    # manual cell edit). Their stored version number was resolved against the
+    # OLD destination folder, so it must be re-checked against the NAS before
+    # they can be ingested.
+    revalidation_requested = QtCore.Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -105,6 +111,9 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_version = {}        # id(item) -> version int
         self.item_discarded = set()   # id(item) -> discarded
         self.item_progress = {}       # id(item) -> (stage str, percent int) -- live ingest progress
+        # id(item) for rows whose destination changed since their version was
+        # last resolved against the NAS -- held out of ingest until re-checked.
+        self._pending_revalidation = set()
         self._project_code = ""
         self._nas_root = "X:/projects"
         self._filename_template = ""
@@ -130,6 +139,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_version = {id(i): 1 for i in items}
         self.item_discarded = set()
         self.item_progress = {}
+        self._pending_revalidation = set()
         self._refresh_table()
 
     def update_table(self, new_items):
@@ -202,6 +212,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             key = id(item)
             if key in results:
                 ver, already = results[key]
+                self._pending_revalidation.discard(key)
                 self.item_version[key] = ver
                 if already:
                     self.item_status[key] = STATUS_ALREADY
@@ -249,6 +260,11 @@ class IngestTableWidget(QtWidgets.QWidget):
             if not (seq and shot and mtype and name):
                 continue
             if status in (STATUS_ALREADY, STATUS_DISCARDED, STATUS_CONFLICT, STATUS_MISSING_DETAILS):
+                continue
+            # Its destination moved after the last NAS lookup, so the version
+            # it holds belongs to a different folder -- ingesting now could
+            # write on top of an existing version.
+            if key in self._pending_revalidation:
                 continue
             result.append((item, self.item_version.get(key, 1)))
         return result
@@ -326,8 +342,22 @@ class IngestTableWidget(QtWidgets.QWidget):
         # Template input
         self._tmpl_edit = QtWidgets.QLineEdit()
         self._tmpl_edit.setPlaceholderText("Rename template: {seq}_{shot} or {original}")
+        # "Wildcard" now means the * in a Path Pattern, so these are called
+        # tokens here to keep the two mechanisms apart.
         self._tmpl_edit.setToolTip(
-            "Wildcards: {project} {seq} {shot} {media_name} {media_type} {original} {date} {version}"
+            "Tokens, replaced per row:\n"
+            "  {project}     project code\n"
+            "  {seq}         this row's Sequence\n"
+            "  {shot}        this row's Shot\n"
+            "  {media_type}  this row's Media Type\n"
+            "  {media_name}  this row's Media Name\n"
+            "  {original}    source name as scanned\n"
+            "  {version}     current version, e.g. v003\n"
+            "  {date}        today, YYYYMMDD\n"
+            "Anything else is written literally.\n"
+            "Writes into the column picked beside this box, for the rows the\n"
+            "scope dropdown selects. The destination filename itself comes\n"
+            "from Settings > File Naming Pattern, not from here."
         )
         self._tmpl_edit.setMinimumWidth(220)
 
@@ -393,6 +423,12 @@ class IngestTableWidget(QtWidgets.QWidget):
     # ------------------------------------------------------------------
 
     def _refresh_table(self):
+        # Rebuilding the rows wipes the selection, and every batch tool ends
+        # with a refresh -- so "Apply to Selected Rows" only ever worked for
+        # the first click; the second silently acted on an empty selection.
+        # Selection is remembered by item identity and restored below.
+        selected_keys = {id(i) for i in self._get_selected_items_in_table()}
+
         self._table.blockSignals(True)
         self._table.setRowCount(0)
 
@@ -485,6 +521,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             self._style_row(row_idx, status, discarded)
 
         self._table.blockSignals(False)
+        self._restore_selection(selected_keys)
         self._update_status_bar()
         self.table_changed.emit()
 
@@ -590,6 +627,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         col = cell_item.column()
         if col not in (COL_SEQ, COL_SHOT, COL_TYPE, COL_MEDIA_NAME):
             return
+        before = self._snapshot_identities()
         # Sync the edited value back to the item object first
         row = cell_item.row()
         if row < len(self.items_data):
@@ -599,6 +637,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             if col == COL_SHOT:       item.shot_code     = text
             if col == COL_TYPE:       item.media_type    = text
             if col == COL_MEDIA_NAME: item.media_name    = text
+        self._request_revalidation_for_changed(before)
         self._run_conflict_detection()
         self._refresh_table()
 
@@ -625,6 +664,38 @@ class IngestTableWidget(QtWidgets.QWidget):
             return list(self.items_data)
         return self._get_selected_items_in_table()
 
+    @staticmethod
+    def _identity(item):
+        """The four fields that decide a row's NAS destination folder."""
+        return (
+            (item.sequence_code or "").strip(),
+            (item.shot_code or "").strip(),
+            (getattr(item, "media_type", "") or "").strip(),
+            (item.media_name or "").strip(),
+        )
+
+    def _snapshot_identities(self):
+        return {id(i): self._identity(i) for i in self.items_data}
+
+    def _request_revalidation_for_changed(self, before):
+        """
+        Any row whose destination moved is holding a version number that was
+        resolved against the folder it no longer points at -- e.g. renaming a
+        row onto a shot that already has a v001 on the NAS left it reading
+        "New / v001", and ingesting would have written straight into that
+        existing version. Such rows drop back to "Checking..." and a fresh NAS
+        lookup is requested for them.
+        """
+        changed = [i for i in self.items_data if before.get(id(i)) != self._identity(i)]
+        if not changed:
+            return
+        for item in changed:
+            key = id(item)
+            self._pending_revalidation.add(key)
+            if key not in self.item_discarded:
+                self.item_status[key] = STATUS_CHECKING
+        self.revalidation_requested.emit(changed)
+
     def _on_apply_rename(self):
         template = self._tmpl_edit.text().strip()
         if not template:
@@ -632,6 +703,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         target = self._target_combo.currentText().lower()   # "shot", "media name", "sequence", "media type"
 
         self._sync_edits_from_table()
+        before = self._snapshot_identities()
 
         import datetime
         today = datetime.date.today().strftime("%Y%m%d")
@@ -658,11 +730,13 @@ class IngestTableWidget(QtWidgets.QWidget):
             elif target == "media type":
                 item.media_type = new_val
 
+        self._request_revalidation_for_changed(before)
         self._run_conflict_detection()
         self._refresh_table()
 
     def _apply_case(self, mode):
         self._sync_edits_from_table()
+        before = self._snapshot_identities()
         items_to_apply = self._items_in_scope()
         for item in items_to_apply:
             if mode == "upper":
@@ -675,6 +749,8 @@ class IngestTableWidget(QtWidgets.QWidget):
                 item.media_name    = item.media_name.lower()
                 item.sequence_code = item.sequence_code.lower()
                 item.media_type    = (item.media_type or "").lower()
+        self._request_revalidation_for_changed(before)
+        self._run_conflict_detection()
         self._refresh_table()
 
     def _on_batch_set_version(self):
@@ -788,6 +864,28 @@ class IngestTableWidget(QtWidgets.QWidget):
     def _get_selected_items_in_table(self):
         rows = {index.row() for index in self._table.selectedIndexes()}
         return [self.items_data[r] for r in rows if r < len(self.items_data)]
+
+    def _restore_selection(self, keys):
+        """
+        Re-select the rows holding these items after a rebuild. Applied as one
+        QItemSelection rather than repeated selectRow() calls -- in the
+        table's ExtendedSelection mode each selectRow() would clear the last,
+        leaving only one row selected out of a multi-row selection.
+        """
+        if not keys:
+            return
+        sel = self._table.selectionModel()
+        if sel is None:
+            return
+        model = self._table.model()
+        last_col = max(self._table.columnCount() - 1, 0)
+        selection = QtCore.QItemSelection()
+        for row, item in enumerate(self.items_data):
+            if id(item) in keys and row < self._table.rowCount():
+                selection.select(model.index(row, 0), model.index(row, last_col))
+        sel.clearSelection()
+        if not selection.isEmpty():
+            sel.select(selection, SELECTION_SELECT | SELECTION_ROWS)
 
     def _update_status_bar(self):
         # Counted from the same effective status the rows display -- reading

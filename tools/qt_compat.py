@@ -48,3 +48,5 @@ HEADER_RESIZE_TO_CONTENTS = get_qt_enum(QtWidgets.QHeaderView, "ResizeMode", "Re
 TEXT_SELECTABLE_BY_MOUSE = get_qt_enum(QtCore.Qt, "TextInteractionFlag", "TextSelectableByMouse")
 CURSOR_POINTING_HAND     = get_qt_enum(QtCore.Qt, "CursorShape", "PointingHandCursor")
 PEN_STYLE_NO_PEN         = get_qt_enum(QtCore.Qt, "PenStyle", "NoPen")
+SELECTION_SELECT         = get_qt_enum(QtCore.QItemSelectionModel, "SelectionFlag", "Select")
+SELECTION_ROWS           = get_qt_enum(QtCore.QItemSelectionModel, "SelectionFlag", "Rows")

@@ -443,6 +443,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.table_widget = IngestTableWidget()
         self.table_widget.table_changed.connect(self._update_conflict_badge)
+        # A rename or a hand-edited cell moves a row's destination, so its
+        # version number has to be resolved against the new folder before it
+        # can be ingested.
+        self.table_widget.revalidation_requested.connect(self._on_revalidation_requested)
 
         self.main_splitter.addWidget(self.folder_tree)
         self.main_splitter.addWidget(self.table_widget)
@@ -631,6 +635,12 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._nas_check_worker.results_ready.connect(self._on_nas_check_done)
         self._nas_check_worker.start()
+
+    def _on_revalidation_requested(self, items):
+        """Re-run the NAS version check for rows whose destination changed."""
+        if not items or not self.project_data:
+            return
+        self._start_nas_check(items)
 
     def _on_nas_check_done(self, results):
         self._check_bar.setVisible(False)

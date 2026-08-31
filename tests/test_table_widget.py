@@ -3,7 +3,8 @@ from Qt import QtWidgets
 
 from tools.ingest_tool.widgets.table_widget import (
     IngestTableWidget, STATUS_CONFLICT, STATUS_NEW, STATUS_DISCARDED,
-    COL_PROGRESS, COL_VERSION, STAGE_QUEUED, STAGE_COPYING, STAGE_DONE,
+    STATUS_CHECKING, COL_PROGRESS, COL_VERSION, COL_SHOT,
+    STAGE_QUEUED, STAGE_COPYING, STAGE_DONE,
 )
 from square_core.plate_scanner import IngestSequenceItem
 
@@ -183,6 +184,146 @@ class TestTableAuditFixes(unittest.TestCase):
         bad = _make_item("b", "", "", "", "", "/tmp/b.mov")
         self.table.populate_table([good, bad])
         self.assertIn("1 missing details", self.table._status_lbl.text())
+
+
+class TestRenameAndVersionRevalidation(unittest.TestCase):
+    """
+    Two confirmed rename defects. (1) Every batch tool ends in a table
+    rebuild, which cleared the selection -- so "Apply to Selected Rows"
+    worked for the first click and silently did nothing on the second.
+    (2) A row's version number is resolved against its destination folder on
+    the NAS; renaming moves that destination, but the old number stayed put,
+    so renaming a row onto a shot that already had a v001 left it reading
+    "New / v001" and the ingest would have written into the existing version.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    # -- selection survives a rebuild -------------------------------------
+
+    def test_second_batch_action_still_sees_the_same_selection(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        b = _make_item("b", "SQ020", "SH0200", "Plate", "FG", "/tmp/b.mov")
+        self.table.populate_table([a, b])
+        self.table._table.selectRow(1)
+        self.table._scope_combo.setCurrentText("Apply to Selected Rows")
+
+        self.table._tmpl_edit.setText("X")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+
+        self.table._tmpl_edit.setText("Y")
+        self.table._target_combo.setCurrentText("Media Name")
+        self.table._on_apply_rename()
+
+        self.assertEqual((b.shot_code, b.media_name), ("X", "Y"))
+        self.assertEqual((a.shot_code, a.media_name), ("SH0100", "BG"))
+
+    def test_multi_row_selection_survives_intact(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        b = _make_item("b", "SQ020", "SH0200", "Plate", "FG", "/tmp/b.mov")
+        c = _make_item("c", "SQ030", "SH0300", "Plate", "MG", "/tmp/c.mov")
+        self.table.populate_table([a, b, c])
+
+        # Two non-adjacent rows, the way a ctrl-click leaves them.
+        self.table._restore_selection({id(a), id(c)})
+        self.table._scope_combo.setCurrentText("Apply to Selected Rows")
+
+        self.table._batch_version_spin.setValue(6)
+        self.table._on_batch_set_version()      # rebuilds the table
+        self.table._batch_version_spin.setValue(8)
+        self.table._on_batch_set_version()      # must still see BOTH rows
+
+        self.assertEqual(self.table.item_version[id(a)], 8)
+        self.assertEqual(self.table.item_version[id(c)], 8)
+        self.assertEqual(self.table.item_version[id(b)], 1)
+
+    # -- version is re-resolved when the destination moves -----------------
+
+    def _watch_revalidation(self):
+        seen = []
+        self.table.revalidation_requested.connect(lambda items: seen.append(list(items)))
+        return seen
+
+    def test_rename_requests_a_fresh_nas_check_and_holds_the_row_back(self):
+        a = _make_item("a", "SQ099", "SH9900", "Plate", "XX", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, False)})
+        self.assertTrue(self.table.get_valid_ingest_items())
+
+        seen = self._watch_revalidation()
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._tmpl_edit.setText("SH0100")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+
+        self.assertEqual([i.name for i in seen[0]], ["a"])
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECKING)
+        # Stale version must not reach the ingest worker.
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+
+        # Results land: the row comes back with the version for its NEW slot.
+        self.table.apply_version_results({id(a): (2, False)})
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 2)])
+
+    def test_hand_edited_cell_revalidates_too(self):
+        a = _make_item("a", "SQ099", "SH9900", "Plate", "XX", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, False)})
+        seen = self._watch_revalidation()
+
+        self.table._table.item(0, COL_SHOT).setText("SH0100")
+
+        self.assertEqual([i.name for i in seen[0]], ["a"])
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+
+    def test_rename_that_changes_nothing_does_not_trigger_a_recheck(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, False)})
+        seen = self._watch_revalidation()
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._tmpl_edit.setText("SH0100")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+
+        self.assertEqual(seen, [])
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 1)])
+
+    def test_case_fold_also_revalidates(self):
+        a = _make_item("a", "sq010", "sh0100", "plate", "bg", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, False)})
+        seen = self._watch_revalidation()
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._apply_case("upper")
+
+        self.assertEqual([i.name for i in seen[0]], ["a"])
+
+    def test_every_documented_rename_token_resolves(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.item_version[id(a)] = 4
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._target_combo.setCurrentText("Media Type")
+
+        tokens = ["{project}", "{seq}", "{shot}", "{media_name}",
+                  "{media_type}", "{original}", "{date}", "{version}"]
+        for token in tokens:
+            self.table._tmpl_edit.setText(token)
+            self.table._on_apply_rename()
+            self.assertNotEqual(a.media_type, token, f"{token} was left as literal text")
+
+        # And the retired name really is gone -- {plate} was renamed to
+        # {media_name}, so it must read as plain text, not silently expand.
+        self.table._tmpl_edit.setText("{plate}")
+        self.table._on_apply_rename()
+        self.assertEqual(a.media_type, "{plate}")
 
 
 if __name__ == "__main__":

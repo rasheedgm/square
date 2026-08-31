@@ -97,6 +97,10 @@ class TestSegmentRowDrillMergeCollapse(unittest.TestCase):
 class TestPathPatternBuilderDialog(unittest.TestCase):
     """End-to-end: seeding the dialog from a real leaf item, tagging pieces, reading back the template."""
 
+    # A template that genuinely matches this fixture's file
+    # (SQ010/SH0100/ALPHA_SQ010_SH0100_PL01.1001.exr).
+    MATCHING_TEMPLATE = "<sequence>/<shot>/ALPHA_<sequence>_<shot>_<media_name>.####.exr"
+
     def setUp(self):
         QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         self.tmp = Path(tempfile.mkdtemp())
@@ -108,39 +112,86 @@ class TestPathPatternBuilderDialog(unittest.TestCase):
         self.mapper = FolderMapper(self.tmp)
         self.item = PlateScanner(self.tmp).scan()[0]
 
-    def test_reopening_on_an_already_matched_file_shows_a_banner_not_a_blank_slate(self):
-        # Confirmed confusion: the builder always starts fresh from the raw
-        # example (there's no reliable way to reconstruct which chips an
-        # existing template would have tagged), so reopening it on a file
-        # that was already tagged looked like the tag had been lost. It
-        # hasn't -- the banner is how that's made visible instead.
-        self.mapper.add_path_pattern(
-            PathPattern(template="<sequence>/<shot>/ALPHA_SQ010_SH0100_PL01.####.exr")
-        )
-        dlg = PathPatternBuilderDialog(self.mapper, self.item)
-        # Still starts fresh -- no chip is pre-tagged.
-        self.assertIsNone(dlg._segment_rows[0].all_chips()[0].role)
+    def test_reopening_on_a_tagged_file_restores_that_pattern_s_own_tagging(self):
+        # Reported confusion: after tagging a file, reopening the builder on
+        # it showed a blank slate, as if the tag had been lost. It now opens
+        # with the matching pattern's tagging restored, exactly as it was
+        # originally made.
+        saved = self.MATCHING_TEMPLATE
+        self.mapper.add_path_pattern(PathPattern(template=saved))
 
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+
+        self.assertEqual(dlg._segment_rows[0].all_chips()[0].role, "sequence")
+        self.assertEqual(dlg._segment_rows[1].all_chips()[0].role, "shot")
+        filename_roles = [c.role for c in dlg._segment_rows[2].all_chips()]
+        self.assertIn("media_name", filename_roles)
+        # ...and it round-trips: what's shown renders back to what was saved.
+        self.assertEqual(dlg._current_template(), saved)
+
+    def test_restored_chips_show_this_file_s_own_values(self):
+        self.mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr"))
+        d2 = self.tmp / "SQ010" / "SH0200"
+        d2.mkdir(parents=True)
+        for frame in range(1001, 1003):
+            (d2 / f"plate.{frame}.exr").write_text("x")
+        other_item = next(i for i in PlateScanner(self.tmp).scan() if "SH0200" in i.files[0])
+
+        dlg = PathPatternBuilderDialog(self.mapper, other_item)
+        self.assertEqual(dlg._segment_rows[1].all_chips()[0].raw_text, "SH0200")
+        self.assertEqual(dlg._segment_rows[1].all_chips()[0].role, "shot")
+
+    def test_starts_fresh_when_nothing_matches_yet(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self.assertIsNone(dlg._existing_index)
+        self.assertIsNone(dlg._segment_rows[0].all_chips()[0].role)
         text_seen = "\n".join(
-            w.text() for w in dlg.findChildren(QtWidgets.QLabel) if "already matches" in w.text()
+            w.text() for w in dlg.findChildren(QtWidgets.QLabel) if "saved pattern" in w.text()
         )
-        self.assertIn("already matches a saved pattern", text_seen)
-        self.assertIn("SQ010", text_seen)
+        self.assertEqual(text_seen, "")
+
+    def test_banner_escapes_placeholders_so_they_survive_rich_text_rendering(self):
+        self.mapper.add_path_pattern(PathPattern(template=self.MATCHING_TEMPLATE))
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        text_seen = "\n".join(
+            w.text() for w in dlg.findChildren(QtWidgets.QLabel) if "saved pattern" in w.text()
+        )
         # QLabel.text() returns the raw source string, HTML markup and all --
         # it can't tell an escaped "<sequence>" from one Qt's rich-text
         # parser would silently swallow as an unknown tag. The escaped form
-        # is the only way to confirm the placeholder actually survives
-        # rendering instead of vanishing.
+        # is the only way to confirm the placeholder survives rendering.
         self.assertIn("&lt;sequence&gt;", text_seen)
-        self.assertIn("&lt;shot&gt;", text_seen)
         self.assertNotIn("<sequence>", text_seen)
 
-    def test_no_banner_when_nothing_matches_yet(self):
+    def test_saving_can_overwrite_the_matched_pattern_instead_of_adding_one(self):
+        self.mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr", name="Std"))
+        self.mapper.add_path_pattern(PathPattern(template=self.MATCHING_TEMPLATE))
         dlg = PathPatternBuilderDialog(self.mapper, self.item)
-        text_seen = "\n".join(
-            w.text() for w in dlg.findChildren(QtWidgets.QLabel) if "already matches" in w.text()
-        )
-        self.assertEqual(text_seen, "")
+        self.assertEqual(dlg._existing_index, 1)  # the one that actually matches this file
+
+        with patch.object(PathPatternBuilderDialog, "_ask_save_mode", return_value="overwrite"), \
+             patch.object(QtWidgets.QInputDialog, "getText", return_value=("Edited", True)):
+            dlg._on_accept()
+        self.assertEqual(dlg.result_replace_index, 1)
+
+    def test_saving_can_add_a_new_pattern_alongside_the_matched_one(self):
+        self.mapper.add_path_pattern(PathPattern(template=self.MATCHING_TEMPLATE))
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self.assertEqual(dlg._existing_index, 0)
+
+        with patch.object(PathPatternBuilderDialog, "_ask_save_mode", return_value="new"), \
+             patch.object(QtWidgets.QInputDialog, "getText", return_value=("Another", True)):
+            dlg._on_accept()
+        self.assertIsNone(dlg.result_replace_index)
+        self.assertIsNotNone(dlg.result_pattern)
+
+    def test_cancelling_the_save_choice_saves_nothing(self):
+        self.mapper.add_path_pattern(PathPattern(template=self.MATCHING_TEMPLATE))
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+
+        with patch.object(PathPatternBuilderDialog, "_ask_save_mode", return_value=None):
+            dlg._on_accept()
+        self.assertIsNone(dlg.result_pattern)
 
     def test_seed_segments_include_hash_substituted_filename(self):
         dlg = PathPatternBuilderDialog(self.mapper, self.item)

@@ -649,7 +649,10 @@ class FolderTreeWidget(QtWidgets.QWidget):
         dlg = PathPatternBuilderDialog(self._mapper, item, parent=self)
         res = dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
         if res == DIALOG_ACCEPTED and dlg.result_pattern:
-            self._mapper.add_path_pattern(dlg.result_pattern)
+            if dlg.result_replace_index is not None:
+                self._mapper.update_path_pattern(dlg.result_replace_index, dlg.result_pattern)
+            else:
+                self._mapper.add_path_pattern(dlg.result_pattern)
             self._mapper.save()
             self._refresh_item_colours()
 

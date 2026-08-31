@@ -190,6 +190,114 @@ def match_first(patterns, rel_path_posix: str):
     return None, None
 
 
+def explode_segment_template(segment_template: str, real_segment: str, delimiter_chars="_.-"):
+    """
+    Reverse of the build step: given one segment's template and the real text
+    it matched, work out the chip breakdown that produced it, so reopening
+    the builder on an already-tagged file can show the tagging exactly as it
+    was made rather than a blank slate.
+
+    Returns (chips, seps, roles) where roles[i] is None (plain literal),
+    WILDCARD_TOKEN, or a placeholder name; chip text is the *real* matched
+    value for a placeholder/wildcard (so the user sees their own file's
+    values), the literal text otherwise. Returns None when the template
+    can't be reversed faithfully -- the caller then falls back to a fresh,
+    untagged breakdown rather than showing something subtly wrong.
+
+    Reconstruction is driven by the template rather than by re-tokenizing
+    the real text, since a placeholder name can itself contain the
+    delimiter (<media_name>) and would otherwise be split in half.
+    """
+    pieces = []
+    pos = 0
+    for m in _PIECE_RE.finditer(segment_template):
+        if m.start() > pos:
+            pieces.append(("lit", segment_template[pos:m.start()]))
+        if m.group(1) is not None:
+            pieces.append(("ph", m.group(1)))
+        elif m.group(2) is not None:
+            pieces.append(("wild", m.group(2)))
+        else:
+            pieces.append(("frame", m.group(3)))
+        pos = m.end()
+    if pos < len(segment_template):
+        pieces.append(("lit", segment_template[pos:]))
+    if not pieces:
+        return None
+
+    # Pull the real values out of this segment: every placeholder AND
+    # wildcard captures, so a wildcard chip can still show the text it's
+    # choosing to ignore.
+    parts, group_names = [], []
+    for kind, val in pieces:
+        if kind == "lit":
+            parts.append(re.escape(val))
+        elif kind == "ph":
+            group_names.append(f"g{len(group_names)}")
+            parts.append(f"(?P<{group_names[-1]}>.+?)")
+        elif kind == "wild":
+            group_names.append(f"g{len(group_names)}")
+            parts.append(f"(?P<{group_names[-1]}>.*?)")
+        else:
+            parts.append(r"\d+")
+    try:
+        matched = re.compile("^" + "".join(parts) + "$", re.IGNORECASE).match(real_segment)
+    except re.error:
+        return None
+    if not matched:
+        return None
+
+    chips, seps, roles = [], [], []
+    pending = ""
+
+    def push(text, role):
+        nonlocal pending
+        if chips:
+            seps.append(pending)
+        pending = ""
+        chips.append(text)
+        roles.append(role)
+
+    delim_class = re.escape(delimiter_chars)
+    group_idx = 0
+    for kind, val in pieces:
+        if kind == "lit":
+            for run in re.findall(f"[{delim_class}]+|[^{delim_class}]+", val):
+                if run[0] in delimiter_chars:
+                    if chips:
+                        pending += run
+                    else:
+                        push(run, None)   # leading delimiters: keep as their own literal chip
+                else:
+                    push(run, None)
+        elif kind == "ph":
+            push(matched.group(group_names[group_idx]), val)
+            group_idx += 1
+        elif kind == "wild":
+            push(matched.group(group_names[group_idx]), WILDCARD_TOKEN)
+            group_idx += 1
+        else:
+            push(val, None)   # the "####" run itself; the UI locks it as the frame piece
+    if pending:
+        push(pending, None)   # trailing delimiters
+
+    # Only hand back a breakdown that renders exactly back to the template --
+    # anything else would silently misrepresent the saved pattern.
+    rendered = []
+    for i, (text, role) in enumerate(zip(chips, roles)):
+        if i:
+            rendered.append(seps[i - 1])
+        if role == WILDCARD_TOKEN:
+            rendered.append(WILDCARD_TOKEN)
+        elif role:
+            rendered.append(render_placeholder(role))
+        else:
+            rendered.append(text)
+    if "".join(rendered) != segment_template:
+        return None
+    return chips, seps, roles
+
+
 def split_canonical_and_extra(extracted: dict):
     """
     Splits a match() result into (canonical_fields, extra_tags).

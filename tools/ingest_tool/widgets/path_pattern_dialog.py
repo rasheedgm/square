@@ -24,6 +24,7 @@ from Qt import QtWidgets, QtCore
 from square_core.path_pattern import (
     PathPattern, CANONICAL_DISPLAY_NAMES, WILDCARD_TOKEN,
     render_placeholder, is_frame_piece_text, seed_filename_segment,
+    explode_segment_template,
 )
 from square_core.token_parser import (
     DEFAULT_DELIMITER_CHARS, tokenize_with_separators, merge_token_indices,
@@ -188,6 +189,33 @@ class SegmentRow(QtWidgets.QWidget):
         self._show_sub_row(chips, seps)
         self.changed.emit()
 
+    def load_pieces(self, chips_text, seps, roles):
+        """
+        Restore an explicit chip breakdown reversed out of an already-saved
+        pattern (see path_pattern.explode_segment_template), so reopening the
+        builder shows the tagging as it was originally made.
+        """
+        if len(chips_text) <= 1:
+            self.raw_text = chips_text[0] if chips_text else self.raw_text
+            self._show_whole()
+            role = roles[0] if roles else None
+            if role == WILDCARD_TOKEN:
+                self._whole_chip.set_wildcard(True)
+            elif role:
+                self._whole_chip.set_role(role)
+            self.changed.emit()
+            return
+
+        self._show_sub_row(chips_text, seps)
+        for chip, role in zip(self._sub_chips, roles):
+            if chip.is_frame:
+                continue
+            if role == WILDCARD_TOKEN:
+                chip.set_wildcard(True)
+            elif role:
+                chip.set_role(role)
+        self.changed.emit()
+
     def merge_selected(self):
         if not self._drilled:
             return
@@ -229,12 +257,54 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Build Path Pattern")
         self.setMinimumSize(780, 460)
+        # Restored tagging (drilled filename + several folder chips) is wide,
+        # so open with room for it rather than starting mid-scroll.
+        self.resize(1000, 560)
         self.mapper = mapper
         self.item = item
         self.result_pattern = None
+        # Set when the user chooses to overwrite the pattern this file
+        # already matched, instead of adding another one.
+        self.result_replace_index = None
         self._segment_rows = []
         self._rel_segments = self._compute_seed_segments()
+        self._existing_index, self._existing_pattern = self._find_existing_match()
         self._build_ui()
+
+    def _find_existing_match(self):
+        """The first saved pattern (and its index) that already matches this exact file."""
+        if not self.item.files:
+            return None, None
+        rel = self.mapper._relative_posix(Path(self.item.files[0]))
+        if not rel:
+            return None, None
+        for idx, pattern in enumerate(self.mapper.get_path_patterns()):
+            if pattern.match(rel) is not None:
+                return idx, pattern
+        return None, None
+
+    def _reconstructed_pieces(self):
+        """
+        Per-segment chip breakdowns reversed out of the already-matching
+        saved pattern, or None if there isn't one (or it can't be reversed
+        faithfully -- in which case the builder just starts fresh).
+        """
+        if self._existing_pattern is None or not self.item.files:
+            return None
+        real_rel = self.mapper._relative_posix(Path(self.item.files[0]))
+        if not real_rel:
+            return None
+        real_segments = real_rel.split("/")
+        tmpl_segments = self._existing_pattern.template.split("/")
+        if not (len(tmpl_segments) == len(real_segments) == len(self._rel_segments)):
+            return None
+        exploded = []
+        for tmpl_seg, real_seg in zip(tmpl_segments, real_segments):
+            pieces = explode_segment_template(tmpl_seg, real_seg, DEFAULT_DELIMITER_CHARS)
+            if pieces is None:
+                return None
+            exploded.append(pieces)
+        return exploded
 
     def _compute_seed_segments(self):
         folder = Path(self.item.files[0]).parent if self.item.files else self.mapper.root
@@ -245,31 +315,33 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
 
     def _add_existing_match_banner(self, layout):
         """
-        The builder always starts fresh from the raw example -- it doesn't
-        try to reconstruct which chips an existing saved pattern would have
-        tagged, since that's ambiguous in general. Without this, tagging a
-        file, then reopening the builder on that same file, looked like the
-        earlier tag had vanished. This makes the current state visible
-        instead: if a saved pattern already matches this exact file, say so
-        up front, with what it's currently extracting.
+        When this file already matches a saved pattern, the builder opens
+        with that pattern's own tagging restored (see _reconstructed_pieces)
+        rather than a blank slate -- this says so, and sets the expectation
+        that saving will ask whether to overwrite it or add a new one.
         """
-        if not self.item.files:
-            return
-        matched_pattern, extracted = self.mapper.match_relative_path(Path(self.item.files[0]))
-        if matched_pattern is None:
+        if self._existing_pattern is None:
             return
         # This label mixes literal HTML markup with data (the template
         # string, the extracted values) -- both need escaping, or a
         # placeholder like "<sequence>" is parsed as an unknown tag and
         # silently dropped instead of shown.
-        safe_template = html.escape(matched_pattern.template)
+        safe_template = html.escape(self._existing_pattern.template)
+        extracted = self._existing_pattern.match(
+            self.mapper._relative_posix(Path(self.item.files[0]))
+        ) or {}
         shown = ", ".join(f"{html.escape(k)}={html.escape(str(v))}" for k, v in extracted.items()) or "(no tags captured)"
+        restored = self._reconstructed_pieces() is not None
+        opening_line = (
+            "✎ Loaded from the saved pattern this file already matches — the tagging below is that pattern's."
+            if restored else
+            "✓ This file already matches a saved pattern (shown below couldn't be restored as chips, so it starts fresh):"
+        )
         banner = QtWidgets.QLabel(
-            f"✓ This file already matches a saved pattern: "
+            f"{opening_line}<br>"
             f"<span style='font-family:monospace; color:#34D399;'>{safe_template}</span><br>"
             f"Currently extracting: {shown}<br>"
-            f"Building a new pattern below adds another one rather than editing this match -- "
-            f"use Patterns… to edit or reorder existing ones instead."
+            f"Saving will ask whether to overwrite this pattern or add a new one."
         )
         banner.setWordWrap(True)
         banner.setStyleSheet(
@@ -303,9 +375,16 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         chips_host = QtWidgets.QWidget()
         chips_row = QtWidgets.QHBoxLayout(chips_host)
         chips_row.setSpacing(4)
+        reconstructed = self._reconstructed_pieces()
         last_idx = len(self._rel_segments) - 1
         for i, seg_text in enumerate(self._rel_segments):
-            row = SegmentRow(i, seg_text, auto_drill=(i == last_idx))
+            # When this file already matches a saved pattern, open with that
+            # pattern's own tagging restored rather than a blank slate.
+            auto_drill = (i == last_idx) and reconstructed is None
+            row = SegmentRow(i, seg_text, auto_drill=auto_drill)
+            if reconstructed is not None:
+                chips, seps, roles = reconstructed[i]
+                row.load_pieces(chips, seps, roles)
             row.changed.connect(self._update_preview)
             self._segment_rows.append(row)
             chips_row.addWidget(row)
@@ -370,7 +449,7 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         layout.addWidget(prev_box)
 
         btn_row = QtWidgets.QHBoxLayout()
-        save_btn = QtWidgets.QPushButton("Add Pattern")
+        save_btn = QtWidgets.QPushButton("Save Pattern" if self._existing_index is not None else "Add Pattern")
         save_btn.setStyleSheet("background-color:#059669; font-weight:bold;")
         save_btn.clicked.connect(self._on_accept)
         cancel_btn = QtWidgets.QPushButton("Cancel")
@@ -459,15 +538,51 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
             lines.append(f"  … and {total - len(samples)} more")
         self.preview_lbl.setText("\n".join(lines))
 
+    def _ask_save_mode(self):
+        """
+        "overwrite" | "new" | None (cancelled). Split out from _on_accept so
+        the choice can be driven directly in tests without a live modal.
+        """
+        if self._existing_index is None:
+            return "new"
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Save Path Pattern")
+        box.setText(
+            "This file already matched a saved pattern, and the tagging you edited came from it.\n\n"
+            "Overwrite that pattern, or add this as a separate new one?"
+        )
+        accept_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "AcceptRole")
+        reject_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "RejectRole")
+        overwrite_btn = box.addButton("Overwrite Existing", accept_role)
+        new_btn = box.addButton("Add as New", accept_role)
+        box.addButton("Cancel", reject_role)
+        box.exec() if hasattr(box, "exec") else box.exec_()
+        clicked = box.clickedButton()
+        if clicked is overwrite_btn:
+            return "overwrite"
+        if clicked is new_btn:
+            return "new"
+        return None
+
     def _on_accept(self):
         template = self._current_template()
         if not template:
             return
-        default_name = template if len(template) <= 60 else template[:57] + "..."
+
+        mode = self._ask_save_mode()
+        if mode is None:
+            return
+
+        if mode == "overwrite":
+            default_name = self._existing_pattern.name
+        else:
+            default_name = template if len(template) <= 60 else template[:57] + "..."
         name, ok = QtWidgets.QInputDialog.getText(self, "Pattern Name", "Name this pattern:", text=default_name)
         if not ok:
             return
+
         self.result_pattern = PathPattern(template=template, name=name.strip() or template)
+        self.result_replace_index = self._existing_index if mode == "overwrite" else None
         self.accept()
 
 

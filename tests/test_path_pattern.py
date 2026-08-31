@@ -5,6 +5,7 @@ from pathlib import Path
 from square_core.path_pattern import (
     PathPattern, match_first, split_canonical_and_extra,
     seed_filename_segment, render_placeholder, is_frame_piece_text,
+    explode_segment_template,
 )
 from square_core.plate_scanner import IngestSequenceItem
 
@@ -108,6 +109,70 @@ class TestPathPatternMatching(unittest.TestCase):
         self.assertTrue(is_frame_piece_text("####"))
         self.assertTrue(is_frame_piece_text("##"))
         self.assertFalse(is_frame_piece_text("plate"))
+
+
+class TestExplodeSegmentTemplate(unittest.TestCase):
+    """
+    Reversing a saved template back into chip state, so reopening the
+    builder on an already-tagged file shows that file's tagging as it was
+    originally made rather than a blank slate.
+    """
+
+    def test_whole_segment_placeholder(self):
+        chips, seps, roles = explode_segment_template("<sequence>", "SQ010")
+        self.assertEqual(chips, ["SQ010"])
+        self.assertEqual(seps, [])
+        self.assertEqual(roles, ["sequence"])
+
+    def test_combined_filename_with_frame_and_extension(self):
+        chips, seps, roles = explode_segment_template(
+            "<sequence>_<shot>_<media_name>.####.<extension>", "SQ010_SH0100_BG.1001.exr"
+        )
+        self.assertEqual(chips, ["SQ010", "SH0100", "BG", "####", "exr"])
+        self.assertEqual(seps, ["_", "_", ".", "."])
+        self.assertEqual(roles, ["sequence", "shot", "media_name", None, "extension"])
+
+    def test_placeholder_name_containing_the_delimiter_stays_atomic(self):
+        # "<media_name>" must not be split in half on its own underscore --
+        # the reason reconstruction is driven by the template rather than by
+        # re-tokenizing the text.
+        chips, _seps, roles = explode_segment_template("<media_name>.mov", "BG_MAIN.mov")
+        self.assertEqual(chips, ["BG_MAIN", "mov"])
+        self.assertEqual(roles, ["media_name", None])
+
+    def test_wildcard_chip_keeps_the_text_it_ignores(self):
+        chips, _seps, roles = explode_segment_template("*", "v001")
+        self.assertEqual(chips, ["v001"])
+        self.assertEqual(roles, ["*"])
+
+    def test_literal_prefix_glued_to_a_placeholder(self):
+        chips, seps, roles = explode_segment_template("<shot>_v<version>", "SH0100_v003")
+        self.assertEqual(chips, ["SH0100", "v", "003"])
+        self.assertEqual(seps, ["_", ""])
+        self.assertEqual(roles, ["shot", None, "version"])
+
+    def test_returns_none_when_the_template_does_not_match_the_text(self):
+        self.assertIsNone(explode_segment_template("<shot>_plate.exr", "totally_different.mov"))
+
+    def test_round_trips_back_to_the_original_template(self):
+        for template, real in [
+            ("<sequence>_<shot>_<media_name>.####.<extension>", "SQ010_SH0100_BG.1001.exr"),
+            ("<media_type>_*_<media_name>.mov", "PLATE_junk_BG.mov"),
+            ("plate.####.exr", "plate.1001.exr"),
+            ("vendor_drop", "vendor_drop"),
+        ]:
+            chips, seps, roles = explode_segment_template(template, real)
+            rendered = []
+            for i, (text, role) in enumerate(zip(chips, roles)):
+                if i:
+                    rendered.append(seps[i - 1])
+                if role == "*":
+                    rendered.append("*")
+                elif role:
+                    rendered.append(f"<{role}>")
+                else:
+                    rendered.append(text)
+            self.assertEqual("".join(rendered), template)
 
 
 class TestSeedFilenameSegment(unittest.TestCase):

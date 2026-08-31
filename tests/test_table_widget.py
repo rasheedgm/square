@@ -913,6 +913,91 @@ class TestVersionUpAndOverride(unittest.TestCase):
         self.assertEqual(called, [])
 
 
+class TestConflictActionButtonState(unittest.TestCase):
+    """
+    Screenshot report: Version Up and Override sat there enabled (Override
+    styled to stand out, bold orange/red) even while a row was still
+    "Checking..." with no conflict confirmed yet -- looked like something
+    needed resolving when there was nothing to click either button for. Both
+    now start disabled and only light up once a row genuinely has a version
+    conflict to act on, the same way Undo only enables once there's
+    something to undo.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_both_start_disabled_on_a_fresh_table(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.assertFalse(self.table._version_up_btn.isEnabled())
+        self.assertFalse(self.table._override_btn.isEnabled())
+
+    def test_still_disabled_while_a_manual_pick_is_pending_checking(self):
+        # Exactly the reported screenshot: a version was just picked by hand
+        # and is still "Checking..." -- no conflict confirmed yet, so
+        # neither button should look actionable.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(1)
+        self.table._on_batch_set_version()   # -> "Checking...", pending a real check
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECKING)
+        self.assertFalse(self.table._version_up_btn.isEnabled())
+        self.assertFalse(self.table._override_btn.isEnabled())
+
+    def test_both_enable_once_a_real_conflict_is_confirmed(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(1)
+        self.table._on_batch_set_version()
+
+        self.table.apply_version_results({id(a): (1, "conflict", True)})   # the real check lands
+
+        self.assertTrue(self.table._version_up_btn.isEnabled())
+        self.assertTrue(self.table._override_btn.isEnabled())
+
+    def test_override_disables_again_once_every_conflict_is_overridden(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(1)
+        self.table._on_batch_set_version()
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
+        self.assertTrue(self.table._override_btn.isEnabled())
+
+        self.table._confirm_override = lambda items: "override"
+        self.table._on_override_conflicts()
+
+        self.assertFalse(self.table._override_btn.isEnabled())
+        # Version Up stays available -- overriding didn't clear the
+        # underlying conflict fact, it just accepted it; the user can still
+        # ask for a clean version instead if they change their mind.
+        self.assertTrue(self.table._version_up_btn.isEnabled())
+
+    def test_version_up_disables_again_once_resolved(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(1)
+        self.table._on_batch_set_version()
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
+
+        self.table._on_version_up()   # fires revalidation_requested, goes pending
+        self.table.apply_version_results({id(a): (4, "new", False)})   # resolves clean
+
+        self.assertFalse(self.table._version_up_btn.isEnabled())
+        self.assertFalse(self.table._override_btn.isEnabled())
+
+
 class TestRowHeight(unittest.TestCase):
     """
     Row height used to be whatever Qt auto-sized it to from the tallest

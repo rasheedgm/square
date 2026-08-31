@@ -539,22 +539,22 @@ class IngestTableWidget(QtWidgets.QWidget):
         # the NAS with different content -- see the Status tooltip): take
         # the next free version instead, or accept the overwrite. Skipping
         # it is just Discard Selected below, no separate button needed.
-        version_up_btn = QtWidgets.QPushButton("Version Up")
-        version_up_btn.setToolTip(
-            "For conflicted rows in scope: ask the NAS for the real next-free version again."
-        )
-        version_up_btn.clicked.connect(self._on_version_up)
+        # Both start disabled -- enabled only while some row actually has a
+        # conflict to resolve, the same way Undo only enables once there's
+        # something to undo (see _update_conflict_action_buttons).
+        self._version_up_btn = QtWidgets.QPushButton("Version Up")
+        self._version_up_btn.setEnabled(False)
+        self._version_up_btn.setToolTip("No version conflicts right now.")
+        self._version_up_btn.clicked.connect(self._on_version_up)
 
-        override_btn = QtWidgets.QPushButton("Override")
-        override_btn.setStyleSheet("background:#7C2D12; color:white; padding:4px 8px;")
-        override_btn.setToolTip(
-            "For conflicted rows in scope: proceed anyway and overwrite the existing "
-            "version's content. Asks for confirmation first."
-        )
-        override_btn.clicked.connect(self._on_override_conflicts)
+        self._override_btn = QtWidgets.QPushButton("Override")
+        self._override_btn.setStyleSheet("background:#7C2D12; color:white; padding:4px 8px;")
+        self._override_btn.setEnabled(False)
+        self._override_btn.setToolTip("No version conflicts right now.")
+        self._override_btn.clicked.connect(self._on_override_conflicts)
 
-        bar_layout.addWidget(version_up_btn)
-        bar_layout.addWidget(override_btn)
+        bar_layout.addWidget(self._version_up_btn)
+        bar_layout.addWidget(self._override_btn)
 
         bar_layout.addSpacing(10)
 
@@ -694,7 +694,32 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._table.blockSignals(False)
         self._restore_selection(selected_keys)
         self._update_status_bar()
+        self._update_conflict_action_buttons()
         self.table_changed.emit()
+
+    def _update_conflict_action_buttons(self):
+        """
+        Version Up / Override only make sense while some row actually has a
+        version conflict to resolve -- otherwise they used to sit there
+        looking clickable (Override especially, styled to stand out) with
+        nothing for a click to do, which read as "there's a conflict" even
+        when the table was still mid-check and nothing had been flagged yet.
+        """
+        any_conflict = bool(self.item_version_conflict)
+        any_unresolved = any(
+            key not in self.item_override for key in self.item_version_conflict
+        )
+        self._version_up_btn.setEnabled(any_conflict)
+        self._version_up_btn.setToolTip(
+            "For conflicted rows in scope: ask the NAS for the real next-free version again."
+            if any_conflict else "No version conflicts right now."
+        )
+        self._override_btn.setEnabled(any_unresolved)
+        self._override_btn.setToolTip(
+            "For conflicted rows in scope: proceed anyway and overwrite the existing "
+            "version's content. Asks for confirmation first."
+            if any_unresolved else "No unresolved version conflicts right now."
+        )
 
     def _effective_status(self, item):
         """

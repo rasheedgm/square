@@ -297,5 +297,88 @@ class TestIngestWorkerRecordsKitsuVersionMetadata(unittest.TestCase):
         self.assertEqual(set(recorded.keys()), {1, 2})
 
 
+class TestPreviewSourceMetadataAttachment(unittest.TestCase):
+    """
+    After a successful preview upload, its NAS path/sample file/checksum
+    must be stamped onto the preview file itself (KitsuClient.
+    attach_preview_source_metadata) -- so a tool that fetches this exact
+    preview by task+revision gets the real source path back in that same
+    query. Must NOT fire when there's no preview object to stamp (proxy
+    generation failed, or the media type isn't preview-enabled).
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _item(self, name, mtype):
+        f = Path(tempfile.mkdtemp()) / f"{name}.mov"
+        f.write_text("data")
+        it = IngestSequenceItem(name, [str(f)], ".mov", is_video=True)
+        it.sequence_code, it.shot_code, it.media_type, it.media_name = "SQ010", "SH0100", mtype, name.upper()
+        return it
+
+    def _worker(self, item, version, preview_types):
+        return IngestWorkerThread(
+            items_with_versions=[(item, version)],
+            project_data={"id": "1", "name": "T", "code": "TEST"},
+            nas_root=str(self.tmp / "nas"), dry_run=True,
+            kitsu_host="x", kitsu_user="a", kitsu_pass="b",
+            task_types=["Ingest"], transfer_mode="copy", copy_workers=1,
+            preview_enabled_media_types=preview_types,
+        )
+
+    def test_stamped_with_the_real_nas_path_when_a_preview_exists(self):
+        item = self._item("bg", "Plate")
+        calls = []
+        orig = kc_mod.KitsuClient.attach_preview_source_metadata
+
+        def spy(self, preview_file, source_info):
+            calls.append((preview_file, source_info))
+            return orig(self, preview_file, source_info)
+
+        worker = self._worker(item, 1, preview_types=["Plate"])
+        with patch.object(kc_mod.KitsuClient, "attach_preview_source_metadata", spy):
+            worker.run()
+
+        self.assertEqual(len(calls), 1)
+        preview_file, source_info = calls[0]
+        self.assertIn("nas_path", source_info)
+        self.assertIn("sample_file", source_info)
+        self.assertEqual(source_info["media_name"], "BG")
+        self.assertEqual(source_info["version"], 1)
+
+    def test_not_called_when_the_media_type_is_not_preview_enabled(self):
+        item = self._item("audio1", "Audio")
+        calls = []
+        orig = kc_mod.KitsuClient.attach_preview_source_metadata
+
+        def spy(self, preview_file, source_info):
+            calls.append(1)
+            return orig(self, preview_file, source_info)
+
+        worker = self._worker(item, 1, preview_types=["Plate"])
+        with patch.object(kc_mod.KitsuClient, "attach_preview_source_metadata", spy):
+            worker.run()
+
+        self.assertEqual(calls, [])
+
+    def test_not_called_when_proxy_generation_fails(self):
+        item = self._item("bg", "Plate")
+        calls = []
+        orig = kc_mod.KitsuClient.attach_preview_source_metadata
+
+        def spy(self, preview_file, source_info):
+            calls.append(1)
+            return orig(self, preview_file, source_info)
+
+        worker = self._worker(item, 1, preview_types=["Plate"])
+        with patch.object(pg_mod.ProxyGenerator, "generate_proxy", lambda self, item, dest_name=None: None), \
+             patch.object(kc_mod.KitsuClient, "attach_preview_source_metadata", spy):
+            worker.run()
+
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

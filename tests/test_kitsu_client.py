@@ -299,5 +299,73 @@ class TestRecordVersion(unittest.TestCase):
         )
 
 
+class _FakeGazuFilesAPI:
+    """Stands in for gazu.files -- just enough of update_preview to verify what gets sent."""
+
+    def __init__(self):
+        self.update_preview_calls = []
+
+    def update_preview(self, preview_file, data):
+        self.update_preview_calls.append((preview_file, dict(data)))
+        return {**preview_file, "data": data}
+
+
+class TestAttachPreviewSourceMetadata(unittest.TestCase):
+    """
+    A review or delivery tool addresses a preview by task+revision -- Kitsu's
+    revision numbering belongs to the preview file, not the shot. Stamping
+    the real NAS path directly onto that SAME preview file record (via
+    gazu.files.update_preview) means such a tool gets the source path back
+    in the one query it already makes for the movie, instead of needing a
+    second lookup against our own separate version ledger.
+    """
+
+    def _connected_client(self):
+        client = KitsuClient(dry_run=False)
+        fake_files = _FakeGazuFilesAPI()
+        client.gazu = type("_FakeGazu", (), {"files": fake_files})()
+        client.is_connected = True
+        return client, fake_files
+
+    def test_live_call_updates_the_real_preview_file(self):
+        client, fake_files = self._connected_client()
+        preview = {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "preview-1")), "revision": 2}
+        source_info = {"nas_path": "/nas/proj/SQ010/SH0100/plates/BG_v002", "sample_file": "x.exr"}
+
+        client.attach_preview_source_metadata(preview, source_info)
+
+        self.assertEqual(len(fake_files.update_preview_calls), 1)
+        called_preview, called_data = fake_files.update_preview_calls[0]
+        self.assertEqual(called_preview["id"], preview["id"])
+        self.assertEqual(called_data, source_info)
+
+    def test_non_uuid_preview_id_skips_the_live_call(self):
+        # Matches the same "obviously a mock/test ID" guard used elsewhere
+        # (add_version_comment, upload_preview_proxy) -- a short or
+        # "mock"-tagged ID means the preview itself was never really created.
+        client, fake_files = self._connected_client()
+        result = client.attach_preview_source_metadata({"id": "preview1"}, {"nas_path": "/nas/x"})
+        self.assertEqual(fake_files.update_preview_calls, [])
+        self.assertEqual(result["nas_path"], "/nas/x")   # still returns something usable
+
+    def test_offline_client_returns_a_usable_merged_dict(self):
+        client = KitsuClient(dry_run=True)
+        result = client.attach_preview_source_metadata(
+            {"id": "mock-preview"}, {"nas_path": "/nas/proj/SQ010/SH0100/plates/BG_v001"}
+        )
+        self.assertEqual(result["nas_path"], "/nas/proj/SQ010/SH0100/plates/BG_v001")
+
+    def test_a_gazu_error_is_caught_not_raised(self):
+        client, fake_files = self._connected_client()
+
+        def _boom(preview_file, data):
+            raise RuntimeError("simulated network failure")
+        fake_files.update_preview = _boom
+
+        preview = {"id": str(uuid.uuid5(uuid.NAMESPACE_DNS, "preview-2"))}
+        result = client.attach_preview_source_metadata(preview, {"nas_path": "/nas/x"})
+        self.assertIsNotNone(result)   # does not raise, ingest must not abort over this
+
+
 if __name__ == "__main__":
     unittest.main()

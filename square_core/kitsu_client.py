@@ -513,3 +513,34 @@ class KitsuClient:
 
         logger.info(f"[Mock Kitsu] Uploaded preview proxy '{preview_file_path}'")
         return {"id": str(uuid.uuid4()), "task_id": task_arg.get("id"), "path": preview_file_path}
+
+    def attach_preview_source_metadata(self, preview_file, source_info: dict):
+        """
+        Stamps `source_info` (NAS path, a real sample filename, frame range,
+        checksum, ...) directly onto the preview file's OWN record via
+        gazu.files.update_preview.
+
+        The reason this lives on the preview file rather than in our own
+        shot-data ledger (record_version): a review or delivery tool that
+        queries Kitsu "task X, revision N" -- which is how a preview file is
+        addressed; Kitsu's revision numbering belongs to the preview file,
+        not to the shot -- gets this metadata back on that SAME object it
+        already fetched, in the one query, instead of needing a second
+        lookup against a side-channel blob it would have to know exists.
+        """
+        preview_arg = preview_file if isinstance(preview_file, dict) else {"id": str(preview_file)}
+        preview_id = str(preview_arg.get("id", ""))
+
+        if self.gazu and self.is_connected:
+            try:
+                if "mock" in preview_id or len(preview_id) != 36:
+                    logger.info(
+                        f"[Mock Kitsu] Skipping live preview-metadata update for non-UUID preview ID '{preview_id}'"
+                    )
+                else:
+                    return self.gazu.files.update_preview(preview_arg, source_info)
+            except Exception as e:
+                logger.error(f"[Kitsu Live Error] Failed to attach source metadata to preview: {e}")
+
+        logger.info(f"[Mock Kitsu] Attached source metadata to preview {preview_id}")
+        return {**preview_arg, **source_info}

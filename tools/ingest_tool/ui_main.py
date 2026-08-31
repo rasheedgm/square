@@ -276,11 +276,25 @@ class IngestWorkerThread(QtCore.QThread):
                     if copied and self.transfer_mode == "copy" and not self.dry_run:
                         checksum = nas.calculate_checksum(copied[0])
 
+                    # One real, existing file's exact destination name/path --
+                    # the first frame for a sequence, the file itself for a
+                    # video. Computed once here and reused below (the version
+                    # ledger, the preview's own metadata, and the results
+                    # summary all want it; a foreign tool can derive a full
+                    # "####" sequence pattern from one frame's real name the
+                    # same way any VFX tool already does).
+                    mtype = getattr(item, "media_type", "Plate") or "Plate"
+                    sample_fn = format_dest_filename(
+                        tmpl, proj_code, item.sequence_code, item.shot_code,
+                        mtype, item.media_name,
+                        version_num, frame="1001" if not item.is_video else None, ext=item.ext
+                    )
+                    sample_dest_file = str(dest_dir / sample_fn)
+
                     # Preview + version metadata -- only visual media types get a
                     # generated preview; every ingested version still gets a
                     # self-describing metadata comment either way.
                     self.item_progress_signal.emit(item, "Preview", 85)
-                    mtype = getattr(item, "media_type", "Plate") or "Plate"
                     wants_preview = _media_type_wants_preview(mtype, self.preview_enabled_media_types)
                     ingest_task = next(
                         (t for t in tasks
@@ -290,6 +304,27 @@ class IngestWorkerThread(QtCore.QThread):
                     comment = KitsuClient.build_version_comment(
                         item, version_num, dest_dir, transfer_mode=self.transfer_mode, checksum=checksum
                     )
+
+                    # The facts a review or delivery tool actually needs to
+                    # locate and use the real media -- shared between the
+                    # preview file's own metadata (below, when there is one)
+                    # and the version ledger, so both carry the same answer.
+                    source_metadata = {
+                        "nas_path": str(dest_dir),
+                        "sample_file": sample_dest_file,
+                        "frame_range": item.frame_range_str if hasattr(item, "frame_range_str") else "",
+                        "file_count": len(item.files),
+                        "fps": item.fps,
+                        "resolution": item.resolution,
+                        "colorspace": item.colorspace,
+                        "checksum": checksum,
+                        "transfer_mode": self.transfer_mode,
+                        "sequence_code": item.sequence_code,
+                        "shot_code": item.shot_code,
+                        "media_type": mtype,
+                        "media_name": item.media_name,
+                        "version": version_num,
+                    }
 
                     preview_obj = None
                     if ingest_task:
@@ -301,6 +336,11 @@ class IngestWorkerThread(QtCore.QThread):
                                 self.progress_signal.emit(step_pct + 80,
                                     f"Uploading preview to '{task_name}' & setting thumbnail...")
                                 preview_obj = kitsu.upload_preview_proxy(ingest_task, proxy_path, comment=comment)
+                                if isinstance(preview_obj, dict) and preview_obj.get("id"):
+                                    # So a tool that fetches THIS preview by its task+revision
+                                    # gets the real source path back in that same query --
+                                    # see KitsuClient.attach_preview_source_metadata.
+                                    kitsu.attach_preview_source_metadata(preview_obj, source_metadata)
                             else:
                                 # This media type IS configured for previews in Settings, but
                                 # generating one failed -- distinct from never having tried, so
@@ -323,23 +363,12 @@ class IngestWorkerThread(QtCore.QThread):
                     # implied by scrolling through a task's comment history.
                     import datetime
                     kitsu.record_version(shot_obj, item.media_name, version_num, {
-                        "nas_path": str(dest_dir),
-                        "frame_range": item.frame_range_str if hasattr(item, "frame_range_str") else "",
-                        "fps": item.fps,
-                        "resolution": item.resolution,
-                        "colorspace": item.colorspace,
-                        "transfer_mode": self.transfer_mode,
-                        "checksum": checksum,
+                        **source_metadata,
                         "ingested_at": datetime.datetime.utcnow().isoformat() + "Z",
                         "has_preview": preview_obj is not None,
                         "kitsu_preview_id": (preview_obj or {}).get("id") if isinstance(preview_obj, dict) else None,
                     })
 
-                    sample_fn = format_dest_filename(
-                        tmpl, proj_code, item.sequence_code, item.shot_code,
-                        mtype, item.media_name,
-                        version_num, frame="1001" if not item.is_video else None, ext=item.ext
-                    )
                     summary["items"].append({
                         "source_name": item.name,
                         "sequence_code": item.sequence_code,
@@ -350,7 +379,7 @@ class IngestWorkerThread(QtCore.QThread):
                         "resolution": item.resolution,
                         "frame_count": len(item.files),
                         "dest_dir": str(dest_dir),
-                        "sample_dest_file": str(dest_dir / sample_fn),
+                        "sample_dest_file": sample_dest_file,
                         "status": item_status
                     })
                     self.item_progress_signal.emit(item, "Done", 100)

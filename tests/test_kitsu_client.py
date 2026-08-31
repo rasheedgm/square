@@ -3,6 +3,7 @@ import socketserver
 import threading
 import time
 import unittest
+import uuid
 
 from square_core.kitsu_client import KitsuClient
 
@@ -168,6 +169,134 @@ class TestKitsuCheckShots(unittest.TestCase):
         report = client.check_shots("proj", [("sq010", "sh0100"), ("SQ010", "SH0100")])
         self.assertEqual(len(report), 1)
         self.assertIn(("SQ010", "SH0100"), report)
+
+
+class _FakeGazuShotWithData:
+    """
+    A minimal live gazu.shot stand-in that actually PERSISTS shot.data
+    across calls (a MagicMock's return_value doesn't), so the merge-vs-
+    overwrite behavior of get_or_create_shot/record_version can be verified
+    against something resembling a real server round-trip.
+    """
+
+    def __init__(self):
+        self.shots = {}   # name -> shot dict
+
+    def get_shot_by_name(self, sequence, shot_name):
+        return self.shots.get(shot_name)
+
+    def new_shot(self, project, sequence, shot_name, nb_frames=0, data=None):
+        # A proper 36-char UUID, matching what a real Kitsu server (and this
+        # codebase'''s own offline uuid5 fallback) actually returns -- record_version()
+        # deliberately skips its live write for anything shorter, the same
+        # guard add_version_comment/upload_preview_proxy already use to
+        # avoid writing against an obviously-fake test/mock ID.
+        shot_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"shot-{shot_name}"))
+        shot = {"id": shot_id, "name": shot_name, "data": dict(data or {})}
+        self.shots[shot_name] = shot
+        return shot
+
+    def update_shot_data(self, shot, data):
+        name = shot.get("name")
+        stored = self.shots.get(name, dict(shot))
+        stored["data"] = dict(data)
+        self.shots[name] = stored
+        return stored
+
+
+class TestGetOrCreateShotPreservesVersionHistory(unittest.TestCase):
+    """
+    get_or_create_shot used to overwrite media_items[media_name] wholesale
+    on every call -- ingesting v2 of the same media erased v1's record
+    entirely, with no way to see from Kitsu what had actually been
+    delivered before. It's called before the version to ingest is even
+    resolved (so it can't record a version itself, see record_version
+    below), but it must never destroy a "versions" history that's already
+    there.
+    """
+
+    def _connected_client(self):
+        client = KitsuClient(dry_run=False)
+        client.gazu = type("_FakeGazu", (), {"shot": _FakeGazuShotWithData()})()
+        client.is_connected = True
+        return client
+
+    def test_creates_the_shot_with_an_empty_versions_dict(self):
+        client = self._connected_client()
+        shot = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="BG")
+        self.assertEqual(shot["data"]["media_items"]["BG"]["versions"], {})
+
+    def test_a_second_call_does_not_erase_a_version_already_recorded(self):
+        client = self._connected_client()
+        shot = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="BG")
+        client.record_version(shot, "BG", 1, {"nas_path": "/nas/v001"})
+
+        # A later ingest re-syncs basic shot metadata (frame range etc.)
+        # before the NEW version is known -- must not wipe v1's entry.
+        shot2 = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="BG")
+        self.assertIn("v001", shot2["data"]["media_items"]["BG"]["versions"])
+
+    def test_a_different_media_name_on_the_same_shot_keeps_its_own_history(self):
+        client = self._connected_client()
+        shot = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="BG")
+        client.record_version(shot, "BG", 1, {"nas_path": "/nas/bg_v001"})
+        shot = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="FG")
+        client.record_version(shot, "FG", 1, {"nas_path": "/nas/fg_v001"})
+
+        final = client.gazu.shot.shots["SH0100"]
+        self.assertIn("v001", final["data"]["media_items"]["BG"]["versions"])
+        self.assertIn("v001", final["data"]["media_items"]["FG"]["versions"])
+
+
+class TestRecordVersion(unittest.TestCase):
+    """record_version() is the one place that writes a version's own ledger entry."""
+
+    def _connected_client(self):
+        client = KitsuClient(dry_run=False)
+        client.gazu = type("_FakeGazu", (), {"shot": _FakeGazuShotWithData()})()
+        client.is_connected = True
+        return client
+
+    def test_recording_v2_does_not_remove_v1(self):
+        client = self._connected_client()
+        shot = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="BG")
+        client.record_version(shot, "BG", 1, {"nas_path": "/nas/v001"})
+        shot = client.gazu.shot.shots["SH0100"]
+        client.record_version(shot, "BG", 2, {"nas_path": "/nas/v002"})
+
+        versions = client.gazu.shot.shots["SH0100"]["data"]["media_items"]["BG"]["versions"]
+        self.assertEqual(set(versions.keys()), {"v001", "v002"})
+        self.assertEqual(versions["v001"]["nas_path"], "/nas/v001")
+        self.assertEqual(versions["v002"]["nas_path"], "/nas/v002")
+
+    def test_latest_version_pointer_tracks_the_most_recent_call(self):
+        client = self._connected_client()
+        shot = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="BG")
+        client.record_version(shot, "BG", 1, {})
+        shot = client.gazu.shot.shots["SH0100"]
+        client.record_version(shot, "BG", 5, {})
+
+        self.assertEqual(
+            client.gazu.shot.shots["SH0100"]["data"]["media_items"]["BG"]["latest_version"], 5
+        )
+
+    def test_re_recording_the_same_version_overwrites_only_that_entry(self):
+        client = self._connected_client()
+        shot = client.get_or_create_shot({"id": "p1"}, {"id": "s1"}, "SH0100", media_name="BG")
+        client.record_version(shot, "BG", 1, {"checksum": "aaa"})
+        shot = client.gazu.shot.shots["SH0100"]
+        client.record_version(shot, "BG", 1, {"checksum": "bbb"})
+
+        versions = client.gazu.shot.shots["SH0100"]["data"]["media_items"]["BG"]["versions"]
+        self.assertEqual(versions["v001"]["checksum"], "bbb")
+
+    def test_offline_client_still_returns_a_usable_dict(self):
+        client = KitsuClient(dry_run=True)
+        shot = {"id": "mock-shot", "data": {}}
+        result = client.record_version(shot, "BG", 1, {"nas_path": "/nas/v001"})
+        self.assertEqual(
+            result["data"]["media_items"]["BG"]["versions"]["v001"]["nas_path"], "/nas/v001"
+        )
 
 
 if __name__ == "__main__":

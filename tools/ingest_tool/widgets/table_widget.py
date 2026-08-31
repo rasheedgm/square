@@ -12,7 +12,7 @@ from Qt import QtWidgets, QtCore, QtGui
 from tools.qt_compat import (
     ITEM_IS_SELECTABLE, ITEM_IS_ENABLED,
     HEADER_RESIZE_INTERACTIVE, HEADER_RESIZE_FIXED, SELECT_ROWS, ALIGN_CENTER,
-    SELECTION_SELECT, SELECTION_ROWS
+    SELECTION_SELECT, SELECTION_ROWS, get_qt_enum
 )
 
 # A row with no cell widgets sizes itself from plain text; the moment ANY row
@@ -108,8 +108,15 @@ class IngestTableWidget(QtWidgets.QWidget):
     # Emitted with the items whose destination changed (rename, case fold, or a
     # manual cell edit). Their stored version number was resolved against the
     # OLD destination folder, so it must be re-checked against the NAS before
-    # they can be ingested.
+    # they can be ingested. Also used by "Version Up", which just wants a
+    # fresh auto-best version for the row's CURRENT identity.
     revalidation_requested = QtCore.Signal(list)
+    # Emitted as [(item, version_num), ...] when a version was picked BY HAND
+    # (per-row dropdown, batch Set Version) -- that exact number needs to be
+    # verified against the NAS (does it already exist? does it match?),
+    # unlike revalidation_requested this must NOT auto-compute a different
+    # number, or the user's choice would be silently overwritten.
+    version_check_requested = QtCore.Signal(list)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -132,6 +139,15 @@ class IngestTableWidget(QtWidgets.QWidget):
         # pre-flight. Kept apart from item_status so within-table conflict
         # detection, which re-derives statuses, can't quietly erase it.
         self.kitsu_issues = {}
+        # id(item) whose CURRENT item_version was disk-verified (real path,
+        # real content hash) to already hold DIFFERENT content -- ingesting
+        # would overwrite it. A fact, not a block by itself: item_override
+        # below is what lets such a row proceed anyway.
+        self.item_version_conflict = set()
+        # id(item) the user explicitly accepted a version conflict for (the
+        # Override action) -- kept even after resolving so the tooltip can
+        # keep saying so, distinct from item_version_conflict being cleared.
+        self.item_override = set()
         # Restore points for the batch tools (Apply Rename, ALL CAPS/lowercase,
         # Set Version) -- newest last, capped so a long session can't grow it
         # unbounded. Each entry is {"label", "rows": [per-item snapshot, ...]}.
@@ -164,6 +180,8 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_progress = {}
         self._pending_revalidation = set()
         self.kitsu_issues = {}
+        self.item_version_conflict = set()
+        self.item_override = set()
         # A fresh load starts a new editing session -- nothing to undo into.
         self._undo_stack = []
         self._set_undo_button_state()
@@ -234,23 +252,57 @@ class IngestTableWidget(QtWidgets.QWidget):
     def apply_version_results(self, results: dict):
         """
         Called from background thread results.
-        results: { id(item): (version_num, is_already_ingested) }
+        results: { id(item): (version_num, state, was_forced) }, state is
+        "new" / "already" / "conflict". was_forced marks a manually-picked
+        version that was verified as-is -- item_detected_version (the
+        anchor used for the version dropdown's offered range) is only ever
+        moved by an AUTO result, never by a forced one, so a bad manual pick
+        can't corrupt the anchor future rollback checks compare against.
         """
         for item in self.items_data:
             key = id(item)
             if key in results:
-                ver, already = results[key]
+                ver, state, forced = results[key]
                 self._pending_revalidation.discard(key)
                 self.item_version[key] = ver
-                self.item_detected_version[key] = ver
-                if already:
-                    self.item_status[key] = STATUS_ALREADY
-                elif ver > 1:
-                    self.item_status[key] = STATUS_NEW_VERSION
-                elif item.missing_frames:
-                    self.item_status[key] = STATUS_MISSING_FRAMES
+                if not forced:
+                    self.item_detected_version[key] = ver
+                if state == "conflict":
+                    self.item_version_conflict.add(key)
+                    self.item_status[key] = STATUS_CONFLICT
                 else:
-                    self.item_status[key] = STATUS_NEW
+                    self.item_version_conflict.discard(key)
+                    self.item_override.discard(key)
+                    if state == "already":
+                        self.item_status[key] = STATUS_ALREADY
+                    elif ver > 1:
+                        self.item_status[key] = STATUS_NEW_VERSION
+                    elif item.missing_frames:
+                        self.item_status[key] = STATUS_MISSING_FRAMES
+                    else:
+                        self.item_status[key] = STATUS_NEW
+        self._run_conflict_detection()
+        self._refresh_table()
+
+    def mark_ingested(self, item, version_num):
+        """
+        Called right after a real (non-dry-run) copy succeeds for this exact
+        item/version, so the table reflects it immediately. Without this,
+        nothing updated the row after a successful ingest -- clicking Ingest
+        a second time on the same loaded table would silently ingest the
+        exact same row again, since it would still read whatever pre-ingest
+        status it had. Does not refresh the table itself; call
+        finalize_ingest_marks() once after marking every item from a batch.
+        """
+        key = id(item)
+        self.item_version[key] = version_num
+        self.item_detected_version[key] = version_num
+        self.item_status[key] = STATUS_ALREADY
+        self.item_version_conflict.discard(key)
+        self.item_override.discard(key)
+        self._pending_revalidation.discard(key)
+
+    def finalize_ingest_marks(self):
         self._run_conflict_detection()
         self._refresh_table()
 
@@ -483,6 +535,29 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         bar_layout.addSpacing(10)
 
+        # Resolving a version conflict (this exact version already exists on
+        # the NAS with different content -- see the Status tooltip): take
+        # the next free version instead, or accept the overwrite. Skipping
+        # it is just Discard Selected below, no separate button needed.
+        version_up_btn = QtWidgets.QPushButton("Version Up")
+        version_up_btn.setToolTip(
+            "For conflicted rows in scope: ask the NAS for the real next-free version again."
+        )
+        version_up_btn.clicked.connect(self._on_version_up)
+
+        override_btn = QtWidgets.QPushButton("Override")
+        override_btn.setStyleSheet("background:#7C2D12; color:white; padding:4px 8px;")
+        override_btn.setToolTip(
+            "For conflicted rows in scope: proceed anyway and overwrite the existing "
+            "version's content. Asks for confirmation first."
+        )
+        override_btn.clicked.connect(self._on_override_conflicts)
+
+        bar_layout.addWidget(version_up_btn)
+        bar_layout.addWidget(override_btn)
+
+        bar_layout.addSpacing(10)
+
         discard_btn = QtWidgets.QPushButton("Discard Selected")
         discard_btn.setStyleSheet("background:#7F1D1D; color:white; padding:4px 8px;")
         discard_btn.clicked.connect(self._on_discard_selected)
@@ -599,14 +674,14 @@ class IngestTableWidget(QtWidgets.QWidget):
             )
             self._table.setCellWidget(row_idx, COL_VERSION, ver_combo)
 
-            # ── Status pill (Kitsu finding or version-rollback, if any, in the tooltip) ──
+            # ── Status pill (Kitsu finding or version conflict, if any, in the tooltip) ──
             status_cell = self._mk_status_cell(status)
             issue = self.kitsu_issues.get(key)
-            rollback_msg = self._version_rollback_message(item)
+            conflict_msg = self._version_conflict_message(item)
             if issue and issue.get("message"):
                 status_cell.setToolTip(issue["message"])
-            elif rollback_msg:
-                status_cell.setToolTip(rollback_msg)
+            elif conflict_msg:
+                status_cell.setToolTip(conflict_msg)
             self._table.setItem(row_idx, COL_STATUS, status_cell)
 
             # ── Live ingest progress bar ──
@@ -645,28 +720,28 @@ class IngestTableWidget(QtWidgets.QWidget):
         issue = self.kitsu_issues.get(key)
         if issue and issue.get("conflict"):
             return STATUS_CONFLICT
-        if self._version_rollback_message(item):
-            return STATUS_CONFLICT
         return self.item_status.get(key, STATUS_NEW)
 
-    def _version_rollback_message(self, item):
+    def _version_conflict_message(self, item):
         """
-        Set when this row's version was manually moved (per-row dropdown or
-        batch Set Version) below the version the last NAS check resolved.
-        That lower number already has a folder on the NAS -- the NAS check
-        only ever verifies the version it auto-picks, so rolling back to an
-        earlier one bypasses that check entirely and would silently write
-        into an existing version.
+        Tooltip text for a row whose CURRENT version was disk-verified (real
+        path, real content hash -- see NASManager.check_specific_version) to
+        already hold different content. None once nothing is flagged.
         """
         key = id(item)
-        detected = self.item_detected_version.get(key)
-        chosen = self.item_version.get(key, 1)
-        if detected is not None and chosen < detected:
+        if key not in self.item_version_conflict:
+            return None
+        ver = self.item_version.get(key, 1)
+        if key in self.item_override:
             return (
-                f"v{chosen:03d} already exists on the NAS (next available is "
-                f"v{detected:03d}). Ingesting now would write into that existing version."
+                f"Overriding: v{ver:03d} already exists on the NAS with different content. "
+                "Ingesting will overwrite it."
             )
-        return None
+        return (
+            f"v{ver:03d} already exists on the NAS with different content. Ingesting now "
+            "would write into that existing version. Use Version Up to take the next free "
+            "version, or Override to replace it anyway."
+        )
 
     def _mk_cell(self, text, editable=True):
         cell = QtWidgets.QTableWidgetItem(str(text))
@@ -775,15 +850,31 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._refresh_table()
 
     def _on_version_changed(self, key, combo):
+        """
+        A version picked by hand bypasses the auto-detection every OTHER
+        row went through at load, so it is unverified until a targeted
+        check comes back -- without this, picking an already-used version
+        was never checked against the NAS at all.
+        """
         text = combo.currentText()
         import re
         m = re.match(r"v(\d+)", text)
-        if m:
-            self.item_version[key] = int(m.group(1))
-        # Re-check conflicts when version changes — changing version
-        # can resolve a (seq, shot, media, version) collision
+        if not m:
+            return
+        new_version = int(m.group(1))
+        if new_version == self.item_version.get(key):
+            return
+        self.item_version[key] = new_version
+        self.item_version_conflict.discard(key)
+        self.item_override.discard(key)
+        self._pending_revalidation.add(key)
+        if key not in self.item_discarded:
+            self.item_status[key] = STATUS_CHECKING
+        item = next((i for i in self.items_data if id(i) == key), None)
         self._run_conflict_detection()
         self._refresh_table()
+        if item is not None:
+            self.version_check_requested.emit([(item, new_version)])
 
     def _items_in_scope(self):
         """
@@ -858,6 +949,8 @@ class IngestTableWidget(QtWidgets.QWidget):
                 "status": self.item_status.get(key),
                 "pending": key in self._pending_revalidation,
                 "kitsu_issue": self.kitsu_issues.get(key),
+                "version_conflict": key in self.item_version_conflict,
+                "override": key in self.item_override,
             })
         return snaps
 
@@ -907,6 +1000,14 @@ class IngestTableWidget(QtWidgets.QWidget):
                 self.kitsu_issues[key] = snap["kitsu_issue"]
             else:
                 self.kitsu_issues.pop(key, None)
+            if snap["version_conflict"]:
+                self.item_version_conflict.add(key)
+            else:
+                self.item_version_conflict.discard(key)
+            if snap["override"]:
+                self.item_override.add(key)
+            else:
+                self.item_override.discard(key)
         self._run_conflict_detection()
         self._refresh_table()
         self._set_undo_button_state()
@@ -981,15 +1082,92 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._refresh_table()
 
     def _on_batch_set_version(self):
-        """Batch-set the version number for all/selected rows (version lives in
+        """
+        Batch-set the version number for all/selected rows (version lives in
         item_version, the same dict the per-row dropdown edits, not on the
-        item itself -- so this stays consistent with single-row edits)."""
+        item itself -- so this stays consistent with single-row edits).
+        Like a per-row pick, this bypasses auto-detection, so every affected
+        row goes back to "Checking..." pending a targeted NAS verification
+        of the exact number just set.
+        """
         self._sync_edits_from_table()
         new_version = self._batch_version_spin.value()
         items = self._items_in_scope()
         self._push_undo(f"Set Version v{new_version:03d}", items)
+        pairs = []
         for item in items:
-            self.item_version[id(item)] = new_version
+            key = id(item)
+            self.item_version[key] = new_version
+            self.item_version_conflict.discard(key)
+            self.item_override.discard(key)
+            self._pending_revalidation.add(key)
+            if key not in self.item_discarded:
+                self.item_status[key] = STATUS_CHECKING
+            pairs.append((item, new_version))
+        self._run_conflict_detection()
+        self._refresh_table()
+        if pairs:
+            self.version_check_requested.emit(pairs)
+
+    def _on_version_up(self):
+        """
+        For conflicted rows in scope, ask for a fresh auto-best version --
+        the exact same auto-detection the initial load used, just triggered
+        by hand, so the NAS (not a client-side guess) picks a guaranteed-
+        free slot.
+        """
+        self._sync_edits_from_table()
+        items = [i for i in self._items_in_scope() if id(i) in self.item_version_conflict]
+        if not items:
+            return
+        self._push_undo("Version Up", items)
+        for item in items:
+            key = id(item)
+            self.item_version_conflict.discard(key)
+            self.item_override.discard(key)
+            self._pending_revalidation.add(key)
+            if key not in self.item_discarded:
+                self.item_status[key] = STATUS_CHECKING
+        self._refresh_table()
+        self.revalidation_requested.emit(items)
+
+    def _confirm_override(self, items):
+        """
+        "override" | None (cancelled). Split out from _on_override_conflicts
+        so the choice can be driven directly in tests without a live modal.
+        """
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Override Version Conflict")
+        names = ", ".join(i.name for i in items[:5]) + (", ..." if len(items) > 5 else "")
+        box.setText(
+            f"{len(items)} row(s) point at a version that already exists on the NAS with "
+            f"different content:\n\n{names}\n\n"
+            "Ingesting will overwrite that content on the NAS. This cannot be undone by this tool."
+        )
+        accept_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "AcceptRole")
+        reject_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "RejectRole")
+        override_btn = box.addButton("Override and Overwrite", accept_role)
+        box.addButton("Cancel", reject_role)
+        box.exec() if hasattr(box, "exec") else box.exec_()
+        return "override" if box.clickedButton() is override_btn else None
+
+    def _on_override_conflicts(self):
+        """Explicitly accept a version conflict and proceed anyway."""
+        self._sync_edits_from_table()
+        items = [
+            i for i in self._items_in_scope()
+            if id(i) in self.item_version_conflict and id(i) not in self.item_override
+        ]
+        if not items:
+            return
+        if self._confirm_override(items) != "override":
+            return
+        self._push_undo("Override Version Conflict", items)
+        for item in items:
+            key = id(item)
+            self.item_override.add(key)
+            ver = self.item_version.get(key, 1)
+            self.item_status[key] = STATUS_NEW_VERSION if ver > 1 else STATUS_NEW
         self._run_conflict_detection()
         self._refresh_table()
 
@@ -1058,6 +1236,14 @@ class IngestTableWidget(QtWidgets.QWidget):
             k = id(item)
             current = self.item_status.get(k)
             if k in conflicted:
+                self.item_status[k] = STATUS_CONFLICT
+            elif k in self.item_version_conflict and k not in self.item_override:
+                # A real, disk-verified conflict (apply_version_results found
+                # this exact version already holds different content) --
+                # not something a within-table check can resolve; must stay
+                # CONFLICT until Version Up or Override says otherwise, or
+                # every unrelated row's rename/edit would silently clear it
+                # the next time this method runs.
                 self.item_status[k] = STATUS_CONFLICT
             elif current == STATUS_CONFLICT:
                 # Conflict resolved — re-derive status

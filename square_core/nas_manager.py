@@ -17,6 +17,12 @@ from square_core.config import (
 
 logger = logging.getLogger("SquareNAS")
 
+# Pulls the frame number out of a sequence frame's filename (e.g.
+# "plate.1001.exr" -> "1001"). Shared by copy_sequence's own renaming and by
+# the version-slot inspector below, so what gets checked and what gets
+# written can never drift apart again.
+_FRAME_SUFFIX_RE = re.compile(r"(?:[._]|^)(\d{3,7})\.[^.]+$")
+
 try:
     import xxhash
     HAS_XXHASH = True
@@ -48,21 +54,65 @@ class NASManager:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def _resolve_input_subfolder(self, media_type=None, resolution=None):
+    def _render_target_filename(self, item, src_file, filename_template, version_num, proj_code):
         """
-        Determines the subfolder name inside input/.
-        If media_type is standard 'Plate' or empty -> folder by resolution (e.g. '1920x1080').
-        If media_type is a specific type (e.g. 'Ref', 'BG Plate', 'Edit', 'LUT') -> folder as media_type.
+        The exact destination filename copy_sequence() will give this one
+        source file. Shared with _inspect_version_slot below so "what will
+        this be renamed to" is computed in exactly one place -- the version
+        checker used to compare un-renamed SOURCE names against already-
+        renamed DESTINATION names, which can never be equal by construction.
         """
-        mtype = (media_type or "").strip()
-        if not mtype or mtype.lower() == "plate":
-            return resolution or "1920x1080"
-        return mtype
+        tmpl = filename_template or DEFAULT_FILE_NAME_TEMPLATE
+        filename = os.path.basename(src_file)
+        m_frame = _FRAME_SUFFIX_RE.search(filename)
+        frame_val = m_frame.group(1) if (m_frame and not item.is_video) else None
+        return format_dest_filename(
+            tmpl, proj_code, item.sequence_code, item.shot_code,
+            getattr(item, "media_type", "") or "", media_name=item.media_name,
+            version_num=version_num, frame=frame_val, ext=item.ext
+        )
 
-    def get_media_version_info(self, project_code, sequence_code, shot_code, media_name, item=None, media_type="Plate", resolution="1920x1080"):
+    def _inspect_version_slot(self, dest_dir, item, version_num, proj_code, filename_template=None):
         """
-        Inspects existing version folders (v001, v002, ...) on NAS storage.
-        Returns (version_number, is_already_ingested)
+        Looks at exactly one version folder on disk and classifies it
+        against `item`'s real source files by CONTENT HASH, not by name --
+        a destination file is always renamed from its source per the naming
+        template, so comparing names can never match.
+
+        Returns "empty" (nothing there, safe to ingest), "already" (this
+        exact content is already there file-for-file, safe to skip), or
+        "conflict" (something else is there -- ingesting would write on top
+        of it).
+        """
+        if not dest_dir.exists():
+            return "empty"
+        existing_files = [f for f in dest_dir.rglob("*") if f.is_file()]
+        if not existing_files:
+            return "empty"
+        if not item or not item.files or len(existing_files) != len(item.files):
+            return "conflict"
+
+        existing_by_name = {f.name: f for f in existing_files}
+        for src_file in item.files:
+            expected_name = self._render_target_filename(item, src_file, filename_template, version_num, proj_code)
+            match = existing_by_name.get(expected_name)
+            if match is None or self.calculate_checksum(src_file) != self.calculate_checksum(match):
+                return "conflict"
+        return "already"
+
+    def get_media_version_info(self, project_code, sequence_code, shot_code, media_name, item=None,
+                                media_type="Plate", resolution="1920x1080", filename_template=None):
+        """
+        Finds the next version to ingest into, by scanning v1, v2, ... via
+        the SAME path get_dest_dir() actually copies into. This used to
+        hardcode its own "input/{type}_{name}/v###" path -- which none of
+        the studio's real per-media-type destination templates
+        (DEFAULT_MEDIA_TYPE_CONFIGS) ever write to, so this was silently
+        checking an empty directory on every real ingest.
+
+        Returns (version_number, is_already_ingested). is_already_ingested
+        is a real hash comparison against the latest version's files (see
+        _inspect_version_slot), not a filename comparison.
         """
         if item:
             media_type = getattr(item, "media_type", media_type)
@@ -71,33 +121,50 @@ class NASManager:
 
         seq_c  = (sequence_code or "").strip()
         shot_c = (shot_code or "").strip()
-        p_type = (media_type or "").strip()
-        p_name = (media_name or "").strip()
 
-        parent_dir = self.nas_root / (project_code or "PROJ") / "shots" / seq_c / shot_c / "input" / f"{p_type}_{p_name}"
+        # Scan forward from v1 using the real destination path for each
+        # candidate version rather than listing a parent directory -- the
+        # per-media-type template nests the version INTO the path
+        # differently per type (e.g. "<name>_v###", not a "v###" child of a
+        # shared parent), so there is no one parent folder to list.
+        latest_found = 0
+        v = 1
+        while v <= 9999:   # sane ceiling against a runaway/corrupt scan
+            dest_dir = self.get_dest_dir(project_code, seq_c, shot_c, media_name,
+                                          version=v, media_type=media_type, resolution=resolution)
+            if not dest_dir.exists() or not any(p.is_file() for p in dest_dir.rglob("*")):
+                break
+            latest_found = v
+            v += 1
 
-        if not parent_dir.exists():
+        if latest_found == 0:
             return 1, False
 
-        v_dirs = sorted([d for d in parent_dir.iterdir() if d.is_dir() and d.name.startswith("v")], key=lambda d: d.name)
-        if not v_dirs:
-            return 1, False
+        latest_dir = self.get_dest_dir(project_code, seq_c, shot_c, media_name,
+                                        version=latest_found, media_type=media_type, resolution=resolution)
+        state = self._inspect_version_slot(latest_dir, item, latest_found, project_code, filename_template)
+        if state == "already":
+            return latest_found, True
+        return latest_found + 1, False
 
-        latest_dir = v_dirs[-1]
-        try:
-            latest_version = int(latest_dir.name.lstrip("v"))
-        except ValueError:
-            latest_version = len(v_dirs)
+    def check_specific_version(self, project_code, sequence_code, shot_code, media_name, version_num, item,
+                                media_type="Plate", resolution="1920x1080", filename_template=None):
+        """
+        Verifies ONE exact, caller-chosen version number -- used when a
+        version was picked by hand (per-row dropdown, batch Set Version)
+        instead of accepted from get_media_version_info(). A manual pick
+        bypasses that auto-detection entirely, so without this, picking an
+        already-used version was never checked against the NAS at all --
+        it would silently proceed to ingest into an occupied slot.
 
-        if item and item.files:
-            existing_files = [f for f in latest_dir.rglob("*") if f.is_file()]
-            if len(existing_files) == len(item.files):
-                existing_names = {f.name for f in existing_files}
-                item_names = {os.path.basename(f) for f in item.files}
-                if existing_names == item_names:
-                    return latest_version, True
-
-        return latest_version + 1, False
+        Returns "empty" / "already" / "conflict", same meaning as
+        _inspect_version_slot.
+        """
+        seq_c  = (sequence_code or "").strip()
+        shot_c = (shot_code or "").strip()
+        dest_dir = self.get_dest_dir(project_code, seq_c, shot_c, media_name,
+                                      version=version_num, media_type=media_type, resolution=resolution)
+        return self._inspect_version_slot(dest_dir, item, version_num, project_code, filename_template)
 
     def get_dest_dir(self, project_code, sequence_code, shot_code, media_name, version=1, media_type="", resolution="1920x1080", dir_template=None):
         """
@@ -129,8 +196,22 @@ class NASManager:
                 version=version or 1,
                 resolution=res
             )
-        except Exception:
-            path_str = str(self.nas_root / (project_code or "PROJ") / "shots" / (sequence_code or "SQ010") / (shot_code or "SH0100") / "input" / f"{p_type}_{p_name}")
+        except Exception as e:
+            # MUST still include the version number -- a fallback path that
+            # doesn't would alias every version of this media onto the same
+            # folder, so v2 silently overwrites v1. This used to happen for
+            # real: a persisted nas_dir_template left over from before the
+            # plate-to-media rename still used {plate_type}/{plate_name},
+            # which fails here on every call for any media type not covered
+            # by media_type_configs, hitting this exact fallback every time.
+            logger.error(
+                f"[NASManager] Destination template failed to render ({e}); "
+                f"falling back to a generic versioned path. Template was: {tmpl!r}"
+            )
+            path_str = str(
+                self.nas_root / (project_code or "PROJ") / "shots" / (sequence_code or "SQ010")
+                / (shot_code or "SH0100") / "input" / f"{p_type}_{p_name}" / f"v{int(version or 1):03d}"
+            )
 
         return Path(path_str)
 
@@ -213,17 +294,9 @@ class NASManager:
         """
         tmpl = filename_template or DEFAULT_FILE_NAME_TEMPLATE
         total_files = len(item.files)
-        re_frame = re.compile(r"(?:[._]|^)(\d{3,7})\.[^.]+$")
 
         def _target_name(src_file):
-            filename = os.path.basename(src_file)
-            m_frame = re_frame.search(filename)
-            frame_val = m_frame.group(1) if (m_frame and not item.is_video) else None
-            return format_dest_filename(
-                tmpl, proj_code, item.sequence_code, item.shot_code,
-                getattr(item, "media_type", "") or "", media_name=item.media_name,
-                version_num=version_num, frame=frame_val, ext=item.ext
-            )
+            return self._render_target_filename(item, src_file, tmpl, version_num, proj_code)
 
         if self.dry_run:
             logger.info(f"[Mock NAS] {self.transfer_mode}: {total_files} files for media '{item.media_name}' -> '{dest_dir}'")
@@ -262,26 +335,52 @@ class NASManager:
         logger.info(f"[NASManager] Transferred {len(copied_files)} files to {dest_dir} (mode={self.transfer_mode}, workers={workers})")
         return copied_files
 
-    def check_all_media(self, items, proj_code, progress_callback=None):
+    def check_all_media(self, items, proj_code, progress_callback=None, forced_versions=None):
         """
         Check version / duplicate status for all items in parallel.
-        Returns dict: id(item) -> (version_num, is_already_ingested)
+
+        forced_versions, when given, is {id(item): version_num} for rows
+        whose version was picked by hand (per-row dropdown, batch Set
+        Version) rather than auto-detected -- those get verified at EXACTLY
+        that number via check_specific_version() instead of having a fresh
+        "best" version computed for them, which would silently discard the
+        user's choice.
+
+        Returns dict: id(item) -> (version_num, state, was_forced) where
+        state is "new" / "already" / "conflict". Only a forced check can
+        ever come back "conflict" -- the auto path always resolves to
+        either the exact existing content ("already") or a guaranteed-empty
+        next slot ("new").
         """
+        forced_versions = forced_versions or {}
         results = {}
         total = len(items)
 
         def _check(item):
+            key = id(item)
             mname = getattr(item, "media_name", "") or ""
-            return item, self.get_media_version_info(
+            if key in forced_versions:
+                v = forced_versions[key]
+                slot_state = self.check_specific_version(
+                    proj_code, item.sequence_code, item.shot_code, mname, v, item
+                )
+                # "empty" (nothing there yet) reads exactly like an
+                # auto-detected "new" slot to every caller -- normalize so
+                # "new" always means the same thing regardless of which path
+                # produced it, rather than having two spellings for it.
+                state = "new" if slot_state == "empty" else slot_state
+                return item, (v, state, True)
+            ver, already = self.get_media_version_info(
                 proj_code, item.sequence_code, item.shot_code, mname, item=item
             )
+            return item, (ver, "already" if already else "new", False)
 
         with ThreadPoolExecutor(max_workers=min(self.workers, total or 1)) as pool:
             futures = {pool.submit(_check, item): item for item in items}
             done = 0
             for future in as_completed(futures):
-                item, (ver, already) = future.result()
-                results[id(item)] = (ver, already)
+                item, (ver, state, forced) = future.result()
+                results[id(item)] = (ver, state, forced)
                 done += 1
                 if progress_callback:
                     progress_callback(done, total)

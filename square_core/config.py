@@ -175,16 +175,62 @@ SHOT_RENDER_TEMPLATE = os.path.join(
 DEFAULT_INGEST_PRESETS = {}
 
 DEFAULT_MEDIA_TYPE_CONFIGS = {
+    # Every entry MUST include {version} -- without it, re-ingesting the same
+    # media at v2 writes into the exact same folder as v1 and overwrites it.
+    # Element/LUT/Audio/Matte used to omit it entirely (only 5 of these 9
+    # templates versioned on disk); fixed to match the other five.
     "Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/plates/{media_name}_v{version:03d}",
     "Ref": "{nas_root}/{project_code}/shots/{seq}/{shot}/ref/{media_name}_v{version:03d}",
     "BG Plate": "{nas_root}/{project_code}/shots/{seq}/{shot}/bg_plates/{media_name}_v{version:03d}",
     "Comp Render": "{nas_root}/{project_code}/shots/{seq}/{shot}/comp/{media_name}_v{version:03d}",
     "Precomp": "{nas_root}/{project_code}/shots/{seq}/{shot}/precomp/{media_name}_v{version:03d}",
-    "Element": "{nas_root}/{project_code}/shots/{seq}/{shot}/elements/{media_name}",
-    "LUT": "{nas_root}/{project_code}/shots/{seq}/{shot}/luts/{media_name}",
-    "Audio": "{nas_root}/{project_code}/shots/{seq}/{shot}/audio/{media_name}",
-    "Matte": "{nas_root}/{project_code}/shots/{seq}/{shot}/mattes/{media_name}"
+    "Element": "{nas_root}/{project_code}/shots/{seq}/{shot}/elements/{media_name}_v{version:03d}",
+    "LUT": "{nas_root}/{project_code}/shots/{seq}/{shot}/luts/{media_name}_v{version:03d}",
+    "Audio": "{nas_root}/{project_code}/shots/{seq}/{shot}/audio/{media_name}_v{version:03d}",
+    "Matte": "{nas_root}/{project_code}/shots/{seq}/{shot}/mattes/{media_name}_v{version:03d}"
 }
+
+# The kwargs get_dest_dir() actually passes to a directory template's
+# .format() call -- used to sanity-check a template before trusting it.
+_DEST_TEMPLATE_PROBE_KWARGS = dict(
+    nas_root="X", project_code="X", sequence_code="X", shot_code="X",
+    seq="X", shot="X", media_type="X", type="X", media_name="X", name="X",
+    version=1, resolution="X",
+)
+
+
+def dest_template_renders(template):
+    """
+    True if `template` successfully formats with the keys get_dest_dir()
+    provides. Used to reject a persisted nas_dir_template that still uses
+    retired placeholder names (e.g. {plate_type}/{plate_name} from before
+    the plate-to-media rename) instead of silently round-tripping it through
+    load()/save() forever -- get_dest_dir()'s own except-and-fall-back for a
+    template that fails to render is a last resort, not something a stale
+    saved setting should be allowed to trigger on every single ingest.
+    """
+    if not template:
+        return False
+    try:
+        template.format(**_DEST_TEMPLATE_PROBE_KWARGS)
+        return True
+    except Exception:
+        return False
+
+
+def dest_template_versions_safely(template):
+    """
+    True if `template` both renders AND actually varies by version -- a
+    per-media-type template with no {version} placeholder at all (a real
+    persisted config was found with exactly this for Element/LUT/Audio/
+    Matte) makes every version alias onto the same folder, so ingesting v2
+    silently overwrites v1.
+    """
+    if not dest_template_renders(template):
+        return False
+    v1 = template.format(**{**_DEST_TEMPLATE_PROBE_KWARGS, "version": 1})
+    v2 = template.format(**{**_DEST_TEMPLATE_PROBE_KWARGS, "version": 2})
+    return v1 != v2
 
 
 class StudioConfig:
@@ -242,11 +288,46 @@ class StudioConfig:
                     self.kitsu_password = data.get("kitsu_password", self.kitsu_password)
                     self.nas_root = data.get("nas_root", self.nas_root)
                     self.filename_template = data.get("filename_template", self.filename_template)
-                    self.nas_dir_template = data.get("nas_dir_template", self.nas_dir_template)
+                    loaded_dir_template = data.get("nas_dir_template", self.nas_dir_template)
+                    if dest_template_versions_safely(loaded_dir_template):
+                        self.nas_dir_template = loaded_dir_template
+                    else:
+                        print(
+                            f"[StudioConfig] Saved nas_dir_template doesn't render with the current "
+                            f"placeholder names (expects {{media_type}}/{{media_name}}, not e.g. "
+                            f"{{plate_type}}/{{plate_name}}), or doesn't vary by {{version}} -- either "
+                            f"way every version would land in the same folder, so ignoring it and "
+                            f"using the built-in default instead: {SHOT_DIRECTORY_TEMPLATE}"
+                        )
+                        self.nas_dir_template = SHOT_DIRECTORY_TEMPLATE
                     self.shot_folder_structure = data.get("shot_folder_structure", self.shot_folder_structure)
                     self.dry_run = data.get("dry_run", self.dry_run)
                     self.tasks = data.get("tasks", self.tasks)
-                    self.media_type_configs = data.get("media_type_configs", self.media_type_configs)
+
+                    loaded_type_configs = data.get("media_type_configs", {})
+                    fixed_type_configs = dict(self.media_type_configs)
+                    for mtype, mtmpl in loaded_type_configs.items():
+                        if dest_template_versions_safely(mtmpl):
+                            fixed_type_configs[mtype] = mtmpl
+                        elif mtype in DEFAULT_MEDIA_TYPE_CONFIGS:
+                            print(
+                                f"[StudioConfig] Saved media_type_configs['{mtype}'] doesn't vary by "
+                                f"{{version}} -- every version would overwrite the same folder. Using "
+                                f"the built-in default for '{mtype}' instead: "
+                                f"{DEFAULT_MEDIA_TYPE_CONFIGS[mtype]}"
+                            )
+                            fixed_type_configs[mtype] = DEFAULT_MEDIA_TYPE_CONFIGS[mtype]
+                        else:
+                            # A custom type we have no built-in default for -- keep the
+                            # studio's own choice, but make sure it's not silently unsafe.
+                            print(
+                                f"[StudioConfig] media_type_configs['{mtype}'] = {mtmpl!r} does not "
+                                f"vary by {{version}} -- every ingested version of this media type "
+                                f"will land in the same folder and overwrite the last. If that isn't "
+                                f"intentional, add {{version}} to it in Settings."
+                            )
+                            fixed_type_configs[mtype] = mtmpl
+                    self.media_type_configs = fixed_type_configs
                     self.preview_enabled_media_types = data.get(
                         "preview_enabled_media_types", self.preview_enabled_media_types
                     )

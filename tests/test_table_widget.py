@@ -3,7 +3,7 @@ from Qt import QtWidgets
 
 from tools.ingest_tool.widgets.table_widget import (
     IngestTableWidget, STATUS_CONFLICT, STATUS_NEW, STATUS_DISCARDED,
-    STATUS_CHECKING, COL_PROGRESS, COL_VERSION, COL_SHOT, COL_STATUS,
+    STATUS_CHECKING, STATUS_ALREADY, COL_PROGRESS, COL_VERSION, COL_SHOT, COL_STATUS,
     STAGE_QUEUED, STAGE_COPYING, STAGE_DONE, ROW_HEIGHT,
 )
 from square_core.plate_scanner import IngestSequenceItem
@@ -251,7 +251,7 @@ class TestRenameAndVersionRevalidation(unittest.TestCase):
     def test_rename_requests_a_fresh_nas_check_and_holds_the_row_back(self):
         a = _make_item("a", "SQ099", "SH9900", "Plate", "XX", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_version_results({id(a): (1, "new", False)})
         self.assertTrue(self.table.get_valid_ingest_items())
 
         seen = self._watch_revalidation()
@@ -266,13 +266,13 @@ class TestRenameAndVersionRevalidation(unittest.TestCase):
         self.assertEqual(self.table.get_valid_ingest_items(), [])
 
         # Results land: the row comes back with the version for its NEW slot.
-        self.table.apply_version_results({id(a): (2, False)})
+        self.table.apply_version_results({id(a): (2, "new", False)})
         self.assertEqual(self.table.get_valid_ingest_items(), [(a, 2)])
 
     def test_hand_edited_cell_revalidates_too(self):
         a = _make_item("a", "SQ099", "SH9900", "Plate", "XX", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_version_results({id(a): (1, "new", False)})
         seen = self._watch_revalidation()
 
         self.table._table.item(0, COL_SHOT).setText("SH0100")
@@ -283,7 +283,7 @@ class TestRenameAndVersionRevalidation(unittest.TestCase):
     def test_rename_that_changes_nothing_does_not_trigger_a_recheck(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_version_results({id(a): (1, "new", False)})
         seen = self._watch_revalidation()
 
         self.table._scope_combo.setCurrentText("Apply to All Rows")
@@ -297,7 +297,7 @@ class TestRenameAndVersionRevalidation(unittest.TestCase):
     def test_case_fold_also_revalidates(self):
         a = _make_item("a", "sq010", "sh0100", "plate", "bg", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_version_results({id(a): (1, "new", False)})
         seen = self._watch_revalidation()
 
         self.table._scope_combo.setCurrentText("Apply to All Rows")
@@ -342,7 +342,7 @@ class TestKitsuPreflightCheck(unittest.TestCase):
     def test_wrong_sequence_finding_blocks_ingest_like_a_conflict(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_version_results({id(a): (1, "new", False)})
         self.assertTrue(self.table.get_valid_ingest_items())
 
         self.table.apply_kitsu_check({
@@ -360,7 +360,7 @@ class TestKitsuPreflightCheck(unittest.TestCase):
     def test_new_shot_finding_is_informational_and_does_not_block(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_version_results({id(a): (1, "new", False)})
 
         self.table.apply_kitsu_check({
             ("SQ010", "SH0100"): {"state": "new_shot", "message": "will be created"}
@@ -389,7 +389,7 @@ class TestKitsuPreflightCheck(unittest.TestCase):
         # occupies.
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_version_results({id(a): (1, "new", False)})
         self.table.apply_kitsu_check({
             ("SQ010", "SH0100"): {"state": "wrong_sequence", "message": "wrong sequence"}
         })
@@ -411,6 +411,48 @@ class TestKitsuPreflightCheck(unittest.TestCase):
         })
         cell = self.table._table.item(0, COL_STATUS)
         self.assertIn("distinctive-message-xyz", cell.toolTip())
+
+
+class TestMarkIngested(unittest.TestCase):
+    """
+    Nothing previously updated a row's status after a successful ingest --
+    the table kept whatever pre-ingest status it had, so clicking Ingest a
+    second time on the same loaded table (no reload in between) silently
+    ingested the same row again. mark_ingested()/finalize_ingest_marks()
+    close that: the main window calls mark_ingested() for each item as it
+    completes and finalize_ingest_marks() once at the end.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_marks_the_row_already_ingested_and_holds_it_out_of_a_second_ingest(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, "new", False)})
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 1)])
+
+        self.table.mark_ingested(a, 1)
+        self.table.finalize_ingest_marks()
+
+        self.assertEqual(self.table._effective_status(a), STATUS_ALREADY)
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+
+    def test_clears_any_stale_conflict_or_pending_state(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.item_version_conflict.add(id(a))
+        self.table._pending_revalidation.add(id(a))
+
+        self.table.mark_ingested(a, 2)
+        self.table.finalize_ingest_marks()
+
+        self.assertNotIn(id(a), self.table.item_version_conflict)
+        self.assertNotIn(id(a), self.table._pending_revalidation)
+        self.assertEqual(self.table.item_version[id(a)], 2)
+        self.assertEqual(self.table.item_detected_version[id(a)], 2)
 
 
 class TestBatchUndo(unittest.TestCase):
@@ -497,7 +539,7 @@ class TestBatchUndo(unittest.TestCase):
         # longer points at.
         a = _make_item("a", "SQ099", "SH9900", "Plate", "XX", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (3, False)})
+        self.table.apply_version_results({id(a): (3, "new", False)})
         self.assertEqual(self.table.get_valid_ingest_items(), [(a, 3)])
 
         self.table._tmpl_edit.setText("SH0100")
@@ -631,7 +673,7 @@ class TestVersionDropdownAnchoring(unittest.TestCase):
     def test_picking_the_top_option_does_not_grow_the_list(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (2, False)})
+        self.table.apply_version_results({id(a): (2, "new", False)})
         combo = self.table._table.cellWidget(0, COL_VERSION)
         self.assertEqual(combo.count(), 5)   # v001..v005
 
@@ -644,22 +686,22 @@ class TestVersionDropdownAnchoring(unittest.TestCase):
         # only a user pick from the existing list must not move it.
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (2, False)})
+        self.table.apply_version_results({id(a): (2, "new", False)})
         self.assertEqual(self.table._table.cellWidget(0, COL_VERSION).count(), 5)
 
-        self.table.apply_version_results({id(a): (6, False)})
+        self.table.apply_version_results({id(a): (6, "new", False)})
         self.assertEqual(self.table._table.cellWidget(0, COL_VERSION).count(), 9)   # v001..v009
 
 
 class TestVersionRollbackConflict(unittest.TestCase):
     """
-    A row's version can be moved down -- per-row dropdown or batch Set
-    Version -- below the version the NAS check resolved. That lower number
-    already has a folder on the NAS (the resolved version IS "latest
-    existing + 1"), and neither control re-verifies the NAS before ingest,
-    so silently allowing it would write into an existing version. It must
-    read as a conflict, the same as a duplicate destination within the
-    table, and block ingest the same way.
+    A version picked by hand (per-row dropdown, batch Set Version) bypasses
+    the auto-detection every other row went through at load, so it is
+    verified separately: the pick goes "Checking..." and emits
+    version_check_requested, then apply_version_results() delivers the real,
+    disk-verified answer (NASManager.check_specific_version, hash-compared
+    against the actual destination). Only THEN does a genuine collision read
+    as Conflict -- there is no more synchronous client-side guessing.
     """
 
     def setUp(self):
@@ -667,51 +709,78 @@ class TestVersionRollbackConflict(unittest.TestCase):
         self.table = IngestTableWidget()
         self.table.set_project_code("PROJ")
 
-    def test_per_row_dropdown_rollback_is_flagged_and_blocked(self):
+    def _watch_version_checks(self):
+        seen = []
+        self.table.version_check_requested.connect(lambda pairs: seen.append(list(pairs)))
+        return seen
+
+    def test_per_row_dropdown_pick_goes_pending_then_conflicts_on_a_real_check(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (3, False)})
+        self.table.apply_version_results({id(a): (3, "new", False)})
         self.assertEqual(self.table.get_valid_ingest_items(), [(a, 3)])
 
+        seen = self._watch_version_checks()
         combo = self.table._table.cellWidget(0, COL_VERSION)
         v1_index = [combo.itemText(i).split()[0] for i in range(combo.count())].index("v001")
         combo.setCurrentIndex(v1_index)
+
+        # Pending immediately -- no synchronous verdict, and held out of ingest.
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECKING)
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+        self.assertEqual(seen, [[(a, 1)]])
+
+        # The real check comes back: v001 is occupied by different content.
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
 
         self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
         self.assertTrue(self.table.has_unresolved_conflicts())
         self.assertEqual(self.table.get_valid_ingest_items(), [])
         tip = self.table._table.item(0, COL_STATUS).toolTip()
         self.assertIn("v001", tip)
-        self.assertIn("v003", tip)
 
-    def test_batch_set_version_rollback_is_flagged_too(self):
+    def test_a_forced_check_never_moves_the_detected_anchor(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (5, False)})
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
+        # forced=True -- the anchor future rollback checks compare against
+        # must stay at the AUTO-resolved 3, not get overwritten by a bad pick.
+        self.assertEqual(self.table.item_detected_version[id(a)], 3)
 
+    def test_batch_set_version_goes_through_the_same_pending_then_verified_flow(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (5, "new", False)})
+
+        seen = self._watch_version_checks()
         self.table._scope_combo.setCurrentText("Apply to All Rows")
         self.table._batch_version_spin.setValue(2)
         self.table._on_batch_set_version()
 
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECKING)
+        self.assertEqual(seen, [[(a, 2)]])
+
+        self.table.apply_version_results({id(a): (2, "conflict", True)})
         self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
 
-    def test_moving_back_up_to_or_past_detected_clears_it(self):
+    def test_moving_back_up_to_a_free_slot_clears_it(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (5, False)})
+        self.table.apply_version_results({id(a): (5, "new", False)})
         self.table._scope_combo.setCurrentText("Apply to All Rows")
 
         self.table._batch_version_spin.setValue(2)
         self.table._on_batch_set_version()
+        self.table.apply_version_results({id(a): (2, "conflict", True)})
         self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
 
         self.table._batch_version_spin.setValue(5)
         self.table._on_batch_set_version()
+        self.table.apply_version_results({id(a): (5, "new", True)})
         self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
 
     def test_a_fresh_row_never_flagged_before_any_nas_check(self):
-        # detected_version defaults to 1, same as item_version -- must not
-        # spuriously conflict before check_all_media has even run.
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
         self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
@@ -723,17 +792,125 @@ class TestVersionRollbackConflict(unittest.TestCase):
         # detected version.
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
         self.table.populate_table([a])
-        self.table.apply_version_results({id(a): (3, False)})   # old slot: detected=3
+        self.table.apply_version_results({id(a): (3, "new", False)})   # old slot: detected=3
 
         self.table._scope_combo.setCurrentText("Apply to All Rows")
         self.table._tmpl_edit.setText("SH9900")
         self.table._target_combo.setCurrentText("Shot")
         self.table._on_apply_rename()
-        self.table.apply_version_results({id(a): (1, False)})   # new slot resolves: detected=1
+        self.table.apply_version_results({id(a): (1, "new", False)})   # new slot resolves: detected=1
 
         self.table._on_undo()
         self.assertEqual(self.table.item_detected_version[id(a)], 3)
         self.assertEqual(self.table.item_version[id(a)], 3)
+
+    def test_unrelated_refresh_does_not_silently_clear_a_real_conflict(self):
+        # _run_conflict_detection() runs on every batch action, for every
+        # row -- it must not treat a disk-verified conflict as "just a
+        # within-table collision that's now gone" and quietly resolve it.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        b = _make_item("b", "SQ020", "SH0200", "Plate", "FG", "/tmp/b.mov")
+        self.table.populate_table([a, b])
+        self.table.apply_version_results({id(a): (3, "new", False), id(b): (1, "new", False)})
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+        # Totally unrelated action on a DIFFERENT row -- must not touch a's conflict.
+        self.table._table.selectRow(1)
+        self.table._on_discard_selected()
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+
+class TestVersionUpAndOverride(unittest.TestCase):
+    """
+    The two resolution actions for a version conflict: Version Up (ask the
+    NAS for a fresh auto-best version) and Override (proceed anyway,
+    deliberately overwriting). Skip is just Discard Selected -- no separate
+    control needed for that one.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def _conflicted_row(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(1)
+        self.table._on_batch_set_version()
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        return a
+
+    def test_version_up_requests_a_fresh_auto_check_not_a_client_side_guess(self):
+        a = self._conflicted_row()
+        seen = []
+        self.table.revalidation_requested.connect(lambda items: seen.append(list(items)))
+
+        self.table._on_version_up()
+
+        self.assertEqual(seen, [[a]])
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECKING)
+        self.assertNotIn(id(a), self.table.item_version_conflict)
+        # The auto (non-forced) result that comes back resolves it normally.
+        self.table.apply_version_results({id(a): (4, "new", False)})
+        self.assertEqual(self.table.item_version[id(a)], 4)
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+    def test_version_up_with_nothing_conflicted_is_a_no_op(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, "new", False)})
+        seen = []
+        self.table.revalidation_requested.connect(lambda items: seen.append(list(items)))
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._on_version_up()
+        self.assertEqual(seen, [])
+
+    def test_override_requires_confirmation_and_then_clears_the_block(self):
+        a = self._conflicted_row()
+        self.table._confirm_override = lambda items: "override"
+
+        self.table._on_override_conflicts()
+
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertIn(id(a), self.table.item_override)
+        self.assertEqual(self.table.item_version[id(a)], 1)   # version itself is untouched
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 1)])
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("Overriding", tip)
+
+    def test_declining_the_confirmation_leaves_the_conflict_blocking(self):
+        a = self._conflicted_row()
+        self.table._confirm_override = lambda items: None   # user clicked Cancel
+
+        self.table._on_override_conflicts()
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertNotIn(id(a), self.table.item_override)
+
+    def test_override_is_undoable(self):
+        a = self._conflicted_row()
+        self.table._confirm_override = lambda items: "override"
+        self.table._on_override_conflicts()
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+        self.table._on_undo()
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertNotIn(id(a), self.table.item_override)
+
+    def test_override_with_nothing_conflicted_is_a_no_op_no_dialog(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, "new", False)})
+        called = []
+        self.table._confirm_override = lambda items: called.append(1) or "override"
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._on_override_conflicts()
+        self.assertEqual(called, [])
 
 
 class TestRowHeight(unittest.TestCase):

@@ -23,6 +23,28 @@ from tools.qt_compat import FONT_BOLD, ALIGN_CENTER, ORIENTATION_HORIZONTAL, DIA
 logger = logging.getLogger("IngestMainUI")
 
 
+# Types with no sensible video preview regardless of Settings -- an audio
+# file or a .cube LUT isn't something FFmpeg can turn into a meaningful
+# review clip.
+_NON_VISUAL_MEDIA_TYPES = {"audio", "lut"}
+
+
+def _media_type_wants_preview(media_type, preview_enabled_media_types):
+    """
+    Case/whitespace-insensitive match against the studio's configured list
+    (Settings > per-media-type Preview checkbox) -- an exact, case-sensitive
+    match previously meant a media_type typed as "plate" (lowercase, common
+    now that the tagging rework made media_type free text rather than a
+    fixed preset) silently never matched "Plate" in the list, so real
+    footage got no preview attempt at all, only a text comment.
+    """
+    mtype = (media_type or "").strip().lower()
+    if mtype in _NON_VISUAL_MEDIA_TYPES:
+        return False
+    allowed = {(t or "").strip().lower() for t in (preview_enabled_media_types or [])}
+    return mtype in allowed
+
+
 class CreateProjectDialog(QtWidgets.QDialog):
     """Dialog to create a new project in Kitsu."""
 
@@ -85,21 +107,23 @@ class NASCheckWorker(QtCore.QThread):
     """Background thread: check all items against NAS for version/duplicate status."""
 
     progress_signal = QtCore.Signal(int, int)      # done, total
-    results_ready   = QtCore.Signal(dict)           # {id(item): (ver, already)}
+    results_ready   = QtCore.Signal(dict)           # {id(item): (ver, state, was_forced)}
 
-    def __init__(self, items, nas_root, proj_code, dry_run):
+    def __init__(self, items, nas_root, proj_code, dry_run, forced_versions=None):
         super().__init__()
         self.items     = items
         self.nas_root  = nas_root
         self.proj_code = proj_code
         self.dry_run   = dry_run
+        self.forced_versions = forced_versions or {}
 
     def run(self):
         nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
         results = nas.check_all_media(
             self.items,
             self.proj_code,
-            progress_callback=lambda done, total: self.progress_signal.emit(done, total)
+            progress_callback=lambda done, total: self.progress_signal.emit(done, total),
+            forced_versions=self.forced_versions,
         )
         self.results_ready.emit(results)
 
@@ -137,6 +161,11 @@ class IngestWorkerThread(QtCore.QThread):
 
     progress_signal = QtCore.Signal(int, str)
     item_progress_signal = QtCore.Signal(object, str, int)   # item, stage, percent
+    # Emitted right after a REAL (non-dry-run) copy succeeds for one item, so
+    # the table can mark that row ingested immediately -- without this nothing
+    # updated the row's status after a successful ingest, so clicking Ingest
+    # again on the same loaded table would silently ingest it a second time.
+    item_ingested_signal = QtCore.Signal(object, int)         # item, version_num
     finished_signal = QtCore.Signal(bool, str, object)
 
     def __init__(self, items_with_versions, project_data, nas_root,
@@ -252,7 +281,7 @@ class IngestWorkerThread(QtCore.QThread):
                     # self-describing metadata comment either way.
                     self.item_progress_signal.emit(item, "Preview", 85)
                     mtype = getattr(item, "media_type", "Plate") or "Plate"
-                    wants_preview = mtype in self.preview_enabled_media_types
+                    wants_preview = _media_type_wants_preview(mtype, self.preview_enabled_media_types)
                     ingest_task = next(
                         (t for t in tasks
                          if (t.get("name") or t.get("task_type_name")) in ("Ingest", "Prep")),
@@ -262,6 +291,7 @@ class IngestWorkerThread(QtCore.QThread):
                         item, version_num, dest_dir, transfer_mode=self.transfer_mode, checksum=checksum
                     )
 
+                    preview_obj = None
                     if ingest_task:
                         if wants_preview:
                             self.progress_signal.emit(step_pct + 70, "Generating preview...")
@@ -270,11 +300,40 @@ class IngestWorkerThread(QtCore.QThread):
                                 task_name = ingest_task.get("name") or "Ingest"
                                 self.progress_signal.emit(step_pct + 80,
                                     f"Uploading preview to '{task_name}' & setting thumbnail...")
-                                kitsu.upload_preview_proxy(ingest_task, proxy_path, comment=comment)
+                                preview_obj = kitsu.upload_preview_proxy(ingest_task, proxy_path, comment=comment)
                             else:
+                                # This media type IS configured for previews in Settings, but
+                                # generating one failed -- distinct from never having tried, so
+                                # it's actually diagnosable instead of looking identical to an
+                                # unconfigured type that was never going to get one.
+                                logger.warning(
+                                    f"[IngestWorkerThread] Preview generation returned nothing for "
+                                    f"'{item.name}' (media_type={mtype!r}, preview-enabled) -- "
+                                    f"posting a text-only comment instead."
+                                )
                                 kitsu.add_version_comment(ingest_task, comment)
                         else:
                             kitsu.add_version_comment(ingest_task, comment)
+
+                    # One ledger entry for THIS version, merged into Kitsu's
+                    # copy of media_items[name]["versions"] rather than
+                    # overwritten -- see KitsuClient.record_version. This is
+                    # what lets disk version and Kitsu version be compared
+                    # against each other later, instead of only ever being
+                    # implied by scrolling through a task's comment history.
+                    import datetime
+                    kitsu.record_version(shot_obj, item.media_name, version_num, {
+                        "nas_path": str(dest_dir),
+                        "frame_range": item.frame_range_str if hasattr(item, "frame_range_str") else "",
+                        "fps": item.fps,
+                        "resolution": item.resolution,
+                        "colorspace": item.colorspace,
+                        "transfer_mode": self.transfer_mode,
+                        "checksum": checksum,
+                        "ingested_at": datetime.datetime.utcnow().isoformat() + "Z",
+                        "has_preview": preview_obj is not None,
+                        "kitsu_preview_id": (preview_obj or {}).get("id") if isinstance(preview_obj, dict) else None,
+                    })
 
                     sample_fn = format_dest_filename(
                         tmpl, proj_code, item.sequence_code, item.shot_code,
@@ -295,6 +354,8 @@ class IngestWorkerThread(QtCore.QThread):
                         "status": item_status
                     })
                     self.item_progress_signal.emit(item, "Done", 100)
+                    if not self.dry_run:
+                        self.item_ingested_signal.emit(item, version_num)
 
                 except Exception as item_err:
                     # A single bad item (network hiccup, permission error on one file)
@@ -476,6 +537,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # version number has to be resolved against the new folder before it
         # can be ingested.
         self.table_widget.revalidation_requested.connect(self._on_revalidation_requested)
+        self.table_widget.version_check_requested.connect(self._on_version_check_requested)
         self.table_widget.kitsu_conflict_check_requested.connect(self._on_kitsu_check_requested)
 
         self.main_splitter.addWidget(self.folder_tree)
@@ -643,8 +705,13 @@ class MainWindow(QtWidgets.QMainWindow):
             logger.error(f"[IngestMainUI] Error in on_load_media: {e}", exc_info=True)
             raise e
 
-    def _start_nas_check(self, items):
-        """Launch background NAS duplicate/version check."""
+    def _start_nas_check(self, items, forced_versions=None):
+        """
+        Launch background NAS duplicate/version check. forced_versions, when
+        given, is {id(item): version_num} for rows whose version was picked
+        by hand -- those get verified at exactly that number instead of
+        having a fresh "best" version auto-computed for them.
+        """
         if self._nas_check_worker and self._nas_check_worker.isRunning():
             self._nas_check_worker.terminate()
 
@@ -653,7 +720,8 @@ class MainWindow(QtWidgets.QMainWindow):
             items=items,
             nas_root=self.config.nas_root,
             proj_code=proj_code,
-            dry_run=self.dry_run_check.isChecked()
+            dry_run=self.dry_run_check.isChecked(),
+            forced_versions=forced_versions,
         )
         total = len(items)
         self._check_bar.setMaximum(total)
@@ -671,6 +739,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if not items or not self.project_data:
             return
         self._start_nas_check(items)
+
+    def _on_version_check_requested(self, pairs):
+        """
+        A version was picked by hand (per-row dropdown, batch Set Version).
+        Verify that EXACT number against the NAS -- must not let
+        _start_nas_check auto-compute a different one, which would silently
+        discard the user's choice.
+        """
+        if not pairs or not self.project_data:
+            return
+        items = [item for item, _version in pairs]
+        forced_versions = {id(item): version for item, version in pairs}
+        self._start_nas_check(items, forced_versions=forced_versions)
 
     def _on_kitsu_check_requested(self):
         """Run the read-only Kitsu shot pre-flight for every row in the table."""
@@ -802,12 +883,17 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self.worker.progress_signal.connect(self.progress_dialog.update_progress)
         self.worker.item_progress_signal.connect(self.table_widget.update_ingest_progress)
+        self.worker.item_ingested_signal.connect(self.table_widget.mark_ingested)
         self.worker.finished_signal.connect(self.on_ingest_finished)
         self.worker.start()
 
     def on_ingest_finished(self, success, message, summary=None):
         if hasattr(self, "progress_dialog"):
             self.progress_dialog.close()
+        # mark_ingested() (connected above) only updated each row's own
+        # dicts as items completed -- one shared refresh now, rather than
+        # rebuilding the whole table after every single item.
+        self.table_widget.finalize_ingest_marks()
         if success:
             if summary:
                 dlg = DryRunResultsDialog(summary, self)

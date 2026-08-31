@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 from Qt import QtWidgets
 
 from square_core.plate_scanner import IngestSequenceItem
-from tools.ingest_tool.ui_main import IngestWorkerThread
+from tools.ingest_tool.ui_main import IngestWorkerThread, _media_type_wants_preview
 import square_core.proxy_generator as pg_mod
 import square_core.kitsu_client as kc_mod
 
@@ -192,6 +192,109 @@ class TestIngestWorkerPerItemFailureIsolation(unittest.TestCase):
         statuses = {i["source_name"]: i["status"] for i in summary["items"]}
         self.assertTrue(statuses["bad"].startswith("Error"))
         self.assertEqual(statuses["good"], "Dry-Run Simulated")
+
+
+class TestMediaTypeWantsPreview(unittest.TestCase):
+    """
+    media_type is open text now (the tagging rework dropped the fixed
+    preset dropdown), so an exact, case-sensitive match against the
+    Settings list previously meant a type typed "plate" or " Plate "
+    silently never matched "Plate" -- no preview attempt, just a comment.
+    """
+
+    def test_exact_case_matches(self):
+        self.assertTrue(_media_type_wants_preview("Plate", ["Plate"]))
+
+    def test_case_and_whitespace_insensitive_match(self):
+        self.assertTrue(_media_type_wants_preview("  plate ", ["Plate"]))
+        self.assertTrue(_media_type_wants_preview("PLATE", ["plate"]))
+
+    def test_type_not_on_the_list_does_not_get_a_preview(self):
+        self.assertFalse(_media_type_wants_preview("Element", ["Plate", "Ref"]))
+
+    def test_audio_and_lut_never_get_a_preview_even_if_listed(self):
+        self.assertFalse(_media_type_wants_preview("Audio", ["Audio", "Plate"]))
+        self.assertFalse(_media_type_wants_preview("LUT", ["LUT"]))
+
+    def test_empty_list_or_type_is_safe(self):
+        self.assertFalse(_media_type_wants_preview("Plate", []))
+        self.assertFalse(_media_type_wants_preview("Plate", None))
+        self.assertFalse(_media_type_wants_preview("", ["Plate"]))
+
+
+class TestIngestWorkerRecordsKitsuVersionMetadata(unittest.TestCase):
+    """
+    Each ingested version now writes its own ledger entry into Kitsu (see
+    KitsuClient.record_version) instead of the shot's media_items[name]
+    being silently overwritten on every ingest with no history retained.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def _item(self, name, seq, shot, mname, version):
+        f = Path(tempfile.mkdtemp()) / f"{name}.mov"
+        f.write_text("data")
+        it = IngestSequenceItem(name, [str(f)], ".mov", is_video=True)
+        it.sequence_code, it.shot_code, it.media_type, it.media_name = seq, shot, "Plate", mname
+        return (it, version)
+
+    def test_record_version_is_called_with_the_right_version_and_shot(self):
+        item, version = self._item("clip", "SQ010", "SH0100", "BG", 3)
+        calls = []
+        orig = kc_mod.KitsuClient.record_version
+
+        def spy(self, shot, media_name, version_num, entry):
+            calls.append((shot.get("name"), media_name, version_num, entry))
+            return orig(self, shot, media_name, version_num, entry)
+
+        worker = IngestWorkerThread(
+            items_with_versions=[(item, version)],
+            project_data={"id": "1", "name": "T", "code": "TEST"},
+            nas_root=str(self.tmp / "nas"), dry_run=True,
+            kitsu_host="x", kitsu_user="a", kitsu_pass="b",
+            task_types=["Ingest"], transfer_mode="copy", copy_workers=1,
+            preview_enabled_media_types=["Plate"],
+        )
+        with patch.object(kc_mod.KitsuClient, "record_version", spy):
+            worker.run()
+
+        self.assertEqual(len(calls), 1)
+        shot_name, media_name, version_num, entry = calls[0]
+        self.assertEqual(shot_name, "SH0100")
+        self.assertEqual(media_name, "BG")
+        self.assertEqual(version_num, 3)
+        self.assertIn("nas_path", entry)
+        self.assertIn("ingested_at", entry)
+        self.assertIn("has_preview", entry)
+
+    def test_multiple_versions_of_the_same_media_all_get_recorded(self):
+        # Two separate ingests of the same shot/media at different versions
+        # -- both must show up, not just the latest.
+        item_v1, _ = self._item("clip1", "SQ010", "SH0100", "BG", 1)
+        item_v2, _ = self._item("clip2", "SQ010", "SH0100", "BG", 2)
+
+        worker = IngestWorkerThread(
+            items_with_versions=[(item_v1, 1), (item_v2, 2)],
+            project_data={"id": "1", "name": "T", "code": "TEST"},
+            nas_root=str(self.tmp / "nas"), dry_run=True,
+            kitsu_host="x", kitsu_user="a", kitsu_pass="b",
+            task_types=["Ingest"], transfer_mode="copy", copy_workers=1,
+            preview_enabled_media_types=["Plate"],
+        )
+        recorded = {}
+        orig = kc_mod.KitsuClient.record_version
+
+        def spy(self, shot, media_name, version_num, entry):
+            result = orig(self, shot, media_name, version_num, entry)
+            recorded[version_num] = result
+            return result
+
+        with patch.object(kc_mod.KitsuClient, "record_version", spy):
+            worker.run()
+
+        self.assertEqual(set(recorded.keys()), {1, 2})
 
 
 if __name__ == "__main__":

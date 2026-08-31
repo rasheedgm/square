@@ -109,17 +109,25 @@ class KitsuClient:
         }
 
     def get_or_create_shot(self, project, sequence, shot_name, media_name="PL01", frame_in=1001, frame_out=1100, fps=24.0, resolution="1920x1080", colorspace="ACEScg", nas_path="", description=""):
-        """Fetches shot or creates it in Kitsu DB with frame range & structured media metadata."""
+        """
+        Fetches the shot or creates it, with a basic "latest known" snapshot
+        for this media (frame range, fps, etc). This is called before the
+        version to ingest is even resolved, so it does NOT touch per-version
+        history -- record_version() below is the one place that writes a
+        version's own ledger entry, and this only ensures media_items[name]
+        exists (as {"versions": {}}) without disturbing any that are
+        already there.
+        """
         project_arg = project if isinstance(project, dict) else {"id": str(project)}
         sequence_arg = sequence if isinstance(sequence, dict) else {"id": str(sequence)}
 
-        new_media_info = {
+        latest_snapshot = {
             "media_name": media_name,
             "nas_path": nas_path,
             "frame_range": f"{frame_in}-{frame_out}",
             "fps": fps,
             "resolution": resolution,
-            "colorspace": colorspace
+            "colorspace": colorspace,
         }
 
         if self.gazu and self.is_connected:
@@ -136,7 +144,7 @@ class KitsuClient:
                         "colorspace": colorspace,
                         "nas_path": nas_path,
                         "description": description,
-                        "media_items": {media_name: new_media_info}
+                        "media_items": {media_name: {**latest_snapshot, "versions": {}}},
                     }
                     shot = self.gazu.shot.new_shot(
                         project_arg,
@@ -148,8 +156,10 @@ class KitsuClient:
                 else:
                     logger.info(f"[Kitsu Live] Updating metadata on shot '{shot_name}'...")
                     existing_data = shot.get("data") or {}
-                    existing_media_items = existing_data.get("media_items") or {}
-                    existing_media_items[media_name] = new_media_info
+                    existing_media_items = dict(existing_data.get("media_items") or {})
+                    existing_entry = dict(existing_media_items.get(media_name) or {})
+                    existing_versions = existing_entry.get("versions") or {}
+                    existing_media_items[media_name] = {**latest_snapshot, "versions": existing_versions}
 
                     updated_data = {
                         **existing_data,
@@ -180,7 +190,7 @@ class KitsuClient:
             "colorspace": colorspace,
             "nas_path": nas_path,
             "description": description,
-            "media_items": {media_name: new_media_info}
+            "media_items": {media_name: {**latest_snapshot, "versions": {}}},
         }
         return {
             "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, f"shot-{shot_name}")),
@@ -189,6 +199,51 @@ class KitsuClient:
             "nb_frames": frame_out - frame_in + 1,
             "data": mock_data
         }
+
+    def record_version(self, shot, media_name, version_num, entry: dict):
+        """
+        Writes ONE version's ledger entry into
+        shot.data["media_items"][media_name]["versions"]["v###"], merging
+        with whatever versions are already recorded there rather than
+        replacing them -- get_or_create_shot's own data write used to
+        overwrite media_items[media_name] wholesale on every single ingest,
+        so the moment v2 was ingested, v1's record was simply gone; there
+        was no way to see, from Kitsu, what had actually been delivered
+        before. Also stamps media_items[media_name]["latest_version"].
+
+        `entry` is caller-built and opaque here -- the ingest worker fills
+        it with nas_path, frame range, fps, resolution, colorspace,
+        transfer_mode, checksum, ingested_at, and the Kitsu preview's own
+        id/revision once uploaded (or None if this version got a text-only
+        comment), so disk version and Kitsu version can be cross-checked
+        against each other instead of only ever being implied by comment
+        order in a task's activity feed.
+        """
+        shot_arg = shot if isinstance(shot, dict) else {"id": str(shot)}
+        version_key = f"v{int(version_num):03d}"
+
+        existing_data = (shot_arg.get("data") if isinstance(shot_arg, dict) else None) or {}
+        media_items = dict(existing_data.get("media_items") or {})
+        media_entry = dict(media_items.get(media_name) or {})
+        versions = dict(media_entry.get("versions") or {})
+        versions[version_key] = entry
+        media_entry["versions"] = versions
+        media_entry["latest_version"] = version_num
+        media_items[media_name] = media_entry
+        updated_data = {**existing_data, "media_items": media_items}
+
+        if self.gazu and self.is_connected:
+            try:
+                task_id = str(shot_arg.get("id", ""))
+                if "mock" in task_id or len(task_id) != 36:
+                    logger.info(f"[Mock Kitsu] Skipping live version-record for non-UUID shot ID '{task_id}'")
+                else:
+                    return self.gazu.shot.update_shot_data(shot_arg, updated_data)
+            except Exception as e:
+                logger.error(f"[Kitsu Live Error] Failed to record version metadata: {e}")
+
+        logger.info(f"[Mock Kitsu] Recorded {version_key} for '{media_name}' on shot {shot_arg.get('id')}")
+        return {**shot_arg, "data": updated_data}
 
     def create_default_tasks(self, shot, task_types=None):
         """Creates default tasks (Ingest, Prep, Roto, Matchmove, 3D, Comp) for a shot in Kitsu."""

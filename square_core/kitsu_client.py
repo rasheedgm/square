@@ -241,6 +241,135 @@ class KitsuClient:
             created_tasks.append({"id": task_id, "name": tt, "shot_id": shot_arg.get("id")})
         return created_tasks
 
+    # ------------------------------------------------------------------
+    # Pre-flight check
+    # ------------------------------------------------------------------
+
+    # Per-row outcomes of check_shots(). The two conflict states are the ones
+    # that block ingest; the rest are informational.
+    KITSU_OK             = "ok"              # shot exists under exactly this sequence
+    KITSU_NEW_SHOT       = "new_shot"        # nothing by that name yet -- will be created
+    KITSU_WRONG_SEQUENCE = "wrong_sequence"  # exists, but under a different sequence
+    KITSU_AMBIGUOUS      = "ambiguous"       # same shot name under several sequences
+    KITSU_UNKNOWN        = "unknown"         # could not be checked (offline)
+
+    KITSU_CONFLICT_STATES = (KITSU_WRONG_SEQUENCE, KITSU_AMBIGUOUS)
+
+    def _project_shot_index(self, project):
+        """
+        {SHOT NAME -> {sequence names it exists under}} for one project.
+
+        One request where gazu supports it; shot dicts from
+        all_shots_for_project carry sequence_name, but older servers omit it,
+        so a missing name is resolved through the project's sequence list
+        rather than dropping the shot out of the index (which would have made
+        a real shot read as "will be created").
+        """
+        shots = self.gazu.shot.all_shots_for_project(project) or []
+
+        seq_names = {}
+        if any(not s.get("sequence_name") for s in shots):
+            for seq in (self.gazu.shot.all_sequences_for_project(project) or []):
+                seq_names[seq.get("id")] = seq.get("name") or ""
+
+        index = {}
+        for shot in shots:
+            name = (shot.get("name") or "").strip()
+            if not name:
+                continue
+            seq_name = shot.get("sequence_name") or seq_names.get(shot.get("sequence_id"), "")
+            index.setdefault(name.upper(), set()).add((seq_name or "").strip().upper())
+        return index
+
+    def check_shots(self, project, rows):
+        """
+        Pre-flight the table against Kitsu, before anything is written.
+
+        `rows` is an iterable of (sequence_code, shot_code) pairs. Returns
+        {(SEQ, SHOT): {"state": ..., "message": ..., "sequences": [...]}},
+        keyed upper-cased so rows sharing a shot share one result.
+
+        The question this answers is the one the NAS check cannot: the shot
+        code a client's folder structure gave us may already live under a
+        DIFFERENT sequence in Kitsu. Ingesting then either attaches the media
+        to the wrong shot or creates a duplicate -- both need a human to fix
+        the Sequence column, so those two states are conflicts. A shot that
+        simply doesn't exist yet is normal and is only reported for
+        information.
+        """
+        pairs = []
+        seen = set()
+        for seq_code, shot_code in rows:
+            key = ((seq_code or "").strip().upper(), (shot_code or "").strip().upper())
+            if key[1] and key not in seen:
+                seen.add(key)
+                pairs.append(key)
+
+        if not pairs:
+            return {}
+
+        if not (self.gazu and self.is_connected):
+            return {
+                key: {
+                    "state": self.KITSU_UNKNOWN,
+                    "message": "Not connected to Kitsu — shots could not be checked.",
+                    "sequences": [],
+                }
+                for key in pairs
+            }
+
+        project_arg = project if isinstance(project, dict) else {"id": str(project)}
+        try:
+            index = self._project_shot_index(project_arg)
+        except Exception as e:
+            logger.error(f"[KitsuClient] Shot pre-flight failed: {e}")
+            self.last_error = str(e)
+            return {
+                key: {
+                    "state": self.KITSU_UNKNOWN,
+                    "message": f"Kitsu check failed: {e}",
+                    "sequences": [],
+                }
+                for key in pairs
+            }
+
+        report = {}
+        for seq_up, shot_up in pairs:
+            found = index.get(shot_up)
+            if not found:
+                report[(seq_up, shot_up)] = {
+                    "state": self.KITSU_NEW_SHOT,
+                    "message": f"'{shot_up}' does not exist in Kitsu yet — it will be created under '{seq_up}'.",
+                    "sequences": [],
+                }
+            elif len(found) > 1:
+                others = sorted(found)
+                report[(seq_up, shot_up)] = {
+                    "state": self.KITSU_AMBIGUOUS,
+                    "message": (
+                        f"'{shot_up}' exists under several sequences in Kitsu ({', '.join(others)}). "
+                        "Set the Sequence column to the right one before ingesting."
+                    ),
+                    "sequences": others,
+                }
+            elif seq_up in found:
+                report[(seq_up, shot_up)] = {
+                    "state": self.KITSU_OK,
+                    "message": f"'{seq_up} / {shot_up}' matches Kitsu.",
+                    "sequences": sorted(found),
+                }
+            else:
+                other = sorted(found)[0]
+                report[(seq_up, shot_up)] = {
+                    "state": self.KITSU_WRONG_SEQUENCE,
+                    "message": (
+                        f"Kitsu has '{shot_up}' under sequence '{other}', not '{seq_up}'. "
+                        "Ingesting now would create a second shot with the same name."
+                    ),
+                    "sequences": sorted(found),
+                }
+        return report
+
     @staticmethod
     def build_version_comment(item, version_num, dest_dir, transfer_mode="copy", checksum=None):
         """

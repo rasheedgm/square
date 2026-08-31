@@ -63,5 +63,112 @@ class TestKitsuClientConnectErrorSurfacing(unittest.TestCase):
         self.assertTrue(client.host.startswith("http://"))
 
 
+class _FakeGazuShot:
+    """
+    Stands in for gazu.shot against a fixed in-memory shot list, so
+    check_shots() can be exercised without a live Kitsu server.
+    """
+
+    def __init__(self, shots, sequences=None):
+        self._shots = shots
+        self._sequences = sequences or []
+
+    def all_shots_for_project(self, project):
+        return self._shots
+
+    def all_sequences_for_project(self, project):
+        return self._sequences
+
+
+class _FakeGazu:
+    def __init__(self, shots, sequences=None):
+        self.shot = _FakeGazuShot(shots, sequences)
+
+
+class TestKitsuCheckShots(unittest.TestCase):
+    """
+    check_shots() is the pre-flight that answers a question the NAS check
+    cannot: a shot code from a client's folder structure may already exist
+    in Kitsu under a DIFFERENT sequence. Ingesting then either attaches
+    media to the wrong shot or creates a duplicate -- so that state (and a
+    shot name split across several sequences) must be surfaced as a
+    conflict, while a shot that simply doesn't exist yet is only
+    informational.
+    """
+
+    def _connected_client(self, shots, sequences=None):
+        client = KitsuClient(dry_run=False)
+        client.gazu = _FakeGazu(shots, sequences)
+        client.is_connected = True
+        return client
+
+    def test_matching_sequence_is_ok_not_a_conflict(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"},
+        ])
+        report = client.check_shots("proj", [("SQ010", "SH0100")])
+        finding = report[("SQ010", "SH0100")]
+        self.assertEqual(finding["state"], KitsuClient.KITSU_OK)
+        self.assertNotIn(finding["state"], KitsuClient.KITSU_CONFLICT_STATES)
+
+    def test_shot_under_a_different_sequence_is_a_conflict(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ099", "sequence_id": "s1"},
+        ])
+        report = client.check_shots("proj", [("SQ010", "SH0100")])
+        finding = report[("SQ010", "SH0100")]
+        self.assertEqual(finding["state"], KitsuClient.KITSU_WRONG_SEQUENCE)
+        self.assertIn(finding["state"], KitsuClient.KITSU_CONFLICT_STATES)
+        self.assertIn("SQ099", finding["message"])
+
+    def test_shot_name_split_across_sequences_is_ambiguous_conflict(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"},
+            {"name": "SH0100", "sequence_name": "SQ020", "sequence_id": "s2"},
+        ])
+        report = client.check_shots("proj", [("SQ010", "SH0100")])
+        finding = report[("SQ010", "SH0100")]
+        self.assertEqual(finding["state"], KitsuClient.KITSU_AMBIGUOUS)
+        self.assertIn(finding["state"], KitsuClient.KITSU_CONFLICT_STATES)
+
+    def test_unknown_shot_is_informational_new_shot_not_a_conflict(self):
+        client = self._connected_client([])
+        report = client.check_shots("proj", [("SQ010", "SH0100")])
+        finding = report[("SQ010", "SH0100")]
+        self.assertEqual(finding["state"], KitsuClient.KITSU_NEW_SHOT)
+        self.assertNotIn(finding["state"], KitsuClient.KITSU_CONFLICT_STATES)
+
+    def test_missing_sequence_name_falls_back_to_the_project_sequence_list(self):
+        # Older Kitsu servers omit sequence_name from the shot dict -- the
+        # shot must still be resolvable via sequence_id, not silently read
+        # as if it had no sequence at all (which would hide a real conflict).
+        client = self._connected_client(
+            shots=[{"name": "SH0100", "sequence_id": "s1"}],
+            sequences=[{"id": "s1", "name": "SQ099"}],
+        )
+        report = client.check_shots("proj", [("SQ010", "SH0100")])
+        self.assertEqual(report[("SQ010", "SH0100")]["state"], KitsuClient.KITSU_WRONG_SEQUENCE)
+
+    def test_disconnected_client_reports_unknown_for_every_row(self):
+        client = KitsuClient(dry_run=False)
+        client.is_connected = False
+        report = client.check_shots("proj", [("SQ010", "SH0100"), ("SQ020", "SH0200")])
+        self.assertTrue(all(f["state"] == KitsuClient.KITSU_UNKNOWN for f in report.values()))
+        self.assertTrue(all(f["state"] not in KitsuClient.KITSU_CONFLICT_STATES for f in report.values()))
+
+    def test_rows_missing_a_shot_code_are_skipped(self):
+        client = self._connected_client([])
+        report = client.check_shots("proj", [("SQ010", "")])
+        self.assertEqual(report, {})
+
+    def test_duplicate_rows_collapse_to_one_lookup_key(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"},
+        ])
+        report = client.check_shots("proj", [("sq010", "sh0100"), ("SQ010", "SH0100")])
+        self.assertEqual(len(report), 1)
+        self.assertIn(("SQ010", "SH0100"), report)
+
+
 if __name__ == "__main__":
     unittest.main()

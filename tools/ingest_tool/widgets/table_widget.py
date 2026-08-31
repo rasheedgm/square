@@ -114,6 +114,10 @@ class IngestTableWidget(QtWidgets.QWidget):
         # id(item) for rows whose destination changed since their version was
         # last resolved against the NAS -- held out of ingest until re-checked.
         self._pending_revalidation = set()
+        # id(item) -> {"state", "message", "conflict"} from the last Kitsu
+        # pre-flight. Kept apart from item_status so within-table conflict
+        # detection, which re-derives statuses, can't quietly erase it.
+        self.kitsu_issues = {}
         self._project_code = ""
         self._nas_root = "X:/projects"
         self._filename_template = ""
@@ -140,6 +144,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_discarded = set()
         self.item_progress = {}
         self._pending_revalidation = set()
+        self.kitsu_issues = {}
         self._refresh_table()
 
     def update_table(self, new_items):
@@ -225,18 +230,48 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._run_conflict_detection()
         self._refresh_table()
 
-    def mark_kitsu_conflicts(self, conflicting_shot_names: set):
-        """Mark rows whose shot name appears in conflicting_shot_names."""
+    def apply_kitsu_check(self, report: dict):
+        """
+        Apply a KitsuClient.check_shots() report, keyed (SEQUENCE, SHOT).
+
+        Only the two states that need a human decision -- the shot already
+        living under a different sequence, or under several -- mark the row as
+        a conflict. "Will be created" and "matches Kitsu" are recorded for the
+        row's tooltip but never block anything.
+        """
+        from square_core.kitsu_client import KitsuClient
+
+        self.kitsu_issues = {}
         for item in self.items_data:
-            if item.shot_code.upper() in {s.upper() for s in conflicting_shot_names}:
-                self.item_status[id(item)] = STATUS_CONFLICT
+            key = (
+                (item.sequence_code or "").strip().upper(),
+                (item.shot_code or "").strip().upper(),
+            )
+            finding = report.get(key)
+            if not finding:
+                continue
+            self.kitsu_issues[id(item)] = {
+                "state": finding.get("state"),
+                "message": finding.get("message", ""),
+                "conflict": finding.get("state") in KitsuClient.KITSU_CONFLICT_STATES,
+            }
+        self._run_conflict_detection()
         self._refresh_table()
 
+    def kitsu_conflict_count(self):
+        """How many active rows the last Kitsu pre-flight flagged."""
+        return sum(
+            1 for key, issue in self.kitsu_issues.items()
+            if issue.get("conflict") and key not in self.item_discarded
+        )
+
     def has_unresolved_conflicts(self) -> bool:
+        # Read through _effective_status so this sees Kitsu pre-flight
+        # conflicts too, not just the within-table ones written to item_status.
         return any(
-            status == STATUS_CONFLICT
-            for key, status in self.item_status.items()
-            if key not in self.item_discarded
+            self._effective_status(item) == STATUS_CONFLICT
+            for item in self.items_data
+            if id(item) not in self.item_discarded
         )
 
     def get_valid_ingest_items(self):
@@ -251,7 +286,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             key = id(item)
             if key in self.item_discarded:
                 continue
-            status = self.item_status.get(key, STATUS_NEW)
+            status = self._effective_status(item)
             seq = (item.sequence_code or "").strip()
             shot = (item.shot_code or "").strip()
             mtype = (getattr(item, "media_type", "") or "").strip()
@@ -280,7 +315,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             key = id(item)
             if key in self.item_discarded:
                 continue
-            status = self.item_status.get(key, STATUS_NEW)
+            status = self._effective_status(item)
             if status in (STATUS_ALREADY, STATUS_DISCARDED):
                 continue
             if status == STATUS_CONFLICT:
@@ -416,6 +451,18 @@ class IngestTableWidget(QtWidgets.QWidget):
         bar_layout.addWidget(discard_btn)
         bar_layout.addWidget(restore_btn)
 
+        bar_layout.addSpacing(10)
+
+        kitsu_btn = QtWidgets.QPushButton("Check in Kitsu")
+        kitsu_btn.setToolTip(
+            "Look every row's Sequence / Shot up in Kitsu before ingesting.\n"
+            "Flags shots that already exist under a different sequence, which\n"
+            "would otherwise create a duplicate shot. Hover a row's Status for\n"
+            "the finding."
+        )
+        kitsu_btn.clicked.connect(self.kitsu_conflict_check_requested.emit)
+        bar_layout.addWidget(kitsu_btn)
+
         return bar
 
     # ------------------------------------------------------------------
@@ -510,8 +557,12 @@ class IngestTableWidget(QtWidgets.QWidget):
             )
             self._table.setCellWidget(row_idx, COL_VERSION, ver_combo)
 
-            # ── Status pill ──
-            self._table.setItem(row_idx, COL_STATUS, self._mk_status_cell(status))
+            # ── Status pill (Kitsu finding, if any, in the tooltip) ──
+            status_cell = self._mk_status_cell(status)
+            issue = self.kitsu_issues.get(key)
+            if issue and issue.get("message"):
+                status_cell.setToolTip(issue["message"])
+            self._table.setItem(row_idx, COL_STATUS, status_cell)
 
             # ── Live ingest progress bar ──
             stage, percent = self.item_progress.get(key, (STAGE_QUEUED, 0))
@@ -543,6 +594,12 @@ class IngestTableWidget(QtWidgets.QWidget):
         )
         if not all(required):
             return STATUS_MISSING_DETAILS
+        # A Kitsu pre-flight conflict outranks the NAS verdict: the row may be
+        # a perfectly good "New Version" on disk and still be pointed at the
+        # wrong shot in Kitsu.
+        issue = self.kitsu_issues.get(key)
+        if issue and issue.get("conflict"):
+            return STATUS_CONFLICT
         return self.item_status.get(key, STATUS_NEW)
 
     def _mk_cell(self, text, editable=True):
@@ -692,6 +749,8 @@ class IngestTableWidget(QtWidgets.QWidget):
         for item in changed:
             key = id(item)
             self._pending_revalidation.add(key)
+            # The finding was about the shot this row used to point at.
+            self.kitsu_issues.pop(key, None)
             if key not in self.item_discarded:
                 self.item_status[key] = STATUS_CHECKING
         self.revalidation_requested.emit(changed)

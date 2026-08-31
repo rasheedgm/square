@@ -3,7 +3,7 @@ from Qt import QtWidgets
 
 from tools.ingest_tool.widgets.table_widget import (
     IngestTableWidget, STATUS_CONFLICT, STATUS_NEW, STATUS_DISCARDED,
-    STATUS_CHECKING, COL_PROGRESS, COL_VERSION, COL_SHOT,
+    STATUS_CHECKING, COL_PROGRESS, COL_VERSION, COL_SHOT, COL_STATUS,
     STAGE_QUEUED, STAGE_COPYING, STAGE_DONE,
 )
 from square_core.plate_scanner import IngestSequenceItem
@@ -324,6 +324,93 @@ class TestRenameAndVersionRevalidation(unittest.TestCase):
         self.table._tmpl_edit.setText("{plate}")
         self.table._on_apply_rename()
         self.assertEqual(a.media_type, "{plate}")
+
+
+class TestKitsuPreflightCheck(unittest.TestCase):
+    """
+    "Check in Kitsu" wires KitsuClient.check_shots() into the table: a shot
+    that already exists in Kitsu under a different sequence must block
+    ingest exactly like a within-table conflict does, since ingesting would
+    otherwise create a duplicate shot or attach media to the wrong one.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_wrong_sequence_finding_blocks_ingest_like_a_conflict(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, False)})
+        self.assertTrue(self.table.get_valid_ingest_items())
+
+        self.table.apply_kitsu_check({
+            ("SQ010", "SH0100"): {
+                "state": "wrong_sequence",
+                "message": "Kitsu has 'SH0100' under sequence 'SQ099', not 'SQ010'.",
+            }
+        })
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertTrue(self.table.has_unresolved_conflicts())
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+        self.assertEqual(self.table.kitsu_conflict_count(), 1)
+
+    def test_new_shot_finding_is_informational_and_does_not_block(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, False)})
+
+        self.table.apply_kitsu_check({
+            ("SQ010", "SH0100"): {"state": "new_shot", "message": "will be created"}
+        })
+
+        self.assertFalse(self.table.has_unresolved_conflicts())
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 1)])
+        self.assertEqual(self.table.kitsu_conflict_count(), 0)
+
+    def test_discarding_the_flagged_row_clears_the_gate(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_kitsu_check({
+            ("SQ010", "SH0100"): {"state": "ambiguous", "message": "exists under several sequences"}
+        })
+        self.assertTrue(self.table.has_unresolved_conflicts())
+
+        self.table._table.selectRow(0)
+        self.table._on_discard_selected()
+        self.assertFalse(self.table.has_unresolved_conflicts())
+        self.assertEqual(self.table.kitsu_conflict_count(), 0)
+
+    def test_renaming_the_row_clears_the_stale_finding(self):
+        # The finding was about the shot this row used to point at; after a
+        # rename it must not go on blocking ingest for a slot it no longer
+        # occupies.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, False)})
+        self.table.apply_kitsu_check({
+            ("SQ010", "SH0100"): {"state": "wrong_sequence", "message": "wrong sequence"}
+        })
+        self.assertTrue(self.table.has_unresolved_conflicts())
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._tmpl_edit.setText("SH0200")
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+
+        self.assertNotIn(id(a), self.table.kitsu_issues)
+        self.assertFalse(self.table.has_unresolved_conflicts())
+
+    def test_status_tooltip_carries_the_kitsu_message(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_kitsu_check({
+            ("SQ010", "SH0100"): {"state": "wrong_sequence", "message": "distinctive-message-xyz"}
+        })
+        cell = self.table._table.item(0, COL_STATUS)
+        self.assertIn("distinctive-message-xyz", cell.toolTip())
 
 
 if __name__ == "__main__":

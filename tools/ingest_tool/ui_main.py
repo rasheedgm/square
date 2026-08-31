@@ -104,6 +104,34 @@ class NASCheckWorker(QtCore.QThread):
         self.results_ready.emit(results)
 
 
+class KitsuCheckWorker(QtCore.QThread):
+    """
+    Background thread: pre-flight the table's Sequence/Shot pairs against
+    Kitsu. Read-only -- it looks shots up, it never creates them, so it is
+    safe to run at any point before ingesting.
+    """
+
+    results_ready = QtCore.Signal(dict)   # {(SEQ, SHOT): finding}
+    failed        = QtCore.Signal(str)
+
+    def __init__(self, rows, project_data, host, user, password):
+        super().__init__()
+        self.rows         = rows
+        self.project_data = project_data
+        self.host         = host
+        self.user         = user
+        self.password     = password
+
+    def run(self):
+        try:
+            kitsu = KitsuClient(host=self.host, email=self.user, password=self.password, dry_run=False)
+            kitsu.connect()
+            self.results_ready.emit(kitsu.check_shots(self.project_data, self.rows))
+        except Exception as e:
+            logger.error(f"[KitsuCheckWorker] {e}", exc_info=True)
+            self.failed.emit(str(e))
+
+
 class IngestWorkerThread(QtCore.QThread):
     """Background worker: copy files + push to Kitsu."""
 
@@ -321,6 +349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.is_kitsu_live = self.kitsu.connect()
         self.project_data  = None
         self._nas_check_worker = None
+        self._kitsu_check_worker = None
 
         self.setup_ui()
         self.load_projects()
@@ -447,6 +476,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # version number has to be resolved against the new folder before it
         # can be ingested.
         self.table_widget.revalidation_requested.connect(self._on_revalidation_requested)
+        self.table_widget.kitsu_conflict_check_requested.connect(self._on_kitsu_check_requested)
 
         self.main_splitter.addWidget(self.folder_tree)
         self.main_splitter.addWidget(self.table_widget)
@@ -641,6 +671,72 @@ class MainWindow(QtWidgets.QMainWindow):
         if not items or not self.project_data:
             return
         self._start_nas_check(items)
+
+    def _on_kitsu_check_requested(self):
+        """Run the read-only Kitsu shot pre-flight for every row in the table."""
+        if self._kitsu_check_worker and self._kitsu_check_worker.isRunning():
+            return
+        if not self.project_data:
+            QtWidgets.QMessageBox.information(
+                self, "Check in Kitsu", "Pick a project first — there is nothing to check against."
+            )
+            return
+        items = self.table_widget.items_data
+        if not items:
+            return
+
+        rows = [(i.sequence_code, i.shot_code) for i in items]
+        self._check_bar.setMaximum(0)          # busy: the lookup is one request, not a per-row loop
+        self._check_bar.setVisible(True)
+
+        self._kitsu_check_worker = KitsuCheckWorker(
+            rows=rows,
+            project_data=self.project_data,
+            host=self.config.kitsu_url,
+            user=self.config.kitsu_user,
+            password=self.config.kitsu_password,
+        )
+        self._kitsu_check_worker.results_ready.connect(self._on_kitsu_check_done)
+        self._kitsu_check_worker.failed.connect(self._on_kitsu_check_failed)
+        self._kitsu_check_worker.start()
+
+    def _on_kitsu_check_done(self, report):
+        self._check_bar.setVisible(False)
+        self._check_bar.setMaximum(100)
+        self.table_widget.apply_kitsu_check(report)
+        self._update_conflict_badge()
+
+        if not report:
+            return
+        states = [f.get("state") for f in report.values()]
+        if all(st == KitsuClient.KITSU_UNKNOWN for st in states):
+            QtWidgets.QMessageBox.warning(
+                self, "Check in Kitsu",
+                "Could not reach Kitsu, so no shots were checked.\n\n"
+                f"{next(iter(report.values())).get('message', '')}"
+            )
+            return
+
+        flagged = self.table_widget.kitsu_conflict_count()
+        created = sum(1 for st in states if st == KitsuClient.KITSU_NEW_SHOT)
+        if flagged:
+            QtWidgets.QMessageBox.warning(
+                self, "Check in Kitsu",
+                f"{flagged} row(s) point at a shot that already exists under a different "
+                "sequence in Kitsu.\n\nThey are flagged as conflicts — hover a row's Status "
+                "for the detail, then fix its Sequence and re-check."
+            )
+        else:
+            QtWidgets.QMessageBox.information(
+                self, "Check in Kitsu",
+                f"No shot conflicts.\n\n{len(report)} shot(s) checked, "
+                f"{created} will be created on ingest."
+            )
+
+    def _on_kitsu_check_failed(self, message):
+        self._check_bar.setVisible(False)
+        self._check_bar.setMaximum(100)
+        QtWidgets.QMessageBox.critical(self, "Check in Kitsu", f"Kitsu check failed:\n\n{message}")
 
     def _on_nas_check_done(self, results):
         self._check_bar.setVisible(False)

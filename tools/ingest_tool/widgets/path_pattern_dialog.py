@@ -16,7 +16,9 @@ root -- order matters, since the first to match a file wins -- and lets the
 studio reorder, quick-edit, or remove them.
 """
 
+import html
 import re
+from pathlib import Path
 
 from Qt import QtWidgets, QtCore
 from square_core.path_pattern import (
@@ -26,7 +28,7 @@ from square_core.path_pattern import (
 from square_core.token_parser import (
     DEFAULT_DELIMITER_CHARS, tokenize_with_separators, merge_token_indices,
 )
-from tools.qt_compat import HEADER_RESIZE_STRETCH, SELECT_ROWS, TEXT_SELECTABLE_BY_MOUSE
+from tools.qt_compat import HEADER_RESIZE_STRETCH, SELECT_ROWS, TEXT_SELECTABLE_BY_MOUSE, get_qt_enum
 
 # Canonical role -> (background, foreground, short badge label)
 _ROLE_COLORS = {
@@ -235,12 +237,46 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         self._build_ui()
 
     def _compute_seed_segments(self):
-        from pathlib import Path
         folder = Path(self.item.files[0]).parent if self.item.files else self.mapper.root
         rel_folder = self.mapper._relative_posix(folder) or ""
         folder_segs = rel_folder.split("/") if rel_folder else []
         filename_seg = seed_filename_segment(self.item)
         return [s for s in folder_segs if s] + [filename_seg]
+
+    def _add_existing_match_banner(self, layout):
+        """
+        The builder always starts fresh from the raw example -- it doesn't
+        try to reconstruct which chips an existing saved pattern would have
+        tagged, since that's ambiguous in general. Without this, tagging a
+        file, then reopening the builder on that same file, looked like the
+        earlier tag had vanished. This makes the current state visible
+        instead: if a saved pattern already matches this exact file, say so
+        up front, with what it's currently extracting.
+        """
+        if not self.item.files:
+            return
+        matched_pattern, extracted = self.mapper.match_relative_path(Path(self.item.files[0]))
+        if matched_pattern is None:
+            return
+        # This label mixes literal HTML markup with data (the template
+        # string, the extracted values) -- both need escaping, or a
+        # placeholder like "<sequence>" is parsed as an unknown tag and
+        # silently dropped instead of shown.
+        safe_template = html.escape(matched_pattern.template)
+        shown = ", ".join(f"{html.escape(k)}={html.escape(str(v))}" for k, v in extracted.items()) or "(no tags captured)"
+        banner = QtWidgets.QLabel(
+            f"✓ This file already matches a saved pattern: "
+            f"<span style='font-family:monospace; color:#34D399;'>{safe_template}</span><br>"
+            f"Currently extracting: {shown}<br>"
+            f"Building a new pattern below adds another one rather than editing this match -- "
+            f"use Patterns… to edit or reorder existing ones instead."
+        )
+        banner.setWordWrap(True)
+        banner.setStyleSheet(
+            "background:#064E3B; border:1px solid #10B981; border-radius:6px; "
+            "padding:8px; color:#D1FAE5; font-size:11px;"
+        )
+        layout.addWidget(banner)
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -249,6 +285,8 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         hdr = QtWidgets.QLabel(f"Example:  <span style='color:#60A5FA; font-family:monospace;'>{example_path}</span>")
         hdr.setWordWrap(True)
         layout.addWidget(hdr)
+
+        self._add_existing_match_banner(layout)
 
         hint = QtWidgets.QLabel(
             "Select a piece below, then tag it. Drill into a piece that bundles more than one value "
@@ -324,6 +362,10 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         self.preview_lbl.setWordWrap(True)
         self.preview_lbl.setTextInteractionFlags(TEXT_SELECTABLE_BY_MOUSE)
         self.preview_lbl.setStyleSheet("font-family: monospace; font-size:11px;")
+        # Explicit, not left to Qt's HTML auto-detection: this text is built
+        # from template pieces like "<sequence>" that Qt's rich-text
+        # heuristic could otherwise decide to parse as a tag and drop.
+        self.preview_lbl.setTextFormat(get_qt_enum(QtCore.Qt, "TextFormat", "PlainText"))
         prev_layout.addWidget(self.preview_lbl)
         layout.addWidget(prev_box)
 

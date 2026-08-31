@@ -11,18 +11,31 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(SettingsDialog, self).__init__(parent)
         self.setWindowTitle("Square VFX - Studio Pipeline Configuration")
-        self.setMinimumSize(620, 640)
+        self.setMinimumSize(560, 420)
+        self.resize(680, 760)
         self.config = StudioConfig()
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(15)
+        # The form has more content than fits on a typical laptop screen at
+        # once (5 group boxes, one with a table) -- everything except the
+        # header and the Save/Cancel row lives inside a QScrollArea, so the
+        # window is usable (and Save is always reachable) at any size instead
+        # of silently clipping whatever doesn't fit.
+        outer_layout = QtWidgets.QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
-        # Title Header
         lbl_header = QtWidgets.QLabel("⚙️ Studio & Kitsu Configuration")
-        lbl_header.setStyleSheet("font-size: 16px; font-weight: bold; color: #60A5FA;")
-        layout.addWidget(lbl_header)
+        lbl_header.setStyleSheet("font-size: 16px; font-weight: bold; color: #60A5FA; padding: 15px 15px 4px 15px;")
+        outer_layout.addWidget(lbl_header)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(scroll_content)
+        layout.setContentsMargins(15, 0, 15, 15)
+        layout.setSpacing(15)
 
         # Kitsu Credentials Group Box
         kitsu_box = QtWidgets.QGroupBox("Kitsu DB Connection Settings")
@@ -151,8 +164,15 @@ class SettingsDialog(QtWidgets.QDialog):
         mt_layout.addLayout(mt_btn_layout)
         layout.addWidget(mt_box)
 
-        # Action Buttons
-        btn_layout = QtWidgets.QHBoxLayout()
+        scroll.setWidget(scroll_content)
+        outer_layout.addWidget(scroll, stretch=1)
+
+        # Action Buttons -- outside the scroll area, so Save/Cancel are
+        # always visible and clickable regardless of scroll position.
+        btn_frame = QtWidgets.QFrame()
+        btn_frame.setStyleSheet("QFrame { border-top: 1px solid #252D3D; }")
+        btn_layout = QtWidgets.QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(15, 10, 15, 10)
         self.save_btn = QtWidgets.QPushButton("💾 Save Settings")
         self.save_btn.setStyleSheet("background-color: #059669; font-size: 14px; font-weight: bold;")
         self.save_btn.clicked.connect(self.on_save)
@@ -163,7 +183,7 @@ class SettingsDialog(QtWidgets.QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
-        layout.addLayout(btn_layout)
+        outer_layout.addWidget(btn_frame)
 
     def _mk_preview_checkbox(self, checked):
         cell_w = QtWidgets.QWidget()

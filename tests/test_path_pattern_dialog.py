@@ -7,6 +7,7 @@ from unittest.mock import patch
 from Qt import QtWidgets
 
 from square_core.folder_mapper import FolderMapper
+from square_core.path_pattern import PathPattern
 from square_core.plate_scanner import PlateScanner
 from tools.ingest_tool.widgets.path_pattern_dialog import ChipButton, SegmentRow, PathPatternBuilderDialog
 
@@ -106,6 +107,40 @@ class TestPathPatternBuilderDialog(unittest.TestCase):
             (d / f"ALPHA_SQ010_SH0100_PL01.{frame}.exr").write_text("x")
         self.mapper = FolderMapper(self.tmp)
         self.item = PlateScanner(self.tmp).scan()[0]
+
+    def test_reopening_on_an_already_matched_file_shows_a_banner_not_a_blank_slate(self):
+        # Confirmed confusion: the builder always starts fresh from the raw
+        # example (there's no reliable way to reconstruct which chips an
+        # existing template would have tagged), so reopening it on a file
+        # that was already tagged looked like the tag had been lost. It
+        # hasn't -- the banner is how that's made visible instead.
+        self.mapper.add_path_pattern(
+            PathPattern(template="<sequence>/<shot>/ALPHA_SQ010_SH0100_PL01.####.exr")
+        )
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        # Still starts fresh -- no chip is pre-tagged.
+        self.assertIsNone(dlg._segment_rows[0].all_chips()[0].role)
+
+        text_seen = "\n".join(
+            w.text() for w in dlg.findChildren(QtWidgets.QLabel) if "already matches" in w.text()
+        )
+        self.assertIn("already matches a saved pattern", text_seen)
+        self.assertIn("SQ010", text_seen)
+        # QLabel.text() returns the raw source string, HTML markup and all --
+        # it can't tell an escaped "<sequence>" from one Qt's rich-text
+        # parser would silently swallow as an unknown tag. The escaped form
+        # is the only way to confirm the placeholder actually survives
+        # rendering instead of vanishing.
+        self.assertIn("&lt;sequence&gt;", text_seen)
+        self.assertIn("&lt;shot&gt;", text_seen)
+        self.assertNotIn("<sequence>", text_seen)
+
+    def test_no_banner_when_nothing_matches_yet(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        text_seen = "\n".join(
+            w.text() for w in dlg.findChildren(QtWidgets.QLabel) if "already matches" in w.text()
+        )
+        self.assertEqual(text_seen, "")
 
     def test_seed_segments_include_hash_substituted_filename(self):
         dlg = PathPatternBuilderDialog(self.mapper, self.item)

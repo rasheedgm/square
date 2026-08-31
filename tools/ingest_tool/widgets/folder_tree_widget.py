@@ -148,7 +148,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         from square_core.config import StudioConfig
         self.config = StudioConfig()
         self.setAcceptDrops(True)
-        self.setMinimumWidth(280)
+        self.setMinimumWidth(340)
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -186,6 +186,14 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._clear_btn.setFixedHeight(28)
         self._clear_btn.setEnabled(False)
         self._clear_btn.clicked.connect(self._on_clear_tags)
+
+        # Give each button a floor at its own natural (unclipped) width, so
+        # a narrow panel squeezes the preset combo (which degrades fine,
+        # showing "..." on a long preset name) instead of truncating a
+        # button's own label into something unreadable.
+        for btn in (self._browse_btn, self._patterns_btn, self._clear_btn):
+            btn.setMinimumWidth(btn.sizeHint().width())
+        self._preset_combo.setMinimumWidth(60)
 
         btn_row.addWidget(self._browse_btn)
         btn_row.addWidget(self._preset_combo, stretch=1)
@@ -705,11 +713,27 @@ class FolderTreeWidget(QtWidgets.QWidget):
             return None
 
         paths = set()
+        scan_cache = {}
 
         def _collect(item):
+            kind = item.data(0, ROLE_KIND)
             p = item.data(0, ROLE_PATH)
             if p:
-                paths.add(os.path.normcase(os.path.abspath(str(p))))
+                if kind == "sequence":
+                    # ROLE_PATH here is a synthetic "prefix.ext" display path
+                    # with no frame digits -- it never equals any real file on
+                    # disk, so it can't match build_items()'s filter_paths
+                    # (which checks against the sequence's actual frame
+                    # files). Resolve to the real files instead, or a directly
+                    # selected sequence silently loads nothing.
+                    real_item = self._resolve_item_for_node(Path(p), kind, scan_cache=scan_cache)
+                    if real_item and real_item.files:
+                        for f in real_item.files:
+                            paths.add(os.path.normcase(os.path.abspath(f)))
+                    else:
+                        paths.add(os.path.normcase(os.path.abspath(str(p))))
+                else:
+                    paths.add(os.path.normcase(os.path.abspath(str(p))))
             for i in range(item.childCount()):
                 _collect(item.child(i))
 

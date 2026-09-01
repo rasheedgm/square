@@ -272,5 +272,83 @@ class TestCheckAllMediaForcedVersions(unittest.TestCase):
         self.assertEqual((ver, state, forced), (1, "new", False))
 
 
+class TestCheckAllMediaErrorIsolation(unittest.TestCase):
+    """
+    check_all_media()'s ThreadPoolExecutor + as_completed loop used to let
+    ANY per-item exception -- future.result() re-raising with nothing to
+    catch it -- take the WHOLE batch down: every other item's already-
+    computed result was silently discarded and the exception propagated
+    straight out of check_all_media. With no try/except in NASCheckWorker
+    either, results_ready never fired and every row in that batch stayed
+    "Checking..." forever with no error shown anywhere. Real NAS data hits
+    this in ways synthetic test data never does -- a permission error, an
+    unusual path, a flaky mount -- exactly the class of bug that only shows
+    up once a user pulls and runs for real.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.src = self.tmp / "src"
+        self.src.mkdir()
+        self.nas = NASManager(nas_root=self.tmp / "nas", dry_run=False)
+
+    def _item(self, name, seq, shot, mname):
+        f = self.src / name
+        f.write_text("x")
+        it = IngestSequenceItem(Path(name).stem, [str(f)], ".mov", is_video=True)
+        it.sequence_code, it.shot_code, it.media_type, it.media_name = seq, shot, "Plate", mname
+        return it
+
+    @patch("square_core.config.StudioConfig", side_effect=_stub_studio_config)
+    def test_one_items_exception_does_not_take_down_the_batch(self, _cfg):
+        good_a = self._item("a.mov", "SQ010", "SH0100", "BG")
+        bad    = self._item("b.mov", "SQ020", "SH0200", "FG")
+        good_b = self._item("c.mov", "SQ030", "SH0300", "MM")
+
+        real_get_info = self.nas.get_media_version_info
+
+        def _flaky(proj_code, seq, shot, media_name, item=None, **kw):
+            if item is bad:
+                raise PermissionError("simulated: permission denied on the NAS mount")
+            return real_get_info(proj_code, seq, shot, media_name, item=item, **kw)
+
+        with patch.object(self.nas, "get_media_version_info", side_effect=_flaky):
+            errors = {}
+            results = self.nas.check_all_media([good_a, bad, good_b], "PROJ", errors=errors)
+
+        # The two good items still resolved normally -- not swallowed by
+        # the bad one's exception.
+        self.assertEqual(results[id(good_a)], (1, "new", False))
+        self.assertEqual(results[id(good_b)], (1, "new", False))
+        # The bad item is reported as its own distinct state, not silently
+        # dropped and not crashing the whole call.
+        ver, state, forced = results[id(bad)]
+        self.assertEqual(state, "error")
+        self.assertIn(id(bad), errors)
+        self.assertIn("permission denied", errors[id(bad)])
+
+    @patch("square_core.config.StudioConfig", side_effect=_stub_studio_config)
+    def test_errors_dict_is_optional(self, _cfg):
+        # A caller that doesn't pass errors= (doesn't want the per-item
+        # message) must not crash either -- it just doesn't get the detail.
+        bad = self._item("b.mov", "SQ020", "SH0200", "FG")
+        with patch.object(self.nas, "get_media_version_info", side_effect=RuntimeError("boom")):
+            results = self.nas.check_all_media([bad], "PROJ")
+        self.assertEqual(results[id(bad)][1], "error")
+
+    @patch("square_core.config.StudioConfig", side_effect=_stub_studio_config)
+    def test_a_forced_items_error_keeps_its_requested_version_number(self, _cfg):
+        # An "error" result's version number is otherwise meaningless, but
+        # for a forced (manually-picked) item it should still echo back the
+        # number the user picked rather than an arbitrary default -- so the
+        # row doesn't look like it silently reverted to v1.
+        bad = self._item("b.mov", "SQ020", "SH0200", "FG")
+        with patch.object(self.nas, "check_specific_version", side_effect=RuntimeError("boom")):
+            results = self.nas.check_all_media([bad], "PROJ", forced_versions={id(bad): 5})
+        ver, state, forced = results[id(bad)]
+        self.assertEqual((ver, state, forced), (5, "error", True))
+
+
 if __name__ == "__main__":
     unittest.main()

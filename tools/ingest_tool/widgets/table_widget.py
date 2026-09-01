@@ -12,7 +12,8 @@ from Qt import QtWidgets, QtCore, QtGui
 from tools.qt_compat import (
     ITEM_IS_SELECTABLE, ITEM_IS_ENABLED,
     HEADER_RESIZE_INTERACTIVE, HEADER_RESIZE_FIXED, SELECT_ROWS, ALIGN_CENTER,
-    SELECTION_SELECT, SELECTION_ROWS, get_qt_enum
+    SELECTION_SELECT, SELECTION_ROWS, SCROLLBAR_AS_NEEDED, SCROLLBAR_ALWAYS_OFF,
+    FRAME_NO_FRAME, get_qt_enum
 )
 
 # A row with no cell widgets sizes itself from plain text; the moment ANY row
@@ -31,6 +32,7 @@ STATUS_MISSING_FRAMES  = "Missing Frames"
 STATUS_MISSING_DETAILS = "Missing Details"
 STATUS_DISCARDED       = "Discarded"
 STATUS_CHECKING        = "Checking..."
+STATUS_CHECK_FAILED    = "Check Failed"
 
 STATUS_COLOURS = {
     STATUS_NEW:             ("#065F46", "#D1FAE5"),   # green
@@ -41,6 +43,7 @@ STATUS_COLOURS = {
     STATUS_MISSING_DETAILS: ("#991B1B", "#FEE2E2"),   # dark red alert
     STATUS_DISCARDED:       ("#374151", "#F3F4F6"),   # grey
     STATUS_CHECKING:        ("#1F2937", "#F9FAFB"),   # dark grey
+    STATUS_CHECK_FAILED:    ("#FFFFFF", "#B91C1C"),   # bold red-on-red -- distinct from Conflict/Missing at a glance
 }
 
 # Column indices
@@ -154,6 +157,10 @@ class IngestTableWidget(QtWidgets.QWidget):
         # is kept apart from item_version_conflict: the finding stays visible
         # in the tooltip even once acknowledged.
         self.kitsu_acknowledged = set()
+        # id(item) -> the real exception message from a NAS check that
+        # failed outright (permission error, unreadable path, ...) rather
+        # than resolving to new/already/conflict -- see apply_version_results.
+        self.item_check_error = {}
         # Restore points for the batch tools (Apply Rename, ALL CAPS/lowercase,
         # Set Version) -- newest last, capped so a long session can't grow it
         # unbounded. Each entry is {"label", "rows": [per-item snapshot, ...]}.
@@ -189,6 +196,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.item_version_conflict = set()
         self.item_override = set()
         self.kitsu_acknowledged = set()
+        self.item_check_error = {}
         # A fresh load starts a new editing session -- nothing to undo into.
         self._undo_stack = []
         self._set_undo_button_state()
@@ -256,16 +264,25 @@ class IngestTableWidget(QtWidgets.QWidget):
                 return row
         return None
 
-    def apply_version_results(self, results: dict):
+    def apply_version_results(self, results: dict, errors: dict = None):
         """
         Called from background thread results.
         results: { id(item): (version_num, state, was_forced) }, state is
-        "new" / "already" / "conflict". was_forced marks a manually-picked
-        version that was verified as-is -- item_detected_version (the
-        anchor used for the version dropdown's offered range) is only ever
-        moved by an AUTO result, never by a forced one, so a bad manual pick
-        can't corrupt the anchor future rollback checks compare against.
+        "new" / "already" / "conflict" / "error". was_forced marks a
+        manually-picked version that was verified as-is -- item_detected_version
+        (the anchor used for the version dropdown's offered range) is only
+        ever moved by an AUTO result, never by a forced one, so a bad manual
+        pick can't corrupt the anchor future rollback checks compare against.
+
+        errors, when given, is {id(item): message} for any item whose check
+        raised a real exception (a NAS permission error, an unreadable
+        path, ...) instead of resolving -- see NASManager.check_all_media.
+        Held out of ingest like a conflict (state "error" in results), with
+        the real message on the row's tooltip so it's not just a silent
+        stuck row. A later SUCCESSFUL check for the same item (retry,
+        rename, Version Up) clears it same as any other state.
         """
+        errors = errors or {}
         for item in self.items_data:
             key = id(item)
             if key in results:
@@ -274,6 +291,13 @@ class IngestTableWidget(QtWidgets.QWidget):
                 self.item_version[key] = ver
                 if not forced:
                     self.item_detected_version[key] = ver
+                if state == "error":
+                    self.item_version_conflict.discard(key)
+                    self.item_override.discard(key)
+                    self.item_check_error[key] = errors.get(key, "Could not check this against the NAS.")
+                    self.item_status[key] = STATUS_CHECK_FAILED
+                    continue
+                self.item_check_error.pop(key, None)
                 if state == "conflict":
                     self.item_version_conflict.add(key)
                     self.item_status[key] = STATUS_CONFLICT
@@ -406,7 +430,7 @@ class IngestTableWidget(QtWidgets.QWidget):
 
             if not (seq and shot and mtype and name):
                 continue
-            if status in (STATUS_ALREADY, STATUS_DISCARDED, STATUS_CONFLICT, STATUS_MISSING_DETAILS):
+            if status in (STATUS_ALREADY, STATUS_DISCARDED, STATUS_CONFLICT, STATUS_MISSING_DETAILS, STATUS_CHECK_FAILED):
                 continue
             # Its destination moved after the last NAS lookup, so the version
             # it holds belongs to a different folder -- ingesting now could
@@ -447,7 +471,35 @@ class IngestTableWidget(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
 
-        layout.addWidget(self._build_toolbar())
+        # Even split across two rows (see _build_toolbar), the toolbar is
+        # still wider than a genuinely narrow window -- the right-most
+        # buttons used to just be clipped outside the visible area with no
+        # way to reach them at all. A horizontal scroll area keeps the
+        # toolbar at its natural width and makes the overflow reachable by
+        # scrolling instead of invisible.
+        toolbar = self._build_toolbar()
+        toolbar_scroll = QtWidgets.QScrollArea()
+        toolbar_scroll.setWidget(toolbar)
+        toolbar_scroll.setHorizontalScrollBarPolicy(SCROLLBAR_AS_NEEDED)
+        toolbar_scroll.setVerticalScrollBarPolicy(SCROLLBAR_ALWAYS_OFF)
+        toolbar_scroll.setFrameShape(FRAME_NO_FRAME)
+        # The toolbar itself is usually narrower than the scroll area's own
+        # viewport (only a genuinely narrow window needs to scroll at all)
+        # -- without this, the leftover viewport space to the right of it
+        # shows the scroll area's default (light) background instead of
+        # blending with the toolbar's own dark one.
+        toolbar_scroll.setStyleSheet("QScrollArea{background:#1E293B; border:none;}")
+        toolbar_scroll.viewport().setStyleSheet("background:#1E293B;")
+        # Room for the toolbar's own natural height PLUS the horizontal
+        # scrollbar's thickness -- leaving only the former squeezed the
+        # scrollbar down into a barely-visible sliver instead of a normal,
+        # usable one (the scrollbar needs its own vertical space below the
+        # content, it doesn't share the content's).
+        scrollbar_extent = QtWidgets.QApplication.style().pixelMetric(
+            get_qt_enum(QtWidgets.QStyle, "PixelMetric", "PM_ScrollBarExtent")
+        )
+        toolbar_scroll.setFixedHeight(toolbar.sizeHint().height() + scrollbar_extent)
+        layout.addWidget(toolbar_scroll)
 
         self._table = QtWidgets.QTableWidget()
         self._table.setColumnCount(len(HEADERS))
@@ -487,11 +539,25 @@ class IngestTableWidget(QtWidgets.QWidget):
         layout.addWidget(self._status_lbl)
 
     def _build_toolbar(self) -> QtWidgets.QWidget:
+        # Two rows, not one: at 1749px wide this toolbar is wider than even
+        # this tool's own default window (1280px) -- a single QHBoxLayout
+        # has no way to wrap, so anything past the visible edge used to be
+        # simply clipped and permanently unreachable. Splitting into an
+        # "edit the rows" row and a "resolve / act on the rows" row roughly
+        # halves the per-row width; _build_ui also wraps the whole thing in
+        # a horizontal QScrollArea as a hard guarantee for anything still
+        # too narrow for even one row.
         bar = QtWidgets.QFrame()
         bar.setStyleSheet("background:#1E293B; border-radius:4px; padding:2px;")
-        bar_layout = QtWidgets.QHBoxLayout(bar)
-        bar_layout.setContentsMargins(6, 4, 6, 4)
+        outer_layout = QtWidgets.QVBoxLayout(bar)
+        outer_layout.setContentsMargins(6, 4, 6, 4)
+        outer_layout.setSpacing(4)
+        bar_layout = QtWidgets.QHBoxLayout()
         bar_layout.setSpacing(6)
+        row2_layout = QtWidgets.QHBoxLayout()
+        row2_layout.setSpacing(6)
+        outer_layout.addLayout(bar_layout)
+        outer_layout.addLayout(row2_layout)
 
         # Template input
         self._tmpl_edit = QtWidgets.QLineEdit()
@@ -568,9 +634,9 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._undo_btn.setToolTip("Nothing to undo")
         self._undo_btn.clicked.connect(self._on_undo)
         bar_layout.addWidget(self._undo_btn)
+        bar_layout.addStretch(1)
 
-        bar_layout.addSpacing(10)
-
+        # ── Row 2: resolving / acting on rows ──
         # Resolving a version conflict (this exact version already exists on
         # the NAS with different content -- see the Status tooltip): take
         # the next free version instead, or accept the overwrite. Skipping
@@ -589,10 +655,10 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._override_btn.setToolTip("No version conflicts right now.")
         self._override_btn.clicked.connect(self._on_override_conflicts)
 
-        bar_layout.addWidget(self._version_up_btn)
-        bar_layout.addWidget(self._override_btn)
+        row2_layout.addWidget(self._version_up_btn)
+        row2_layout.addWidget(self._override_btn)
 
-        bar_layout.addSpacing(10)
+        row2_layout.addSpacing(10)
 
         discard_btn = QtWidgets.QPushButton("Discard Selected")
         discard_btn.setStyleSheet("background:#7F1D1D; color:white; padding:4px 8px;")
@@ -601,10 +667,10 @@ class IngestTableWidget(QtWidgets.QWidget):
         restore_btn = QtWidgets.QPushButton("Re-include Selected")
         restore_btn.clicked.connect(self._on_restore_selected)
 
-        bar_layout.addWidget(discard_btn)
-        bar_layout.addWidget(restore_btn)
+        row2_layout.addWidget(discard_btn)
+        row2_layout.addWidget(restore_btn)
 
-        bar_layout.addSpacing(10)
+        row2_layout.addSpacing(10)
 
         kitsu_btn = QtWidgets.QPushButton("Check in Kitsu")
         kitsu_btn.setToolTip(
@@ -616,14 +682,15 @@ class IngestTableWidget(QtWidgets.QWidget):
             "a row's Status for the finding."
         )
         kitsu_btn.clicked.connect(self.kitsu_conflict_check_requested.emit)
-        bar_layout.addWidget(kitsu_btn)
+        row2_layout.addWidget(kitsu_btn)
 
         self._ignore_kitsu_btn = QtWidgets.QPushButton("Ignore Kitsu Warning")
         self._ignore_kitsu_btn.setStyleSheet("background:#7C2D12; color:white; padding:4px 8px;")
         self._ignore_kitsu_btn.setEnabled(False)
         self._ignore_kitsu_btn.setToolTip("No unresolved Kitsu findings right now.")
         self._ignore_kitsu_btn.clicked.connect(self._on_ignore_kitsu_warning)
-        bar_layout.addWidget(self._ignore_kitsu_btn)
+        row2_layout.addWidget(self._ignore_kitsu_btn)
+        row2_layout.addStretch(1)
 
         return bar
 
@@ -719,11 +786,19 @@ class IngestTableWidget(QtWidgets.QWidget):
             )
             self._table.setCellWidget(row_idx, COL_VERSION, ver_combo)
 
-            # ── Status pill (Kitsu finding or version conflict, if any, in the tooltip) ──
+            # ── Status pill (check error, Kitsu finding, or version conflict, if any, in the tooltip) ──
             status_cell = self._mk_status_cell(status)
+            # Gated on the CURRENT status, not just presence in the dict --
+            # Undo can revert item_status back out of Check Failed without
+            # going through apply_version_results (the only place that pops
+            # item_check_error), which would otherwise leave a stale error
+            # message on a row that no longer shows Check Failed at all.
+            check_error = self.item_check_error.get(key) if status == STATUS_CHECK_FAILED else None
             issue = self.kitsu_issues.get(key)
             conflict_msg = self._version_conflict_message(item)
-            if issue and issue.get("message"):
+            if check_error:
+                status_cell.setToolTip(f"Could not check this against the NAS: {check_error}")
+            elif issue and issue.get("message"):
                 status_cell.setToolTip(issue["message"])
             elif conflict_msg:
                 status_cell.setToolTip(conflict_msg)
@@ -1053,6 +1128,7 @@ class IngestTableWidget(QtWidgets.QWidget):
                 "version_conflict": key in self.item_version_conflict,
                 "override": key in self.item_override,
                 "kitsu_acknowledged": key in self.kitsu_acknowledged,
+                "check_error": self.item_check_error.get(key),
             })
         return snaps
 
@@ -1114,6 +1190,10 @@ class IngestTableWidget(QtWidgets.QWidget):
                 self.kitsu_acknowledged.add(key)
             else:
                 self.kitsu_acknowledged.discard(key)
+            if snap["check_error"] is not None:
+                self.item_check_error[key] = snap["check_error"]
+            else:
+                self.item_check_error.pop(key, None)
         self._run_conflict_detection()
         self._refresh_table()
         self._set_undo_button_state()
@@ -1480,11 +1560,15 @@ class IngestTableWidget(QtWidgets.QWidget):
         conf    = statuses.count(STATUS_CONFLICT)
         missing = statuses.count(STATUS_MISSING_DETAILS)
         disc    = statuses.count(STATUS_DISCARDED)
-        self._status_lbl.setText(
+        failed  = statuses.count(STATUS_CHECK_FAILED)
+        text = (
             f"{total} items  |  {new} new  |  {vers} new version  |  {skip} skip  |  "
             f"{conf} conflict  |  {missing} missing details  |  {disc} discarded"
         )
-        if conf > 0:
+        if failed:
+            text += f"  |  {failed} check failed"
+        self._status_lbl.setText(text)
+        if failed > 0 or conf > 0:
             self._status_lbl.setStyleSheet("color:#EF4444; font-size:11px; font-weight:bold; padding:2px 4px;")
         elif missing > 0:
             self._status_lbl.setStyleSheet("color:#F59E0B; font-size:11px; font-weight:bold; padding:2px 4px;")

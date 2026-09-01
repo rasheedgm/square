@@ -104,10 +104,20 @@ class CreateProjectDialog(QtWidgets.QDialog):
 # ---------------------------------------------------------------------------
 
 class NASCheckWorker(QtCore.QThread):
-    """Background thread: check all items against NAS for version/duplicate status."""
+    """
+    Background thread: check all items against NAS for version/duplicate
+    status. check_all_media() already isolates a per-item failure (state
+    "error", won't take the rest of the batch down) -- the try/except here
+    is defense in depth for anything outside that (e.g. NASManager() itself,
+    or the NAS root not existing at all), so this thread ALWAYS emits
+    results_ready and is ALWAYS removable from the in-flight worker list.
+    Previously an unhandled exception here just killed the thread silently:
+    results_ready never fired, so every row in the batch stayed on
+    "Checking..." forever with nothing in the UI to say why.
+    """
 
     progress_signal = QtCore.Signal(int, int)      # done, total
-    results_ready   = QtCore.Signal(dict)           # {id(item): (ver, state, was_forced)}
+    results_ready   = QtCore.Signal(dict, dict)     # {id(item): (ver, state, was_forced)}, {id(item): error_message}
 
     def __init__(self, items, nas_root, proj_code, dry_run, forced_versions=None):
         super().__init__()
@@ -118,14 +128,30 @@ class NASCheckWorker(QtCore.QThread):
         self.forced_versions = forced_versions or {}
 
     def run(self):
-        nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
-        results = nas.check_all_media(
-            self.items,
-            self.proj_code,
-            progress_callback=lambda done, total: self.progress_signal.emit(done, total),
-            forced_versions=self.forced_versions,
-        )
-        self.results_ready.emit(results)
+        try:
+            nas = NASManager(nas_root=self.nas_root, dry_run=self.dry_run)
+            errors = {}
+            results = nas.check_all_media(
+                self.items,
+                self.proj_code,
+                progress_callback=lambda done, total: self.progress_signal.emit(done, total),
+                forced_versions=self.forced_versions,
+                errors=errors,
+            )
+            self.results_ready.emit(results, errors)
+        except Exception as e:
+            logger.error(f"[NASCheckWorker] {e}", exc_info=True)
+            # Every item gets an actual "error" result, not just an entry in
+            # errors -- apply_version_results only changes a row's displayed
+            # status for keys present in `results`, so without this every
+            # row would stay on "Checking..." forever even though the
+            # worker itself is now correctly cleaned up.
+            forced = self.forced_versions
+            results = {
+                id(item): (forced.get(id(item), 1), "error", id(item) in forced)
+                for item in self.items
+            }
+            self.results_ready.emit(results, {id(item): str(e) for item in self.items})
 
 
 class KitsuCheckWorker(QtCore.QThread):
@@ -781,7 +807,7 @@ class MainWindow(QtWidgets.QMainWindow):
         worker.progress_signal.connect(
             lambda done, tot, w=worker: self._on_nas_check_progress(w, done, tot)
         )
-        worker.results_ready.connect(lambda results, w=worker: self._on_nas_check_done(results, w))
+        worker.results_ready.connect(lambda results, errors, w=worker: self._on_nas_check_done(results, errors, w))
         worker.start()
 
     def _on_nas_check_progress(self, worker, done, total):
@@ -884,7 +910,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._check_bar.setMaximum(100)
         QtWidgets.QMessageBox.critical(self, "Check in Kitsu", f"Kitsu check failed:\n\n{message}")
 
-    def _on_nas_check_done(self, results, worker):
+    def _on_nas_check_done(self, results, errors, worker):
         self._nas_check_progress.pop(id(worker), None)
         if worker in self._nas_check_workers:
             self._nas_check_workers.remove(worker)
@@ -892,8 +918,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_check_bar()
         else:
             self._check_bar.setVisible(False)
-        self.table_widget.apply_version_results(results)
+        self.table_widget.apply_version_results(results, errors=errors)
         self._update_conflict_badge()
+        if errors:
+            detail = "\n".join(f"- {msg}" for msg in list(errors.values())[:5])
+            if len(errors) > 5:
+                detail += f"\n... and {len(errors) - 5} more"
+            QtWidgets.QMessageBox.warning(
+                self, "NAS Check",
+                f"{len(errors)} row(s) could not be checked against the NAS -- hover a row's "
+                f"Status for its own message, or see the log for the full detail:\n\n{detail}"
+            )
 
     def _update_conflict_badge(self):
         has_conflicts = self.table_widget.has_unresolved_conflicts()

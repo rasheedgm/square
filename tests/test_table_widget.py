@@ -3,7 +3,7 @@ from Qt import QtWidgets
 
 from tools.ingest_tool.widgets.table_widget import (
     IngestTableWidget, STATUS_CONFLICT, STATUS_NEW, STATUS_DISCARDED,
-    STATUS_CHECKING, STATUS_ALREADY, COL_PROGRESS, COL_VERSION, COL_SHOT, COL_STATUS,
+    STATUS_CHECKING, STATUS_ALREADY, STATUS_CHECK_FAILED, COL_PROGRESS, COL_VERSION, COL_SHOT, COL_STATUS,
     STAGE_QUEUED, STAGE_COPYING, STAGE_DONE, ROW_HEIGHT,
 )
 from square_core.plate_scanner import IngestSequenceItem
@@ -1170,6 +1170,111 @@ class TestAlreadyIngestedOverride(unittest.TestCase):
         self.assertNotEqual(self.table._effective_status(b), STATUS_ALREADY)
 
 
+class TestNASCheckFailure(unittest.TestCase):
+    """
+    apply_version_results()'s state "error" -- a row whose NAS check raised
+    a real exception (permission error, unreadable path, ...) instead of
+    resolving to new/already/conflict. Previously nothing produced this
+    state at all: an unhandled exception anywhere in the check chain just
+    killed the background thread silently, leaving the row on "Checking..."
+    forever with no error shown. Held out of ingest like a conflict, with
+    the real message on the tooltip.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def test_error_state_sets_check_failed_and_holds_the_row_out(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+
+        self.table.apply_version_results(
+            {id(a): (1, "error", False)},
+            errors={id(a): "PermissionError: [Errno 13] Permission denied: '/nas/SQ010'"},
+        )
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECK_FAILED)
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("Permission denied", tip)
+
+    def test_only_the_failed_item_is_affected_in_a_mixed_batch(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        b = _make_item("b", "SQ020", "SH0200", "Plate", "FG", "/tmp/b.mov")
+        self.table.populate_table([a, b])
+
+        self.table.apply_version_results(
+            {id(a): (1, "error", False), id(b): (1, "new", False)},
+            errors={id(a): "boom"},
+        )
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECK_FAILED)
+        self.assertEqual(self.table._effective_status(b), STATUS_NEW)
+        self.assertEqual(self.table.get_valid_ingest_items(), [(b, 1)])
+
+    def test_missing_errors_entry_falls_back_to_a_generic_message(self):
+        # NASCheckWorker's own outer try/except (defense in depth, for
+        # something outside check_all_media entirely) reports every item in
+        # the batch as failed with one shared message -- but even without
+        # errors even being passed at all, the row must still say SOMETHING
+        # rather than showing a blank tooltip on a Check Failed pill.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+
+        self.table.apply_version_results({id(a): (1, "error", False)})
+
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECK_FAILED)
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertTrue(tip)
+
+    def test_a_later_successful_check_clears_it(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, "error", False)}, errors={id(a): "boom"})
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECK_FAILED)
+
+        self.table.apply_version_results({id(a): (1, "new", False)})
+
+        self.assertEqual(self.table._effective_status(a), STATUS_NEW)
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 1)])
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertNotIn("boom", tip)
+
+    def test_undo_past_a_failed_recheck_clears_the_stale_tooltip(self):
+        # Set Version pushes an undo snapshot of whatever the row was BEFORE
+        # the pick, then goes to Checking pending a targeted re-check. If
+        # that re-check comes back "error" and the user then clicks Undo,
+        # item_status correctly reverts (generic per-item snapshot/restore)
+        # -- but item_check_error is only ever POPPED by a later successful
+        # apply_version_results call, never by _on_undo directly, so without
+        # the tooltip being gated on the CURRENT status too, a stale error
+        # message could keep showing on a row that no longer displays
+        # Check Failed at all.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, "new", False)})
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(3)
+        self.table._on_batch_set_version()   # pushes undo w/ status="New"
+        self.table.apply_version_results({id(a): (3, "error", True)}, errors={id(a): "boom"})
+        self.assertEqual(self.table._effective_status(a), STATUS_CHECK_FAILED)
+
+        self.table._on_undo()
+
+        self.assertEqual(self.table._effective_status(a), STATUS_NEW)
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertNotIn("boom", tip)
+
+    def test_status_bar_counts_check_failed_rows(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, "error", False)}, errors={id(a): "boom"})
+        self.assertIn("1 check failed", self.table._status_lbl.text())
+
+
 class TestConflictActionButtonState(unittest.TestCase):
     """
     Screenshot report: Version Up and Override sat there enabled (Override
@@ -1304,6 +1409,48 @@ class TestRowHeight(unittest.TestCase):
         heights = {self.table._table.rowHeight(r) for r in range(4)}
         self.assertEqual(len(heights), 1)
         self.assertEqual(self.table._table.verticalHeader().defaultSectionSize(), ROW_HEIGHT)
+
+
+class TestToolbarFitsDefaultWindow(unittest.TestCase):
+    """
+    Screenshot report: on a narrower window, the right-most toolbar buttons
+    (Check in Kitsu, Ignore Kitsu Warning, ...) were cropped clean off the
+    edge with no way to reach them at all -- a single QHBoxLayout has no
+    wrap. Root cause was worse than just "narrow window": the toolbar's
+    natural width (1749px at the time) exceeded even this tool's OWN
+    default window (MainWindow.resize(1280, 780) in ui_main.py), so it was
+    already scrolled/clipped out of the box before any window resizing.
+    Fixed by splitting the toolbar into two rows; _build_ui also wraps it
+    in a horizontal QScrollArea as a hard guarantee for anything still too
+    narrow for one row. This test pins the width budget so a future button
+    added to one row can't silently blow past the default window again
+    without a test failure calling it out.
+    """
+
+    MAIN_WINDOW_DEFAULT_WIDTH = 1280
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+
+    def test_toolbar_width_fits_the_apps_own_default_window(self):
+        toolbar = self.table._build_toolbar()
+        self.assertLess(toolbar.sizeHint().width(), self.MAIN_WINDOW_DEFAULT_WIDTH - 100)
+
+    def test_every_toolbar_button_is_still_present_and_wired(self):
+        # The 2-row restructuring only moves *which* layout each widget was
+        # added to -- every button reference the rest of the class relies
+        # on must still exist and still be a real child of the toolbar.
+        for attr in ("_version_up_btn", "_override_btn", "_undo_btn", "_ignore_kitsu_btn"):
+            btn = getattr(self.table, attr)
+            self.assertIsInstance(btn, QtWidgets.QPushButton)
+        labels = {b.text() for b in self.table.findChildren(QtWidgets.QPushButton)}
+        for expected in (
+            "Apply Rename", "ALL CAPS", "lowercase", "Set Version", "Undo",
+            "Version Up", "Override", "Discard Selected", "Re-include Selected",
+            "Check in Kitsu", "Ignore Kitsu Warning",
+        ):
+            self.assertIn(expected, labels)
 
 
 if __name__ == "__main__":

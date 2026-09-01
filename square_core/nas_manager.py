@@ -335,7 +335,7 @@ class NASManager:
         logger.info(f"[NASManager] Transferred {len(copied_files)} files to {dest_dir} (mode={self.transfer_mode}, workers={workers})")
         return copied_files
 
-    def check_all_media(self, items, proj_code, progress_callback=None, forced_versions=None):
+    def check_all_media(self, items, proj_code, progress_callback=None, forced_versions=None, errors=None):
         """
         Check version / duplicate status for all items in parallel.
 
@@ -347,10 +347,25 @@ class NASManager:
         user's choice.
 
         Returns dict: id(item) -> (version_num, state, was_forced) where
-        state is "new" / "already" / "conflict". Only a forced check can
-        ever come back "conflict" -- the auto path always resolves to
-        either the exact existing content ("already") or a guaranteed-empty
-        next slot ("new").
+        state is "new" / "already" / "conflict" / "error". Only a forced
+        check can ever come back "conflict" -- the auto path always
+        resolves to either the exact existing content ("already") or a
+        guaranteed-empty next slot ("new").
+
+        A real-world NAS throws things synthetic test data never does --
+        a permission error, a path with characters os.path chokes on, a
+        disconnected mount raising mid-scan. That used to be fatal for the
+        WHOLE batch: future.result() re-raised inside the as_completed loop
+        with nothing catching it, so one bad item's exception propagated
+        out of check_all_media entirely, discarding every other item's
+        already-computed result -- the entire batch stayed on "Checking..."
+        forever with no error surfaced anywhere. Now a per-item exception
+        is caught, logged, and reported as state "error" for just that one
+        item (held out of ingest same as a conflict); every other item in
+        the batch still resolves normally. `errors`, when passed a dict, is
+        updated with {id(item): str(exception)} for each one so a caller
+        that wants the real message (not just the fact that it failed) can
+        show it.
         """
         forced_versions = forced_versions or {}
         results = {}
@@ -369,17 +384,24 @@ class NASManager:
                 # "new" always means the same thing regardless of which path
                 # produced it, rather than having two spellings for it.
                 state = "new" if slot_state == "empty" else slot_state
-                return item, (v, state, True)
+                return v, state, True
             ver, already = self.get_media_version_info(
                 proj_code, item.sequence_code, item.shot_code, mname, item=item
             )
-            return item, (ver, "already" if already else "new", False)
+            return ver, ("already" if already else "new"), False
 
         with ThreadPoolExecutor(max_workers=min(self.workers, total or 1)) as pool:
             futures = {pool.submit(_check, item): item for item in items}
             done = 0
             for future in as_completed(futures):
-                item, (ver, state, forced) = future.result()
+                item = futures[future]
+                try:
+                    ver, state, forced = future.result()
+                except Exception as e:
+                    logger.error(f"[NASManager] Check failed for '{item.name}': {e}", exc_info=True)
+                    if errors is not None:
+                        errors[id(item)] = str(e)
+                    ver, state, forced = forced_versions.get(id(item), 1), "error", id(item) in forced_versions
                 results[id(item)] = (ver, state, forced)
                 done += 1
                 if progress_callback:

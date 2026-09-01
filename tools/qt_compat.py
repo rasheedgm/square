@@ -51,3 +51,4 @@ CURSOR_POINTING_HAND     = get_qt_enum(QtCore.Qt, "CursorShape", "PointingHandCu
 PEN_STYLE_NO_PEN         = get_qt_enum(QtCore.Qt, "PenStyle", "NoPen")
 SELECTION_SELECT         = get_qt_enum(QtCore.QItemSelectionModel, "SelectionFlag", "Select")
 SELECTION_ROWS           = get_qt_enum(QtCore.QItemSelectionModel, "SelectionFlag", "Rows")
+FRAME_NO_FRAME           = get_qt_enum(QtWidgets.QFrame, "Shape", "NoFrame")

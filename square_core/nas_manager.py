@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import shutil
 import hashlib
 import logging
@@ -39,18 +40,20 @@ class NASManager:
         self.transfer_mode = transfer_mode if transfer_mode in VALID_TRANSFER_MODES else "copy"
         self.workers = workers if workers and workers > 0 else DEFAULT_COPY_WORKERS
 
+    @staticmethod
+    def _fallback_hasher():
+        """The hasher used when no shared FileHasher is supplied. Whatever this
+        returns, calculate_checksum() and _copy_and_hash() MUST agree on it or
+        a fresh copy fails its own verify."""
+        return xxhash.xxh3_64() if HAS_XXHASH else hashlib.md5()
+
     def calculate_checksum(self, filepath):
-        """Calculates xxHash (fast) or MD5 for a file."""
+        """Content hash of a file (xxh3_64, or MD5 without xxhash)."""
         if not os.path.exists(filepath):
             return ""
-
-        if HAS_XXHASH:
-            hasher = xxhash.xxh64()
-        else:
-            hasher = hashlib.md5()
-
+        hasher = self._fallback_hasher()
         with open(filepath, "rb") as f:
-            while chunk := f.read(65536):
+            while chunk := f.read(1 << 20):
                 hasher.update(chunk)
         return hasher.hexdigest()
 
@@ -166,6 +169,75 @@ class NASManager:
                                       version=version_num, media_type=media_type, resolution=resolution)
         return self._inspect_version_slot(dest_dir, item, version_num, project_code, filename_template)
 
+    # ------------------------------------------------------------------
+    # Rework API -- explicit, hasher-injected, item-shape-agnostic.
+    # The controller drives version selection itself; these just answer
+    # "what would this file be named" and "what's in that slot".
+    # ------------------------------------------------------------------
+
+    def dest_names(self, item, version_num, proj_code, filename_template=None) -> dict:
+        """{source_path: final basename} for every file of `item`."""
+        tmpl = filename_template or DEFAULT_FILE_NAME_TEMPLATE
+        return {
+            f: self._render_target_filename(item, f, tmpl, version_num, proj_code)
+            for f in (getattr(item, "files", None) or getattr(item, "source_files", []))
+        }
+
+    def inspect_slot(self, dest_dir, item, version_num, proj_code,
+                     filename_template=None, hasher=None):
+        """
+        Classify one version folder against `item`'s source files by CONTENT
+        HASH (names are rewritten on copy, so a name compare is meaningless).
+
+        Returns (state, detail) where state is "empty" / "already" /
+        "conflict". When `hasher` (a hashing.FileHasher) is given, both
+        source and destination hashes come from it -- computed once, shared
+        with the ledger and the post-copy verify.
+        """
+        dest_dir = Path(dest_dir)
+        if not dest_dir.exists():
+            return "empty", ""
+        existing = [f for f in dest_dir.rglob("*") if f.is_file()]
+        if not existing:
+            return "empty", ""
+
+        src_files = list(getattr(item, "files", None) or getattr(item, "source_files", []))
+        vlabel = f"v{int(version_num):03d}"
+        if not src_files or len(existing) != len(src_files):
+            return "conflict", (
+                f"{vlabel} already exists with {len(existing)} file(s); "
+                f"this delivery has {len(src_files)}."
+            )
+
+        def _h(p):
+            return hasher.hash_file(str(p)) if hasher is not None else self.calculate_checksum(str(p))
+
+        by_name = {f.name: f for f in existing}
+        names = self.dest_names(item, version_num, proj_code, filename_template)
+        for src in src_files:
+            expected = names[src]
+            match = by_name.get(expected)
+            if match is None:
+                return "conflict", f"{vlabel} exists but does not contain '{expected}'."
+            if _h(src) != _h(match):
+                return "conflict", f"{vlabel} exists with different content ('{expected}' differs)."
+        return "already", f"{vlabel} already holds this exact content."
+
+    def next_free_version(self, item, proj_code, filename_template=None, start=1, dir_template=None):
+        """Lowest version number whose destination folder is empty/absent."""
+        v = max(1, int(start))
+        while v <= 9999:
+            d = self.get_dest_dir(
+                proj_code, item.sequence_code, item.shot_code, item.media_name,
+                version=v, media_type=getattr(item, "media_type", "") or "",
+                resolution=getattr(item, "resolution", "1920x1080") or "1920x1080",
+                dir_template=dir_template,
+            )
+            if not d.exists() or not any(p.is_file() for p in d.rglob("*")):
+                return v
+            v += 1
+        return v
+
     def get_dest_dir(self, project_code, sequence_code, shot_code, media_name, version=1, media_type="", resolution="1920x1080", dir_template=None):
         """
         Builds standardized NAS destination folder path based on per-media-type config template.
@@ -241,19 +313,71 @@ class NASManager:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _transfer_one_file(self, src_file: Path, dest_file: Path):
-        """
-        Transfers a single file using self.transfer_mode, with a safe
-        cascading fallback: symlink -> hardlink -> full copy. A hardlink
-        can't cross filesystems/volumes and a symlink can fail on Windows
-        without the right privilege -- either failure just drops to the
-        next safer mode rather than aborting the whole ingest, and always
-        logs what actually happened so it's never silent.
+    _COPY_CHUNK = 4 * 1024 * 1024   # 4 MiB
 
-        Returns the transfer mode that was actually used ("symlink" /
-        "hardlink" / "copy"). Checksum verification only applies to real
-        copies -- a hardlink/symlink's "destination" IS the same
-        underlying file, so hashing it again would be redundant.
+    def _copy_and_hash(self, src_file: Path, dest_file: Path, hasher=None):
+        """
+        Byte-copy src -> dest and return the destination's content hash,
+        computed FROM THE BYTES AS THEY ARE WRITTEN -- no separate re-read of
+        either file. The digest matches FileHasher's (same algo) so the
+        caller can compare it against the source hash it already has from
+        pre-flight.
+
+        On Windows a native CopyFileExW does the data move (markedly faster
+        than a Python buffer loop for large files), then the destination is
+        hashed once. Elsewhere the stream loop hashes for free while copying.
+        """
+        raw = hasher.new_raw() if hasher is not None else self._fallback_hasher()
+
+        native = sys.platform == "win32" and self._win_copyfile(src_file, dest_file)
+        if native:
+            with open(dest_file, "rb") as fh:
+                while True:
+                    chunk = fh.read(self._COPY_CHUNK)
+                    if not chunk:
+                        break
+                    raw.update(chunk)
+        else:
+            with open(src_file, "rb") as fin, open(dest_file, "wb") as fout:
+                while True:
+                    chunk = fin.read(self._COPY_CHUNK)
+                    if not chunk:
+                        break
+                    fout.write(chunk)
+                    raw.update(chunk)
+        shutil.copystat(src_file, dest_file)
+        return raw.hexdigest()
+
+    @staticmethod
+    def _win_copyfile(src_file: Path, dest_file: Path) -> bool:
+        """Win32 CopyFileExW for the raw data move. Returns True on success, False to fall back."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            CopyFileExW = ctypes.windll.kernel32.CopyFileExW
+            CopyFileExW.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_void_p,
+                ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL), wintypes.DWORD,
+            ]
+            CopyFileExW.restype = wintypes.BOOL
+            ok = CopyFileExW(str(src_file), str(dest_file), None, None, None, 0)
+            return bool(ok)
+        except Exception as e:   # pragma: no cover - platform/edge dependent
+            logger.debug("[NASManager] CopyFileExW unavailable (%s); using stream copy", e)
+            return False
+
+    def _transfer_one_file(self, src_file: Path, dest_file: Path, hasher=None, expected_hash=None):
+        """
+        Transfer one file per self.transfer_mode, with a safe cascading
+        fallback symlink -> hardlink -> copy (a hardlink can't cross volumes;
+        a Windows symlink may lack privilege).
+
+        For a real copy the destination hash is computed while writing and
+        compared to `expected_hash` (the source hash from pre-flight) so a
+        corrupt/truncated transfer is still caught without re-reading the
+        source. symlink/hardlink share the same inode -- nothing to verify.
+
+        Returns the mode actually used ("symlink" / "hardlink" / "copy").
         """
         mode = self.transfer_mode
 
@@ -276,24 +400,36 @@ class NASManager:
             except OSError as e:
                 logger.warning(f"[NASManager] hardlink failed for {dest_file.name} ({e}); falling back to full copy")
 
-        shutil.copy2(src_file, dest_file)
-        src_hash = self.calculate_checksum(src_file)
-        dest_hash = self.calculate_checksum(dest_file)
-        if src_hash and dest_hash and src_hash != dest_hash:
-            raise IOError(f"Checksum mismatch for file {dest_file.name}! Src: {src_hash}, Dest: {dest_hash}")
+        dest_hash = self._copy_and_hash(Path(src_file), Path(dest_file), hasher=hasher)
+        expected = expected_hash or (
+            hasher.hash_file(str(src_file)) if hasher is not None else self.calculate_checksum(src_file)
+        )
+        if expected and dest_hash and expected != dest_hash:
+            raise IOError(
+                f"Checksum mismatch for {dest_file.name}! source={expected} dest={dest_hash}"
+            )
         return "copy"
 
-    def copy_sequence(self, item, dest_dir, filename_template=None, version_num=1, proj_code="PROJ", progress_callback=None):
+    def copy_sequence(self, item, dest_dir, filename_template=None, version_num=1,
+                      proj_code="PROJ", progress_callback=None,
+                      pool=None, hasher=None, source_hashes=None):
         """
-        Transfers sequence files to dest_dir (renaming per the filename
-        template) using self.transfer_mode. Files are transferred in
-        parallel across self.workers threads -- a single sequence's own
-        frames, not just separate sequences, since that's the common case
-        that actually needs to be faster (one shot with hundreds of
-        frames, not hundreds of one-frame shots).
+        Transfer a sequence's files to dest_dir, renamed per the filename
+        template, using self.transfer_mode.
+
+        pool           -- a shared ThreadPoolExecutor for the frame transfers.
+                          When the controller passes one, EVERY sequence being
+                          ingested draws from the same pool, so total
+                          concurrent file transfers stay capped at the pool
+                          size instead of (items x frames). Falls back to a
+                          local pool when not given.
+        hasher         -- the shared FileHasher; lets the copy verify reuse
+                          pre-flight source hashes instead of re-reading.
+        source_hashes  -- {src_path: hash} already computed at pre-flight.
         """
         tmpl = filename_template or DEFAULT_FILE_NAME_TEMPLATE
         total_files = len(item.files)
+        source_hashes = source_hashes or {}
 
         def _target_name(src_file):
             return self._render_target_filename(item, src_file, tmpl, version_num, proj_code)
@@ -303,8 +439,7 @@ class NASManager:
             copied_files = []
             for idx, src_file in enumerate(item.files):
                 target_name = _target_name(src_file)
-                dest_file = dest_dir / target_name
-                copied_files.append(str(dest_file))
+                copied_files.append(str(dest_dir / target_name))
                 if progress_callback:
                     progress_callback(idx + 1, total_files, target_name)
             return copied_files
@@ -318,21 +453,31 @@ class NASManager:
         def _do_transfer(idx, src_file):
             target_name = _target_name(src_file)
             dest_file = dest_dir / target_name
-            mode_used = self._transfer_one_file(Path(src_file), dest_file)
+            mode_used = self._transfer_one_file(
+                Path(src_file), dest_file, hasher=hasher,
+                expected_hash=source_hashes.get(src_file),
+            )
             return idx, str(dest_file), target_name, mode_used
 
-        workers = max(1, min(self.workers, total_files))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = [pool.submit(_do_transfer, idx, f) for idx, f in enumerate(item.files)]
+        def _drain(pl):
+            nonlocal done_count
+            futures = [pl.submit(_do_transfer, idx, f) for idx, f in enumerate(item.files)]
             for future in as_completed(futures):
-                idx, dest_path, target_name, mode_used = future.result()
+                idx, dest_path, target_name, _mode = future.result()
                 copied_files[idx] = dest_path
                 with progress_lock:
                     done_count += 1
                     if progress_callback:
                         progress_callback(done_count, total_files, target_name)
 
-        logger.info(f"[NASManager] Transferred {len(copied_files)} files to {dest_dir} (mode={self.transfer_mode}, workers={workers})")
+        if pool is not None:
+            _drain(pool)
+        else:
+            workers = max(1, min(self.workers, total_files))
+            with ThreadPoolExecutor(max_workers=workers) as local_pool:
+                _drain(local_pool)
+
+        logger.info(f"[NASManager] Transferred {len(copied_files)} files to {dest_dir} (mode={self.transfer_mode})")
         return copied_files
 
     def check_all_media(self, items, proj_code, progress_callback=None, forced_versions=None, errors=None):

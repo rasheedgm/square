@@ -349,6 +349,43 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._refresh_item_colours()
 
     # ------------------------------------------------------------------
+    # Session state (delivery root + Path Patterns)
+    # ------------------------------------------------------------------
+
+    def current_patterns(self) -> list:
+        """The delivery's Path Patterns as serializable dicts (for the session file)."""
+        if not self._mapper:
+            return []
+        return [p.to_dict() if hasattr(p, "to_dict") else dict(p)
+                for p in self._mapper.get_path_patterns()]
+
+    def current_media_types(self) -> dict:
+        """Manual per-item media-type overrides {path: type} (for the session file)."""
+        return self._mapper.get_media_types() if self._mapper else {}
+
+    def active_preset(self) -> str:
+        return getattr(self.config, "active_ingest_preset", "") or ""
+
+    def restore(self, path: str, patterns=None, media_types=None, preset: str = "") -> None:
+        """
+        Reopen a delivery from a resumed session: load the folder and
+        re-apply its Path Patterns + manual media-type tags. No hidden
+        sidecar is read -- the session file is the only source.
+        """
+        if not path or not os.path.isdir(path):
+            return
+        self.load_path(path)
+        if self._mapper:
+            if patterns:
+                self._mapper.set_path_patterns(patterns)
+            if media_types:
+                self._mapper.set_media_types(media_types)
+        if preset:
+            self.config.active_ingest_preset = preset
+            self._refresh_preset_combo()
+        self._refresh_item_colours()
+
+    # ------------------------------------------------------------------
     # Drag & Drop
     # ------------------------------------------------------------------
 
@@ -561,7 +598,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
         data = self.config.ingest_presets[preset_name]
         self._mapper.set_path_patterns(data.get("patterns", []))
-        self._mapper.save()
         self.config.active_ingest_preset = preset_name
         self.config.save()
 
@@ -635,7 +671,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         """Clears the manual media-type tag for this specific item."""
         if self._mapper:
             self._mapper.set_media_type(path, None)
-            self._mapper.save()
         self._refresh_item_colours()
 
     def _open_path_pattern_builder(self, path: Path, kind: str):
@@ -653,7 +688,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
                 self._mapper.update_path_pattern(dlg.result_replace_index, dlg.result_pattern)
             else:
                 self._mapper.add_path_pattern(dlg.result_pattern)
-            self._mapper.save()
             self._refresh_item_colours()
 
     def _on_manage_patterns(self):
@@ -668,7 +702,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         """Assign or clear a manual media type label on a media tree item."""
         if self._mapper:
             self._mapper.set_media_type(path, type_name)
-            self._mapper.save()
         item.setData(0, ROLE_MEDIA_TYPE, type_name)
         # Amber = labelled, muted blue = unlabelled
         clr = "#FBBF24" if type_name else "#5B7AA8"

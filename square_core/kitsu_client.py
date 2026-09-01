@@ -317,11 +317,14 @@ class KitsuClient:
         """
         {SHOT NAME -> {sequence names it exists under}} for one project.
 
-        One request where gazu supports it; shot dicts from
-        all_shots_for_project carry sequence_name, but older servers omit it,
-        so a missing name is resolved through the project's sequence list
-        rather than dropping the shot out of the index (which would have made
-        a real shot read as "will be created").
+        The project shot listing does NOT reliably carry the sequence link in
+        a single field: on the Zou we test against, every shot comes back
+        with sequence_id == None and sequence_name == None, and the parent
+        sequence is in `parent_id` instead. So the sequence name is resolved
+        through the project's sequence list, keyed by whichever of
+        sequence_id / parent_id is actually populated -- without the
+        parent_id fallback every existing shot indexed under sequence "",
+        making every real shot read as a wrong-sequence conflict.
         """
         shots = self.gazu.shot.all_shots_for_project(project) or []
 
@@ -335,7 +338,8 @@ class KitsuClient:
             name = (shot.get("name") or "").strip()
             if not name:
                 continue
-            seq_name = shot.get("sequence_name") or seq_names.get(shot.get("sequence_id"), "")
+            seq_id = shot.get("sequence_id") or shot.get("parent_id")
+            seq_name = shot.get("sequence_name") or seq_names.get(seq_id, "")
             index.setdefault(name.upper(), set()).add((seq_name or "").strip().upper())
         return index
 
@@ -666,13 +670,26 @@ class KitsuClient:
         logger.info(f"[Mock Kitsu] Uploaded preview proxy '{preview_file_path}'")
         return {"id": str(uuid.uuid4()), "task_id": task_arg.get("id"), "path": preview_file_path}
 
+    # Keys we write into the preview file's free-form `data` blob. Kept as a
+    # namespaced sub-dict (data["square_ingest"]) so it can never collide with
+    # the media metadata Zou itself writes there on upload (original_width,
+    # original_height, original_duration, ...).
+    PREVIEW_METADATA_KEY = "square_ingest"
+
     def attach_preview_source_metadata(self, preview_file, source_info: dict):
         """
         Stamps `source_info` (NAS path, a real sample filename, frame range,
-        checksum, ...) directly onto the preview file's OWN record via
-        gazu.files.update_preview.
+        checksum, ...) onto the preview file's OWN record.
 
-        The reason this lives on the preview file rather than in our own
+        Zou's preview-file model has no columns for any of these fields and
+        silently drops unknown top-level keys on PUT -- update_preview({"nas_path":
+        ...}) returns 200 and stores nothing. The one writable free-form field
+        is `data` (JSONB), which Zou also uses for the media dimensions it
+        extracts on upload. So the source info goes into
+        data["square_ingest"], merged on top of whatever `data` already holds
+        rather than replacing it.
+
+        The reason this lives on the preview file rather than only in our own
         shot-data ledger (record_version): a review or delivery tool that
         queries Kitsu "task X, revision N" -- which is how a preview file is
         addressed; Kitsu's revision numbering belongs to the preview file,
@@ -690,9 +707,19 @@ class KitsuClient:
                         f"[Mock Kitsu] Skipping live preview-metadata update for non-UUID preview ID '{preview_id}'"
                     )
                 else:
-                    return self.gazu.files.update_preview(preview_arg, source_info)
+                    existing_data = {}
+                    try:
+                        current = self.gazu.files.get_preview_file(preview_id) or {}
+                        existing_data = dict(current.get("data") or {})
+                    except Exception as ex:
+                        logger.warning(f"[Kitsu Live] Could not read preview file before update: {ex}")
+                        existing_data = dict(preview_arg.get("data") or {})
+                    existing_data[self.PREVIEW_METADATA_KEY] = source_info
+                    return self.gazu.files.update_preview(preview_arg, {"data": existing_data})
             except Exception as e:
                 logger.error(f"[Kitsu Live Error] Failed to attach source metadata to preview: {e}")
 
         logger.info(f"[Mock Kitsu] Attached source metadata to preview {preview_id}")
-        return {**preview_arg, **source_info}
+        merged_data = dict(preview_arg.get("data") or {})
+        merged_data[self.PREVIEW_METADATA_KEY] = source_info
+        return {**preview_arg, "data": merged_data}

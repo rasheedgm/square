@@ -16,6 +16,13 @@ import os
 # developer running with a real display for visual debugging).
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# Pin the Qt binding for tests to the one the shipped tool runs on. Both
+# PySide6 and PyQt6 are installed here and Qt.py would pick PySide6 anyway,
+# but making it explicit means a machine with only PyQt6 can't silently
+# pass tests on a binding real users never hit -- which is exactly how the
+# id()-keyed-dict signal bug slipped through before.
+os.environ.setdefault("QT_PREFERRED_BINDING", "PySide6")
+
 from Qt import QtWidgets  # noqa: E402
 
 _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

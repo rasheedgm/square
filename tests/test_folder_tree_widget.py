@@ -1,3 +1,4 @@
+import os
 import shutil
 import tempfile
 import unittest
@@ -7,6 +8,39 @@ from Qt import QtWidgets
 
 from square_core.path_pattern import PathPattern
 from tools.ingest_tool.widgets.folder_tree_widget import FolderTreeWidget
+
+
+class TestSessionRestore(unittest.TestCase):
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "SQ010" / "SH0100").mkdir(parents=True)
+        for fr in range(1001, 1004):
+            (self.tmp / "SQ010" / "SH0100" / f"plate.{fr}.exr").write_text("x")
+
+    def test_current_patterns_are_serializable_dicts(self):
+        tree = FolderTreeWidget()
+        tree.load_path(str(self.tmp))
+        tree._mapper.set_path_patterns(["<sequence>/<shot>/####.<extension>"])
+        pats = tree.current_patterns()
+        self.assertEqual(len(pats), 1)
+        self.assertIsInstance(pats[0], dict)
+        self.assertIn("template", pats[0])
+
+    def test_restore_reopens_folder_and_reapplies_patterns(self):
+        tree = FolderTreeWidget()
+        tree.restore(str(self.tmp),
+                     patterns=[{"name": "p", "template": "<sequence>/<shot>/####.<extension>"}])
+        self.assertEqual(tree.root_path, str(self.tmp))
+        self.assertEqual(len(tree._mapper.get_path_patterns()), 1)
+        # tree actually populated
+        self.assertGreater(tree._tree.topLevelItemCount(), 0)
+
+    def test_restore_ignores_a_missing_folder(self):
+        tree = FolderTreeWidget()
+        tree.restore(str(self.tmp / "gone"), patterns=[])
+        self.assertIsNone(tree.root_path)
 
 
 class TestSingleSequenceSelection(unittest.TestCase):

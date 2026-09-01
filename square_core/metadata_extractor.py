@@ -29,6 +29,34 @@ class MetadataExtractor:
     given file, is skipped silently and falls through to the next.
     """
 
+    # Fields probe() may report. Anything not in the returned dict was NOT
+    # read from the file and must not be treated as known.
+    PROBE_FIELDS = ("width", "height", "resolution", "fps", "colorspace", "timecode")
+
+    @staticmethod
+    def probe(filepath):
+        """
+        Like extract_metadata(), but returns ONLY the fields a backend
+        actually read from the file -- no DEFAULT_METADATA fill-in -- plus
+        the backend name.
+
+        Returns (found: dict, backend: str | None). Lets a caller tell a
+        real "ACEScg" header read apart from the ACEScg fallback, so an
+        unread colorspace can be surfaced for the user to set rather than
+        silently shipped.
+        """
+        if not os.path.exists(filepath):
+            return {}, None
+        for name, fn in (
+            ("oiio", MetadataExtractor._extract_with_oiio),
+            ("pillow", MetadataExtractor._extract_with_pillow),
+            ("video", MetadataExtractor._extract_video_metadata),
+        ):
+            got = fn(filepath)
+            if got:
+                return {k: v for k, v in got.items() if k in MetadataExtractor.PROBE_FIELDS}, name
+        return {}, None
+
     @staticmethod
     def extract_metadata(filepath):
         """Inspects a single image or video file and returns a metadata dict."""

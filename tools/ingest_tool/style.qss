@@ -110,6 +110,15 @@ QTableWidget::item:hover {
     background-color: #1A2540;
 }
 
+/* In-cell editors must fit the row, not the app-wide input sizing below. */
+QTableWidget QLineEdit, QTableWidget QComboBox, QTableWidget QAbstractSpinBox {
+    min-height: 0;
+    padding: 0 4px;
+    border-radius: 0;
+    border: 1px solid #3B82F6;
+    background-color: #1E2545;
+}
+
 /* ── Input Fields & Combos ── */
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     background-color: #1A2035;

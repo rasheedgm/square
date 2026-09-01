@@ -150,6 +150,23 @@ class TestKitsuCheckShots(unittest.TestCase):
         report = client.check_shots("proj", [("SQ010", "SH0100")])
         self.assertEqual(report[("SQ010", "SH0100")]["state"], KitsuClient.KITSU_WRONG_SEQUENCE)
 
+    def test_sequence_link_only_in_parent_id_still_resolves(self):
+        # The Zou we run against returns EVERY shot from the project listing
+        # with sequence_id == None and sequence_name == None; the parent
+        # sequence is in parent_id. Without that fallback the shot indexes
+        # under sequence "" and a correctly-placed shot reads as a
+        # wrong-sequence conflict -- which broke the whole pre-flight.
+        client = self._connected_client(
+            shots=[{"name": "SH0100", "sequence_id": None, "sequence_name": None, "parent_id": "s1"}],
+            sequences=[{"id": "s1", "name": "SQ010"}],
+        )
+        report = client.check_shots("proj", [
+            ("SQ010", "SH0100"),   # right where it belongs -> ok
+            ("SQ999", "SH0100"),   # wrong sequence -> conflict
+        ])
+        self.assertEqual(report[("SQ010", "SH0100")]["state"], KitsuClient.KITSU_OK)
+        self.assertEqual(report[("SQ999", "SH0100")]["state"], KitsuClient.KITSU_WRONG_SEQUENCE)
+
     def test_disconnected_client_reports_unknown_for_every_row(self):
         client = KitsuClient(dry_run=False)
         client.is_connected = False
@@ -402,14 +419,26 @@ class TestRecordVersion(unittest.TestCase):
 
 
 class _FakeGazuFilesAPI:
-    """Stands in for gazu.files -- just enough of update_preview to verify what gets sent."""
+    """
+    Stands in for gazu.files. Mirrors what a real Zou does: the preview-file
+    record has a free-form `data` JSONB blob (Zou fills it with the media
+    dimensions on upload) and drops unknown top-level keys on update, so the
+    only way custom fields persist is nested inside `data`.
+    """
 
-    def __init__(self):
+    def __init__(self, initial_data=None):
         self.update_preview_calls = []
+        self.stored = {"data": dict(initial_data or {"original_width": 1280})}
+
+    def get_preview_file(self, preview_id):
+        return {"id": preview_id, **self.stored}
 
     def update_preview(self, preview_file, data):
         self.update_preview_calls.append((preview_file, dict(data)))
-        return {**preview_file, "data": data}
+        # Zou only honours known columns; `data` is one of them.
+        if "data" in data:
+            self.stored["data"] = dict(data["data"])
+        return {**preview_file, **self.stored}
 
 
 class TestAttachPreviewSourceMetadata(unittest.TestCase):
@@ -420,6 +449,10 @@ class TestAttachPreviewSourceMetadata(unittest.TestCase):
     gazu.files.update_preview) means such a tool gets the source path back
     in the one query it already makes for the movie, instead of needing a
     second lookup against our own separate version ledger.
+
+    Zou has no columns for these fields and silently drops unknown top-level
+    keys, so the payload goes into data["square_ingest"], merged on top of
+    the media metadata Zou already wrote into `data`.
     """
 
     def _connected_client(self):
@@ -439,7 +472,10 @@ class TestAttachPreviewSourceMetadata(unittest.TestCase):
         self.assertEqual(len(fake_files.update_preview_calls), 1)
         called_preview, called_data = fake_files.update_preview_calls[0]
         self.assertEqual(called_preview["id"], preview["id"])
-        self.assertEqual(called_data, source_info)
+        # Payload is nested under data.square_ingest, and Zou's own media
+        # metadata already in `data` is preserved, not overwritten.
+        self.assertEqual(called_data["data"]["square_ingest"], source_info)
+        self.assertEqual(called_data["data"]["original_width"], 1280)
 
     def test_non_uuid_preview_id_skips_the_live_call(self):
         # Matches the same "obviously a mock/test ID" guard used elsewhere
@@ -448,14 +484,16 @@ class TestAttachPreviewSourceMetadata(unittest.TestCase):
         client, fake_files = self._connected_client()
         result = client.attach_preview_source_metadata({"id": "preview1"}, {"nas_path": "/nas/x"})
         self.assertEqual(fake_files.update_preview_calls, [])
-        self.assertEqual(result["nas_path"], "/nas/x")   # still returns something usable
+        self.assertEqual(result["data"]["square_ingest"]["nas_path"], "/nas/x")   # still usable
 
     def test_offline_client_returns_a_usable_merged_dict(self):
         client = KitsuClient(dry_run=True)
         result = client.attach_preview_source_metadata(
             {"id": "mock-preview"}, {"nas_path": "/nas/proj/SQ010/SH0100/plates/BG_v001"}
         )
-        self.assertEqual(result["nas_path"], "/nas/proj/SQ010/SH0100/plates/BG_v001")
+        self.assertEqual(
+            result["data"]["square_ingest"]["nas_path"], "/nas/proj/SQ010/SH0100/plates/BG_v001"
+        )
 
     def test_a_gazu_error_is_caught_not_raised(self):
         client, fake_files = self._connected_client()

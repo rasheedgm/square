@@ -113,21 +113,28 @@ class TestFolderMapperPathPatterns(unittest.TestCase):
         items = mapper.build_items()
         self.assertEqual(items[0].media_type, "BG Plate")
 
-    def test_patterns_and_manual_tags_persist_across_reload(self):
+    def test_media_types_dict_round_trip(self):
+        # FolderMapper is in-memory only now (no hidden sidecar); the session
+        # file persists this via get_media_types / set_media_types.
         (self.tmp / "SQ010" / "SH0100").mkdir(parents=True)
         exr = self.tmp / "SQ010" / "SH0100" / "plate.1001.exr"
         exr.write_text("x")
 
         mapper = FolderMapper(self.tmp)
-        mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr", name="Standard"))
         mapper.set_media_type(exr, "Ref")
-        mapper.save()
+        dumped = mapper.get_media_types()
 
-        reloaded = FolderMapper(self.tmp)
-        patterns = reloaded.get_path_patterns()
-        self.assertEqual(len(patterns), 1)
-        self.assertEqual(patterns[0].template, "<sequence>/<shot>/plate.####.exr")
-        self.assertEqual(reloaded.get_media_type(exr), "Ref")
+        other = FolderMapper(self.tmp)
+        other.set_media_types(dumped)
+        self.assertEqual(other.get_media_type(exr), "Ref")
+
+    def test_no_sidecar_file_is_written(self):
+        (self.tmp / "SQ010").mkdir(parents=True)
+        mapper = FolderMapper(self.tmp)
+        mapper.add_path_pattern(PathPattern(template="<sequence>"))
+        mapper.set_media_type(self.tmp / "SQ010", "Plate")
+        self.assertFalse((self.tmp / ".square_ingest_map.json").exists())
+        self.assertFalse(hasattr(mapper, "save"))
 
     def test_reordering_changes_which_pattern_wins(self):
         mapper = FolderMapper(self.tmp)
@@ -140,17 +147,15 @@ class TestFolderMapperPathPatterns(unittest.TestCase):
         self.assertEqual(patterns[0].template, "<sequence>/<shot>.exr")
         self.assertEqual(patterns[1].template, "a/<shot>.exr")
 
-    def test_clear_all_removes_patterns_tags_and_sidecar(self):
+    def test_clear_all_removes_patterns_and_tags(self):
         (self.tmp / "SQ010").mkdir(parents=True)
         mapper = FolderMapper(self.tmp)
         mapper.add_path_pattern(PathPattern(template="<sequence>"))
         mapper.set_media_type(self.tmp / "SQ010", "Plate")
-        mapper.save()
-        self.assertTrue((self.tmp / ".square_ingest_map.json").exists())
+        self.assertTrue(mapper.has_map())
 
         mapper.clear_all()
         self.assertFalse(mapper.has_map())
-        self.assertFalse((self.tmp / ".square_ingest_map.json").exists())
 
     def test_flat_delivery_with_no_subfolders_matches_correctly(self):
         # Confirmed bug: a file sitting directly in the browsed root (no

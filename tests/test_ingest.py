@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,15 +16,19 @@ class TestIngestPipeline(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        create_sample_media()
-        cls.test_media_dir = Path("d:/projects/square/test_data/incoming_plates")
-        cls.test_nas_dir = Path("d:/projects/square/test_data/mock_nas")
+        cls._tmp_dir = Path(tempfile.mkdtemp())
+        cls.test_media_dir = create_sample_media(base_dir=cls._tmp_dir / "incoming_plates")
+        cls.test_nas_dir = cls._tmp_dir / "mock_nas"
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls._tmp_dir, ignore_errors=True)
 
     def test_01_scanner(self):
         from square_core.folder_mapper import FolderMapper
+        from square_core.path_pattern import PathPattern
         mapper = FolderMapper(self.test_media_dir)
-        mapper.set_level(1, "seq")
-        mapper.set_level(2, "shot")
+        mapper.add_path_pattern(PathPattern(template="<sequence>/*/*"))
         items = mapper.build_items()
         
         self.assertGreater(len(items), 0, "Mapper should discover media items")
@@ -62,7 +67,7 @@ class TestIngestPipeline(unittest.TestCase):
         items = scanner.scan()
         item = items[0]
         
-        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.plate_name)
+        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.media_name)
         self.assertIn("DEMO", str(dest_dir))
         
         copied = nas.copy_sequence(item, dest_dir)
@@ -75,7 +80,7 @@ class TestIngestPipeline(unittest.TestCase):
         items = scanner.scan()
         item = items[0]  # SQ010
 
-        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.plate_name)
+        dest_dir = nas.get_dest_dir("DEMO", item.sequence_code, item.shot_code, item.media_name)
         nas.create_shot_structure(dest_dir)
         
         copied = nas.copy_sequence(item, dest_dir)
@@ -87,6 +92,31 @@ class TestIngestPipeline(unittest.TestCase):
         hash2 = nas.calculate_checksum(copied[0])
         self.assertEqual(hash1, hash2)
         print(f"\n[Test] Verified xxHash checksum match: {hash1}")
+
+    def test_05_metadata_extraction_reads_real_file_not_placeholder(self):
+        """
+        MetadataExtractor previously existed but nothing ever called it, so
+        every item always showed a hardcoded 1920x1080/24fps/ACEScg
+        placeholder. This confirms a real file's actual dimensions come
+        through -- and that a non-decodable mock file (this suite's plain
+        text ".exr" fixtures) degrades gracefully to the placeholder instead
+        of raising.
+        """
+        real_exr = self._tmp_dir / "real.exr"
+        try:
+            import OpenImageIO as oiio
+            buf = oiio.ImageBuf(oiio.ImageSpec(200, 100, 3, oiio.FLOAT))
+            buf.write(str(real_exr))
+        except ImportError:
+            self.skipTest("OpenImageIO not installed")
+
+        meta = MetadataExtractor.extract_metadata(str(real_exr))
+        self.assertEqual(meta["resolution"], "200x100")
+
+        scanner = PlateScanner(self.test_media_dir)
+        items = scanner.scan()
+        mock_item = items[0]
+        self.assertEqual(mock_item.resolution, "1920x1080")  # graceful fallback, not a crash
 
 if __name__ == "__main__":
     unittest.main()

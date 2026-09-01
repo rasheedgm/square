@@ -4,6 +4,7 @@ channels:
   - defaults
 dependencies:
   - python=3.11
+  - openimageio
   - pip
   - pip:
     - Qt.py
@@ -12,5 +13,6 @@ dependencies:
     - requests
     - pillow
     - xxhash
+    - imageio-ffmpeg
     - ffmpeg-python
     - pyyaml

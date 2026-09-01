@@ -25,9 +25,8 @@ def run_e2e_demo():
     print("=" * 75)
 
     # 1. Create sample incoming plates
-    create_sample_media()
-    incoming_dir = Path("d:/projects/square/test_data/incoming_plates")
-    nas_root = Path("d:/projects/square/test_data/studio_nas")
+    incoming_dir = create_sample_media()
+    nas_root = root_dir / "test_data" / "studio_nas"
 
     if os.path.exists(nas_root):
         shutil.rmtree(nas_root)
@@ -41,7 +40,7 @@ def run_e2e_demo():
     for idx, item in enumerate(items, 1):
         warn_str = f" [WARNING: Missing frames {item.missing_frames}]" if item.has_warnings else " [OK: Frame sequence complete]"
         print(f"   [{idx}] Item Name: {item.name}")
-        print(f"       Sequence: {item.sequence_code} | Shot: {item.shot_code} | Plate: {item.plate_name}")
+        print(f"       Sequence: {item.sequence_code} | Shot: {item.shot_code} | Media: {item.media_name}")
         print(f"       Range: {item.frame_range_str} | FPS: {item.fps} | Color: {item.colorspace}{warn_str}")
 
     # 3. Kitsu DB Connection & Setup
@@ -60,7 +59,7 @@ def run_e2e_demo():
     print("\n[Step 3] Executing Ingestion Flow for Discovered Plates...")
 
     for item in items:
-        print(f"\n--- Ingesting: {item.sequence_code} / {item.shot_code} / {item.plate_name} ---")
+        print(f"\n--- Ingesting: {item.sequence_code} / {item.shot_code} / {item.media_name} ---")
 
         # A. Kitsu Sync
         seq_obj = kitsu.get_or_create_sequence(active_project["id"], item.sequence_code)
@@ -72,7 +71,7 @@ def run_e2e_demo():
         print(f"  + Kitsu DB Synced: Sequence '{item.sequence_code}', Shot '{item.shot_code}', Tasks: {[t['name'] for t in tasks]}")
 
         # B. NAS Directory Creation & File Transfer
-        dest_dir = nas.get_dest_dir(active_project["code"], item.sequence_code, item.shot_code, item.plate_name)
+        dest_dir = nas.get_dest_dir(active_project["code"], item.sequence_code, item.shot_code, item.media_name)
         nas.create_shot_structure(dest_dir)
         print(f"  + NAS Directory Created: {dest_dir}")
 

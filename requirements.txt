@@ -7,3 +7,4 @@ xxhash>=3.3.0
 imageio-ffmpeg>=0.4.8
 ffmpeg-python>=0.2.0
 pyyaml>=6.0
+OpenImageIO>=2.4

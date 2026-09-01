@@ -1,7 +1,7 @@
 from Qt import QtWidgets, QtCore, QtGui
-from square_core.config import StudioConfig
+from square_core.config import StudioConfig, VALID_TRANSFER_MODES
 from square_core.kitsu_client import KitsuClient
-from tools.qt_compat import ECHO_MODE_PASSWORD, HEADER_RESIZE_STRETCH
+from tools.qt_compat import ECHO_MODE_PASSWORD, HEADER_RESIZE_STRETCH, ALIGN_CENTER
 
 class SettingsDialog(QtWidgets.QDialog):
     """Settings modal for configuring Kitsu credentials and NAS storage paths."""
@@ -11,18 +11,31 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, parent=None):
         super(SettingsDialog, self).__init__(parent)
         self.setWindowTitle("Square VFX - Studio Pipeline Configuration")
-        self.setMinimumSize(620, 640)
+        self.setMinimumSize(560, 420)
+        self.resize(680, 760)
         self.config = StudioConfig()
         self.setup_ui()
 
     def setup_ui(self):
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(15)
+        # The form has more content than fits on a typical laptop screen at
+        # once (5 group boxes, one with a table) -- everything except the
+        # header and the Save/Cancel row lives inside a QScrollArea, so the
+        # window is usable (and Save is always reachable) at any size instead
+        # of silently clipping whatever doesn't fit.
+        outer_layout = QtWidgets.QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
-        # Title Header
         lbl_header = QtWidgets.QLabel("⚙️ Studio & Kitsu Configuration")
-        lbl_header.setStyleSheet("font-size: 16px; font-weight: bold; color: #60A5FA;")
-        layout.addWidget(lbl_header)
+        lbl_header.setStyleSheet("font-size: 16px; font-weight: bold; color: #60A5FA; padding: 15px 15px 4px 15px;")
+        outer_layout.addWidget(lbl_header)
+
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll_content = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(scroll_content)
+        layout.setContentsMargins(15, 0, 15, 15)
+        layout.setSpacing(15)
 
         # Kitsu Credentials Group Box
         kitsu_box = QtWidgets.QGroupBox("Kitsu DB Connection Settings")
@@ -30,7 +43,7 @@ class SettingsDialog(QtWidgets.QDialog):
         k_layout.setSpacing(10)
 
         self.kitsu_url_edit = QtWidgets.QLineEdit(self.config.kitsu_url)
-        self.kitsu_url_edit.setPlaceholderText("https://kitsu.squarevfx.com/api")
+        self.kitsu_url_edit.setPlaceholderText("http://kitsu-host/api  (use https:// only if your server actually has SSL)")
 
         self.kitsu_user_edit = QtWidgets.QLineEdit(self.config.kitsu_user)
         self.kitsu_user_edit.setPlaceholderText("pipeline@squarevfx.com")
@@ -45,6 +58,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.lbl_conn_result = QtWidgets.QLabel("")
         self.lbl_conn_result.setStyleSheet("font-size: 12px; font-weight: bold;")
+        self.lbl_conn_result.setWordWrap(True)
 
         k_layout.addRow("Kitsu Server Host URL:", self.kitsu_url_edit)
         k_layout.addRow("Kitsu User Email:", self.kitsu_user_edit)
@@ -55,17 +69,42 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(kitsu_box)
 
         # NAS Storage Group Box
-        nas_box = QtWidgets.QGroupBox("NAS Storage & Local Cache Settings")
+        nas_box = QtWidgets.QGroupBox("NAS Storage Settings")
         n_layout = QtWidgets.QFormLayout(nas_box)
         n_layout.setSpacing(10)
 
         self.nas_root_edit = QtWidgets.QLineEdit(self.config.nas_root)
-        self.cache_root_edit = QtWidgets.QLineEdit(self.config.cache_root)
 
         n_layout.addRow("NAS Storage Root:", self.nas_root_edit)
-        n_layout.addRow("Local SSD Cache Root:", self.cache_root_edit)
 
         layout.addWidget(nas_box)
+
+        # Copy Engine Group Box
+        copy_box = QtWidgets.QGroupBox("Copy Engine")
+        c_layout = QtWidgets.QFormLayout(copy_box)
+        c_layout.setSpacing(10)
+
+        self.transfer_mode_combo = QtWidgets.QComboBox()
+        self.transfer_mode_combo.addItem("Copy (safe default)", "copy")
+        self.transfer_mode_combo.addItem("Hardlink (same volume only, falls back to copy)", "hardlink")
+        self.transfer_mode_combo.addItem("Symlink (falls back to hardlink, then copy)", "symlink")
+        idx = self.transfer_mode_combo.findData(self.config.transfer_mode)
+        self.transfer_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.transfer_mode_combo.setToolTip(
+            "Copy is the only mode safe against the source file changing later, and the only\n"
+            "one that works across volumes/NAS boundaries. Hardlink/symlink save time and disk\n"
+            "space when the incoming drive and NAS root are on the same volume."
+        )
+
+        self.copy_workers_spin = QtWidgets.QSpinBox()
+        self.copy_workers_spin.setRange(1, 32)
+        self.copy_workers_spin.setValue(self.config.copy_workers)
+        self.copy_workers_spin.setToolTip("How many files to transfer in parallel per sequence")
+
+        c_layout.addRow("Transfer Mode:", self.transfer_mode_combo)
+        c_layout.addRow("Parallel Workers:", self.copy_workers_spin)
+
+        layout.addWidget(copy_box)
 
         # Pipeline Naming & Folder Templates Group Box
         tmpl_box = QtWidgets.QGroupBox("Pipeline Naming & Folder Structure Templates")
@@ -76,16 +115,20 @@ class SettingsDialog(QtWidgets.QDialog):
         self.filename_tmpl_edit.setToolTip("Tokens: {project}, {seq}, {shot}, {type}, {name}, {version}, {frame}, {ext}")
 
         self.nas_dir_tmpl_edit = QtWidgets.QLineEdit(self.config.nas_dir_template)
-        self.nas_dir_tmpl_edit.setToolTip("Tokens: {nas_root}, {project_code}, {sequence_code}, {shot_code}, {plate_type}, {plate_name}, {version}, {resolution}")
+        self.nas_dir_tmpl_edit.setToolTip("Tokens: {nas_root}, {project_code}, {sequence_code}, {shot_code}, {media_type}, {media_name}, {version}, {resolution}")
 
         self.shot_struct_edit = QtWidgets.QTextEdit()
         self.shot_struct_edit.setFixedHeight(70)
         self.shot_struct_edit.setStyleSheet("font-family: Consolas, monospace; font-size: 11px;")
         self.shot_struct_edit.setPlainText("\n".join(self.config.shot_folder_structure))
 
+        self.default_tasks_edit = QtWidgets.QLineEdit(", ".join(self.config.tasks))
+        self.default_tasks_edit.setToolTip("Comma-separated default Kitsu task types offered when selecting tasks for an ingest batch")
+
         t_layout.addRow("File Naming Pattern:", self.filename_tmpl_edit)
         t_layout.addRow("Default Directory Pattern:", self.nas_dir_tmpl_edit)
         t_layout.addRow("Shot Folder Structure:", self.shot_struct_edit)
+        t_layout.addRow("Default Shot Tasks:", self.default_tasks_edit)
 
         layout.addWidget(tmpl_box)
 
@@ -94,10 +137,16 @@ class SettingsDialog(QtWidgets.QDialog):
         mt_layout = QtWidgets.QVBoxLayout(mt_box)
         mt_layout.setSpacing(6)
 
+        mt_hint = QtWidgets.QLabel("\"Preview\" controls whether that media type gets a low-res MOV generated and uploaded to Kitsu on ingest.")
+        mt_hint.setWordWrap(True)
+        mt_hint.setStyleSheet("color:#94A3B8; font-size:11px;")
+        mt_layout.addWidget(mt_hint)
+
         self.media_types_table = QtWidgets.QTableWidget()
-        self.media_types_table.setColumnCount(2)
-        self.media_types_table.setHorizontalHeaderLabels(["Media Type", "NAS Directory Path Pattern Template"])
+        self.media_types_table.setColumnCount(3)
+        self.media_types_table.setHorizontalHeaderLabels(["Media Type", "NAS Directory Path Pattern Template", "Preview"])
         self.media_types_table.horizontalHeader().setSectionResizeMode(1, HEADER_RESIZE_STRETCH)
+        self.media_types_table.setColumnWidth(2, 60)
         self.media_types_table.setMinimumHeight(120)
 
         self._populate_media_types_table()
@@ -115,8 +164,15 @@ class SettingsDialog(QtWidgets.QDialog):
         mt_layout.addLayout(mt_btn_layout)
         layout.addWidget(mt_box)
 
-        # Action Buttons
-        btn_layout = QtWidgets.QHBoxLayout()
+        scroll.setWidget(scroll_content)
+        outer_layout.addWidget(scroll, stretch=1)
+
+        # Action Buttons -- outside the scroll area, so Save/Cancel are
+        # always visible and clickable regardless of scroll position.
+        btn_frame = QtWidgets.QFrame()
+        btn_frame.setStyleSheet("QFrame { border-top: 1px solid #252D3D; }")
+        btn_layout = QtWidgets.QHBoxLayout(btn_frame)
+        btn_layout.setContentsMargins(15, 10, 15, 10)
         self.save_btn = QtWidgets.QPushButton("💾 Save Settings")
         self.save_btn.setStyleSheet("background-color: #059669; font-size: 14px; font-weight: bold;")
         self.save_btn.clicked.connect(self.on_save)
@@ -127,23 +183,35 @@ class SettingsDialog(QtWidgets.QDialog):
         btn_layout.addStretch()
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addWidget(self.save_btn)
-        layout.addLayout(btn_layout)
+        outer_layout.addWidget(btn_frame)
+
+    def _mk_preview_checkbox(self, checked):
+        cell_w = QtWidgets.QWidget()
+        cell_l = QtWidgets.QHBoxLayout(cell_w)
+        cell_l.setContentsMargins(0, 0, 0, 0)
+        cell_l.setAlignment(ALIGN_CENTER)
+        chk = QtWidgets.QCheckBox()
+        chk.setChecked(checked)
+        cell_l.addWidget(chk)
+        cell_w.checkbox = chk
+        return cell_w
 
     def _populate_media_types_table(self):
         self.media_types_table.setRowCount(0)
         configs = getattr(self.config, "media_type_configs", {})
+        preview_types = set(getattr(self.config, "preview_enabled_media_types", []))
         for row_idx, (mtype, tmpl) in enumerate(configs.items()):
             self.media_types_table.insertRow(row_idx)
-            item_type = QtWidgets.QTableWidgetItem(mtype)
-            item_tmpl = QtWidgets.QTableWidgetItem(tmpl)
-            self.media_types_table.setItem(row_idx, 0, item_type)
-            self.media_types_table.setItem(row_idx, 1, item_tmpl)
+            self.media_types_table.setItem(row_idx, 0, QtWidgets.QTableWidgetItem(mtype))
+            self.media_types_table.setItem(row_idx, 1, QtWidgets.QTableWidgetItem(tmpl))
+            self.media_types_table.setCellWidget(row_idx, 2, self._mk_preview_checkbox(mtype in preview_types))
 
     def _on_add_media_type(self):
         row = self.media_types_table.rowCount()
         self.media_types_table.insertRow(row)
         self.media_types_table.setItem(row, 0, QtWidgets.QTableWidgetItem("NewType"))
         self.media_types_table.setItem(row, 1, QtWidgets.QTableWidgetItem("{nas_root}/{project_code}/shots/{seq}/{shot}/newtype/{name}"))
+        self.media_types_table.setCellWidget(row, 2, self._mk_preview_checkbox(False))
 
     def _on_remove_media_type(self):
         selected = self.media_types_table.selectedIndexes()
@@ -166,18 +234,26 @@ class SettingsDialog(QtWidgets.QDialog):
         if success and client.gazu:
             self.lbl_conn_result.setText("✅ Connected Successfully to Kitsu!")
             self.lbl_conn_result.setStyleSheet("color: #10B981; font-weight: bold;")
+            self.lbl_conn_result.setToolTip("")
         else:
-            self.lbl_conn_result.setText("❌ Connection Failed. Check URL / Login credentials or server status.")
+            reason = client.last_error or "Check URL / login credentials or server status."
+            hint = ""
+            if "ssl" in reason.lower() and url.lower().startswith("https://"):
+                hint = " (Tip: if this Kitsu server doesn't have SSL, try http:// instead of https://.)"
+            self.lbl_conn_result.setText(f"❌ Connection Failed: {reason}{hint}")
             self.lbl_conn_result.setStyleSheet("color: #EF4444; font-weight: bold;")
+            self.lbl_conn_result.setToolTip(reason)
 
     def on_save(self):
         self.config.kitsu_url = self.kitsu_url_edit.text().strip()
         self.config.kitsu_user = self.kitsu_user_edit.text().strip()
         self.config.kitsu_password = self.kitsu_pass_edit.text().strip()
         self.config.nas_root = self.nas_root_edit.text().strip()
-        self.config.cache_root = self.cache_root_edit.text().strip()
         self.config.filename_template = self.filename_tmpl_edit.text().strip()
         self.config.nas_dir_template = self.nas_dir_tmpl_edit.text().strip()
+        self.config.transfer_mode = self.transfer_mode_combo.currentData() or "copy"
+        self.config.copy_workers = self.copy_workers_spin.value()
+        self.config.tasks = [t.strip() for t in self.default_tasks_edit.text().split(",") if t.strip()]
 
         struct_lines = [
             line.strip() for line in self.shot_struct_edit.toPlainText().splitlines()
@@ -186,12 +262,18 @@ class SettingsDialog(QtWidgets.QDialog):
         self.config.shot_folder_structure = struct_lines
 
         configs = {}
+        preview_types = []
         for r in range(self.media_types_table.rowCount()):
             type_item = self.media_types_table.item(r, 0)
             pat_item  = self.media_types_table.item(r, 1)
+            preview_widget = self.media_types_table.cellWidget(r, 2)
             if type_item and pat_item and type_item.text().strip():
-                configs[type_item.text().strip()] = pat_item.text().strip()
+                mtype = type_item.text().strip()
+                configs[mtype] = pat_item.text().strip()
+                if preview_widget is not None and preview_widget.checkbox.isChecked():
+                    preview_types.append(mtype)
         self.config.media_type_configs = configs
+        self.config.preview_enabled_media_types = preview_types
 
         self.config.save()
         self.config_saved.emit()

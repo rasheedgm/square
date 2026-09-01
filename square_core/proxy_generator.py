@@ -46,7 +46,7 @@ class ProxyGenerator:
 
     def generate_proxy(self, item, dest_name=None):
         """Generates H.264 MP4 preview from an IngestSequenceItem."""
-        dest_name = dest_name or f"{item.sequence_code}_{item.shot_code}_{item.plate_name}_preview.mp4"
+        dest_name = dest_name or f"{item.sequence_code}_{item.shot_code}_{item.media_name}_preview.mp4"
         out_mp4 = self.output_dir / dest_name
 
         if self.dry_run:
@@ -94,7 +94,7 @@ class ProxyGenerator:
 
     def _generate_slate_proxy(self, item, out_mp4):
         """Generates a 1-second MP4 video preview card when raw sequence files are mock text or non-decodable."""
-        slate_jpg = self.output_dir / f"{item.sequence_code}_{item.shot_code}_{item.plate_name}_slate.jpg"
+        slate_jpg = self.output_dir / f"{item.sequence_code}_{item.shot_code}_{item.media_name}_slate.jpg"
         
         try:
             # Create a 1280x720 dark slate image card
@@ -105,10 +105,10 @@ class ProxyGenerator:
             draw.rectangle([(20, 20), (1260, 700)], outline=(0, 180, 216), width=3)
             draw.rectangle([(30, 30), (1250, 100)], fill=(38, 45, 61))
             
-            draw.text((50, 50), "SQUARE VFX STUDIO - PLATE INGEST SLATE", fill=(0, 180, 216))
+            draw.text((50, 50), "SQUARE VFX STUDIO - MEDIA INGEST SLATE", fill=(0, 180, 216))
             draw.text((50, 140), f"Sequence: {item.sequence_code}", fill=(248, 250, 252))
             draw.text((50, 180), f"Shot Code: {item.shot_code}", fill=(248, 250, 252))
-            draw.text((50, 220), f"Plate Name: {item.plate_name}", fill=(248, 250, 252))
+            draw.text((50, 220), f"Media Name: {item.media_name}", fill=(248, 250, 252))
             draw.text((50, 260), f"Frame Range: {item.frame_range_str}", fill=(248, 250, 252))
             draw.text((50, 300), f"FPS: {item.fps} | Colorspace: {item.colorspace}", fill=(248, 250, 252))
             draw.text((50, 340), f"Total Files: {len(item.files)}", fill=(248, 250, 252))

@@ -1,8 +1,7 @@
 {
-    "kitsu_url": "https://kitsu.squarevfx.com/api",
+    "kitsu_url": "http://kitsu-host/api",
     "kitsu_user": "pipeline@squarevfx.com",
     "kitsu_password": "YOUR_KITSU_PASSWORD_HERE",
     "nas_root": "X:/projects",
-    "cache_root": "C:/cache/square",
     "dry_run": true
 }

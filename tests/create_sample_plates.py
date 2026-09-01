@@ -1,9 +1,19 @@
 import os
 from pathlib import Path
 
-def create_sample_media():
-    base_dir = Path("d:/projects/square/test_data/incoming_plates")
-    
+DEFAULT_BASE_DIR = Path(__file__).resolve().parent.parent / "test_data" / "incoming_plates"
+
+
+def create_sample_media(base_dir=None):
+    """
+    Generates a small, deterministic set of mock incoming media for tests and
+    demos. Files are plain text with a fake header (not real EXR/DPX bytes) --
+    these fixtures exist to exercise scanning/grouping/frame-range logic, not
+    real media decoding, so keeping them tiny and dependency-free is
+    deliberate. Returns the base_dir actually used.
+    """
+    base_dir = Path(base_dir) if base_dir else DEFAULT_BASE_DIR
+
     # Shot 1: SQ010_SH0100 (EXR sequence 1001-1010)
     shot1_dir = base_dir / "SQ010" / "SQ010_SH0100_PL01"
     os.makedirs(shot1_dir, exist_ok=True)
@@ -27,6 +37,8 @@ def create_sample_media():
         f.write("SAMPLE VIDEO HEADER\n")
 
     print(f"[SampleMedia] Created test incoming plates in {base_dir}")
+    return base_dir
+
 
 if __name__ == "__main__":
     create_sample_media()

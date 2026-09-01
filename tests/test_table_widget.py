@@ -412,6 +412,150 @@ class TestKitsuPreflightCheck(unittest.TestCase):
         cell = self.table._table.item(0, COL_STATUS)
         self.assertIn("distinctive-message-xyz", cell.toolTip())
 
+    def test_renaming_a_row_also_clears_a_nas_version_conflict(self):
+        # The Kitsu-conflict-clears-on-rename test above only covers the
+        # Kitsu-side finding; the SAME rename must also re-resolve a
+        # disk-verified NAS version conflict on that row, not just leave it
+        # blocked on a slot the row no longer even points at.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._tmpl_edit.setText("SH9900")   # a completely different, non-colliding shot
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+        self.table.apply_version_results({id(a): (1, "new", False)})   # the fresh check for the NEW identity
+
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertNotIn(id(a), self.table.item_version_conflict)
+
+
+class TestKitsuNamingConflicts(unittest.TestCase):
+    """
+    apply_kitsu_check()'s second argument -- KitsuClient.
+    check_naming_conflicts()'s report -- flags a name that's close to (but
+    not exactly) one already in Kitsu, e.g. "SH_0100" when Kitsu already
+    has "SH0100": almost certainly a formatting slip, not a deliberately
+    different shot. Blocks like any other conflict; "Ignore Kitsu Warning"
+    is the escape hatch for a row that's genuinely correct as typed.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def _flagged_row(self):
+        a = _make_item("a", "SQ010", "SH_0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_kitsu_check({}, {
+            ("SQ010", "SH_0100", "BG"): {
+                "field": "shot", "existing": ["SH0100"],
+                "message": "No shot named exactly 'SH_0100', but 'SH0100' is close.",
+            }
+        })
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        return a
+
+    def test_near_duplicate_name_blocks_like_any_other_conflict(self):
+        a = self._flagged_row()
+        self.assertTrue(self.table.has_unresolved_conflicts())
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("SH0100", tip)
+
+    def test_ignore_button_starts_disabled_and_enables_once_flagged(self):
+        self.table.populate_table([_make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")])
+        self.assertFalse(self.table._ignore_kitsu_btn.isEnabled())
+
+        self._reset_and_flag()
+        self.assertTrue(self.table._ignore_kitsu_btn.isEnabled())
+
+    def _reset_and_flag(self):
+        self.table.populate_table([_make_item("a", "SQ010", "SH_0100", "Plate", "BG", "/tmp/a.mov")])
+        self.table.apply_kitsu_check({}, {
+            ("SQ010", "SH_0100", "BG"): {"field": "shot", "existing": ["SH0100"], "message": "close match"}
+        })
+
+    def test_ignore_requires_confirmation_then_clears_the_block(self):
+        a = self._flagged_row()
+        self.table._confirm_ignore_kitsu = lambda items: "ignore"
+
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._on_ignore_kitsu_warning()
+
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertIn(id(a), self.table.kitsu_acknowledged)
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 1)])
+        self.assertFalse(self.table._ignore_kitsu_btn.isEnabled())   # nothing left unresolved
+
+    def test_declining_confirmation_leaves_it_blocked(self):
+        a = self._flagged_row()
+        self.table._confirm_ignore_kitsu = lambda items: None
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._on_ignore_kitsu_warning()
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertNotIn(id(a), self.table.kitsu_acknowledged)
+
+    def test_ignore_is_undoable(self):
+        a = self._flagged_row()
+        self.table._confirm_ignore_kitsu = lambda items: "ignore"
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._on_ignore_kitsu_warning()
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+        self.table._on_undo()
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertNotIn(id(a), self.table.kitsu_acknowledged)
+
+    def test_exact_wrong_sequence_finding_wins_over_a_naming_finding_on_the_same_row(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_kitsu_check(
+            {("SQ010", "SH0100"): {"state": "wrong_sequence", "message": "confirmed wrong sequence"}},
+            {("SQ010", "SH0100", "BG"): {"field": "shot", "existing": ["X"], "message": "heuristic near-dup"}},
+        )
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("confirmed wrong sequence", tip)
+
+    def test_a_benign_check_shots_finding_does_not_suppress_a_naming_finding(self):
+        # check_shots() returns SOME state for essentially every row that has
+        # a shot code -- usually "new_shot" ("will be created") or "ok"
+        # ("matches Kitsu"), never nothing. Only its two real CONFLICT states
+        # (wrong_sequence, ambiguous) are a confirmed fact that should skip
+        # the naming_report lookup; a merely informational finding must not
+        # silently swallow a near-duplicate-name finding for the same row --
+        # that would make check_naming_conflicts() dead code in practice,
+        # since a full, realistic report always has an entry per row.
+        a = _make_item("a", "SQ010", "SH_0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_kitsu_check(
+            {("SQ010", "SH_0100"): {"state": "new_shot", "message": "will be created"}},
+            {("SQ010", "SH_0100", "BG"): {
+                "field": "shot", "existing": ["SH0100"],
+                "message": "No shot named exactly 'SH_0100', but 'SH0100' is close.",
+            }},
+        )
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        issue = self.table.kitsu_issues[id(a)]
+        self.assertEqual(issue["state"], "near_duplicate_shot")
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("SH0100", tip)
+
+    def test_renaming_to_the_exact_existing_name_clears_it_on_recheck(self):
+        a = self._flagged_row()
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._tmpl_edit.setText("SH0100")   # fix the underscore typo
+        self.table._target_combo.setCurrentText("Shot")
+        self.table._on_apply_rename()
+        # The stale finding is cleared immediately by the rename; a fresh
+        # Check in Kitsu (not exercised here) would confirm it's now exact.
+        self.assertNotIn(id(a), self.table.kitsu_issues)
+        self.assertFalse(self.table.has_unresolved_conflicts())
+
 
 class TestMarkIngested(unittest.TestCase):
     """
@@ -913,6 +1057,119 @@ class TestVersionUpAndOverride(unittest.TestCase):
         self.assertEqual(called, [])
 
 
+class TestAlreadyIngestedOverride(unittest.TestCase):
+    """
+    "but when versioned up if file in previous and now same then the status
+    is still conflict user should be able to se ignore that and ingest."
+
+    Version Up can legitimately land on a version slot whose real,
+    disk-verified content turns out to match what's about to be ingested --
+    state "already", not "conflict". Nothing to overwrite, so Version Up
+    itself stays out of scope for it (there's no "next free version" to
+    seek past), but Override now also accepts this verdict so the row isn't
+    silently stuck.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.table = IngestTableWidget()
+        self.table.set_project_code("PROJ")
+
+    def _already_after_version_up(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (3, "new", False)})
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+        self.table._batch_version_spin.setValue(1)
+        self.table._on_batch_set_version()
+        self.table.apply_version_results({id(a): (1, "conflict", True)})
+        self.assertEqual(self.table._effective_status(a), STATUS_CONFLICT)
+
+        self.table._on_version_up()
+        self.table.apply_version_results({id(a): (2, "already", False)})
+        self.assertEqual(self.table._effective_status(a), STATUS_ALREADY)
+        self.assertNotIn(id(a), self.table.item_version_conflict)
+        return a
+
+    def test_unresolved_already_ingested_row_has_an_explanatory_tooltip(self):
+        # Before this fix, a row that was Already Ingested but not yet
+        # overridden had NO tooltip at all -- _version_conflict_message
+        # returned None immediately since the row was never added to
+        # item_version_conflict, and there's no Kitsu issue either. The
+        # user has no way to see WHY nothing will be ingested for this row
+        # without one.
+        a = self._already_after_version_up()
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("already exists on the NAS as v002", tip)
+        self.assertIn("Override", tip)
+
+    def test_override_accepts_an_already_ingested_row(self):
+        a = self._already_after_version_up()
+        self.table._confirm_override = lambda items: "override"
+
+        self.table._on_override_conflicts()
+
+        self.assertNotEqual(self.table._effective_status(a), STATUS_ALREADY)
+        self.assertIn(id(a), self.table.item_override)
+        self.assertEqual(self.table.get_valid_ingest_items(), [(a, 2)])
+        tip = self.table._table.item(0, COL_STATUS).toolTip()
+        self.assertIn("Overriding", tip)
+        self.assertIn("already exists on the NAS as v002", tip)
+
+    def test_declining_the_confirmation_leaves_it_held_out(self):
+        a = self._already_after_version_up()
+        self.table._confirm_override = lambda items: None   # user clicked Cancel
+
+        self.table._on_override_conflicts()
+
+        self.assertEqual(self.table._effective_status(a), STATUS_ALREADY)
+        self.assertNotIn(id(a), self.table.item_override)
+        self.assertEqual(self.table.get_valid_ingest_items(), [])
+
+    def test_already_override_is_undoable(self):
+        a = self._already_after_version_up()
+        self.table._confirm_override = lambda items: "override"
+        self.table._on_override_conflicts()
+        self.assertNotEqual(self.table._effective_status(a), STATUS_ALREADY)
+
+        self.table._on_undo()
+
+        self.assertEqual(self.table._effective_status(a), STATUS_ALREADY)
+        self.assertNotIn(id(a), self.table.item_override)
+
+    def test_version_up_does_not_touch_an_already_ingested_row(self):
+        a = self._already_after_version_up()
+        seen = []
+        self.table.revalidation_requested.connect(lambda items: seen.append(list(items)))
+        self.table._scope_combo.setCurrentText("Apply to All Rows")
+
+        self.table._on_version_up()
+
+        self.assertEqual(seen, [])
+        self.assertEqual(self.table._effective_status(a), STATUS_ALREADY)
+
+    def test_override_handles_a_mixed_batch_in_one_confirmation(self):
+        # A genuine content conflict and an already-ingested row, overridden
+        # together in one click -- the button doesn't care which kind of
+        # "already occupies this slot" verdict each row has.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        b = _make_item("b", "SQ020", "SH0200", "Plate", "FG", "/tmp/b.mov")
+        self.table.populate_table([a, b])
+        self.table.apply_version_results({
+            id(a): (1, "conflict", True),
+            id(b): (2, "already", False),
+        })
+        seen = []
+        self.table._confirm_override = lambda items: seen.append(list(items)) or "override"
+
+        self.table._on_override_conflicts()
+
+        self.assertEqual(len(seen), 1)
+        self.assertEqual({i.name for i in seen[0]}, {"a", "b"})
+        self.assertNotEqual(self.table._effective_status(a), STATUS_CONFLICT)
+        self.assertNotEqual(self.table._effective_status(b), STATUS_ALREADY)
+
+
 class TestConflictActionButtonState(unittest.TestCase):
     """
     Screenshot report: Version Up and Override sat there enabled (Override
@@ -981,6 +1238,33 @@ class TestConflictActionButtonState(unittest.TestCase):
         # underlying conflict fact, it just accepted it; the user can still
         # ask for a clean version instead if they change their mind.
         self.assertTrue(self.table._version_up_btn.isEnabled())
+
+    def test_override_enables_for_an_already_ingested_row_with_no_conflict(self):
+        # Not every "already" row got there via a resolved conflict -- a
+        # plain first-time check can land directly on identical content
+        # (e.g. re-running ingest over the same source a second time).
+        # Override must still offer to force it through.
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.assertFalse(self.table._override_btn.isEnabled())
+
+        self.table.apply_version_results({id(a): (1, "already", False)})
+
+        self.assertEqual(self.table._effective_status(a), STATUS_ALREADY)
+        self.assertNotIn(id(a), self.table.item_version_conflict)
+        self.assertTrue(self.table._override_btn.isEnabled())
+        self.assertFalse(self.table._version_up_btn.isEnabled())   # nothing to seek past
+
+    def test_override_disables_again_once_the_already_row_is_overridden(self):
+        a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")
+        self.table.populate_table([a])
+        self.table.apply_version_results({id(a): (1, "already", False)})
+        self.assertTrue(self.table._override_btn.isEnabled())
+
+        self.table._confirm_override = lambda items: "override"
+        self.table._on_override_conflicts()
+
+        self.assertFalse(self.table._override_btn.isEnabled())
 
     def test_version_up_disables_again_once_resolved(self):
         a = _make_item("a", "SQ010", "SH0100", "Plate", "BG", "/tmp/a.mov")

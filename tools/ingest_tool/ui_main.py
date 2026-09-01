@@ -130,17 +130,20 @@ class NASCheckWorker(QtCore.QThread):
 
 class KitsuCheckWorker(QtCore.QThread):
     """
-    Background thread: pre-flight the table's Sequence/Shot pairs against
-    Kitsu. Read-only -- it looks shots up, it never creates them, so it is
-    safe to run at any point before ingesting.
+    Background thread: pre-flight the table's Sequence/Shot/Media Name
+    against Kitsu -- an exact-name collision under the wrong sequence
+    (check_shots) and a near-duplicate name that's likely a formatting
+    slip (check_naming_conflicts). Read-only -- it looks things up, it
+    never creates or changes anything, so it is safe to run at any point
+    before ingesting.
     """
 
-    results_ready = QtCore.Signal(dict)   # {(SEQ, SHOT): finding}
+    results_ready = QtCore.Signal(dict, dict)   # {(SEQ, SHOT): finding}, {(SEQ, SHOT, MEDIA_NAME): finding}
     failed        = QtCore.Signal(str)
 
     def __init__(self, rows, project_data, host, user, password):
         super().__init__()
-        self.rows         = rows
+        self.rows         = rows   # [(sequence_code, shot_code, media_name), ...]
         self.project_data = project_data
         self.host         = host
         self.user         = user
@@ -150,7 +153,10 @@ class KitsuCheckWorker(QtCore.QThread):
         try:
             kitsu = KitsuClient(host=self.host, email=self.user, password=self.password, dry_run=False)
             kitsu.connect()
-            self.results_ready.emit(kitsu.check_shots(self.project_data, self.rows))
+            shot_rows = [(seq, shot) for seq, shot, _media in self.rows]
+            report = kitsu.check_shots(self.project_data, shot_rows)
+            naming_report = kitsu.check_naming_conflicts(self.project_data, self.rows)
+            self.results_ready.emit(report, naming_report)
         except Exception as e:
             logger.error(f"[KitsuCheckWorker] {e}", exc_info=True)
             self.failed.emit(str(e))
@@ -821,7 +827,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not items:
             return
 
-        rows = [(i.sequence_code, i.shot_code) for i in items]
+        rows = [(i.sequence_code, i.shot_code, i.media_name) for i in items]
         self._check_bar.setMaximum(0)          # busy: the lookup is one request, not a per-row loop
         self._check_bar.setVisible(True)
 
@@ -836,16 +842,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._kitsu_check_worker.failed.connect(self._on_kitsu_check_failed)
         self._kitsu_check_worker.start()
 
-    def _on_kitsu_check_done(self, report):
+    def _on_kitsu_check_done(self, report, naming_report):
         self._check_bar.setVisible(False)
         self._check_bar.setMaximum(100)
-        self.table_widget.apply_kitsu_check(report)
+        self.table_widget.apply_kitsu_check(report, naming_report)
         self._update_conflict_badge()
 
-        if not report:
+        if not report and not naming_report:
             return
         states = [f.get("state") for f in report.values()]
-        if all(st == KitsuClient.KITSU_UNKNOWN for st in states):
+        if report and all(st == KitsuClient.KITSU_UNKNOWN for st in states):
             QtWidgets.QMessageBox.warning(
                 self, "Check in Kitsu",
                 "Could not reach Kitsu, so no shots were checked.\n\n"
@@ -855,17 +861,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
         flagged = self.table_widget.kitsu_conflict_count()
         created = sum(1 for st in states if st == KitsuClient.KITSU_NEW_SHOT)
+        near_dup = len(naming_report)
         if flagged:
+            detail = f"{flagged} row(s) point at a shot that already exists under a different sequence"
+            if near_dup:
+                detail += f", or have a name close to (but not exactly) one already in Kitsu ({near_dup} near-duplicate)"
             QtWidgets.QMessageBox.warning(
                 self, "Check in Kitsu",
-                f"{flagged} row(s) point at a shot that already exists under a different "
-                "sequence in Kitsu.\n\nThey are flagged as conflicts — hover a row's Status "
-                "for the detail, then fix its Sequence and re-check."
+                f"{detail}.\n\nThey are flagged as conflicts — hover a row's Status for the "
+                "detail, then fix the name (or use Ignore Kitsu Warning if it's genuinely "
+                "different) and re-check."
             )
         else:
             QtWidgets.QMessageBox.information(
                 self, "Check in Kitsu",
-                f"No shot conflicts.\n\n{len(report)} shot(s) checked, "
+                f"No conflicts.\n\n{len(report)} shot(s) checked, "
                 f"{created} will be created on ingest."
             )
 

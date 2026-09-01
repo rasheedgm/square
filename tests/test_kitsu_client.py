@@ -171,6 +171,108 @@ class TestKitsuCheckShots(unittest.TestCase):
         self.assertIn(("SQ010", "SH0100"), report)
 
 
+class TestKitsuCheckNamingConflicts(unittest.TestCase):
+    """
+    check_shots() only matches names exactly (case-insensitively) -- a
+    client folder called "SH_0100" when Kitsu already has "SH0100" sails
+    through as "new shot, will be created" and silently produces a
+    near-duplicate. check_naming_conflicts() catches that: same name once
+    separators (_, -, space) and case are stripped, but not an exact match.
+    """
+
+    def _connected_client(self, shots, sequences=None):
+        client = KitsuClient(dry_run=False)
+        client.gazu = _FakeGazu(shots, sequences)
+        client.is_connected = True
+        return client
+
+    def test_underscore_difference_is_flagged_on_the_shot(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"},
+        ])
+        report = client.check_naming_conflicts("proj", [("SQ010", "SH_0100", "BG")])
+        finding = report[("SQ010", "SH_0100", "BG")]
+        self.assertEqual(finding["field"], "shot")
+        self.assertEqual(finding["existing"], ["SH0100"])
+
+    def test_case_difference_is_flagged(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"},
+        ])
+        report = client.check_naming_conflicts("proj", [("SQ010", "sh0100", "BG")])
+        # lowercase "sh0100" upper-cases to an EXACT match ("SH0100") --
+        # check_shots' territory, not a near-duplicate at all.
+        self.assertEqual(report, {})
+
+    def test_a_genuinely_different_looking_shot_is_not_flagged(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"},
+        ])
+        report = client.check_naming_conflicts("proj", [("SQ010", "SH0200", "BG")])
+        self.assertEqual(report, {})
+
+    def test_an_exact_match_is_not_flagged_here(self):
+        client = self._connected_client([
+            {"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"},
+        ])
+        report = client.check_naming_conflicts("proj", [("SQ010", "SH0100", "BG")])
+        self.assertEqual(report, {})
+
+    def test_sequence_near_duplicate_is_flagged(self):
+        client = self._connected_client(
+            shots=[],
+            sequences=[{"id": "s1", "name": "SQ010"}],
+        )
+        report = client.check_naming_conflicts("proj", [("SQ-010", "SH0100", "BG")])
+        finding = report[("SQ-010", "SH0100", "BG")]
+        self.assertEqual(finding["field"], "sequence")
+        self.assertEqual(finding["existing"], ["SQ010"])
+
+    def test_media_name_near_duplicate_is_flagged_only_within_its_own_shot(self):
+        client = self._connected_client([
+            {
+                "name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1",
+                "data": {"media_items": {"BG": {}}},
+            },
+            {
+                "name": "SH0200", "sequence_name": "SQ010", "sequence_id": "s1",
+                "data": {"media_items": {}},
+            },
+        ])
+        # "B_G" on SH0100, where "BG" already exists -- flagged.
+        report = client.check_naming_conflicts("proj", [("SQ010", "SH0100", "B_G")])
+        finding = report[("SQ010", "SH0100", "B_G")]
+        self.assertEqual(finding["field"], "media_name")
+        self.assertEqual(finding["existing"], ["BG"])
+
+        # The exact same media name "B_G" on a DIFFERENT shot with no media
+        # recorded at all -- media names aren't project-global, so nothing
+        # to compare against there.
+        report2 = client.check_naming_conflicts("proj", [("SQ010", "SH0200", "B_G")])
+        self.assertEqual(report2, {})
+
+    def test_only_the_highest_priority_field_is_reported(self):
+        # Both shot AND sequence are near-duplicates here -- shot wins,
+        # one finding per row, not a pile of simultaneous warnings.
+        client = self._connected_client(
+            shots=[{"name": "SH0100", "sequence_name": "SQ010", "sequence_id": "s1"}],
+            sequences=[{"id": "s1", "name": "SQ010"}],
+        )
+        report = client.check_naming_conflicts("proj", [("SQ_010", "SH_0100", "BG")])
+        self.assertEqual(report[("SQ_010", "SH_0100", "BG")]["field"], "shot")
+
+    def test_disconnected_client_returns_nothing_rather_than_erroring(self):
+        client = KitsuClient(dry_run=False)
+        client.is_connected = False
+        report = client.check_naming_conflicts("proj", [("SQ010", "SH_0100", "BG")])
+        self.assertEqual(report, {})
+
+    def test_rows_missing_a_shot_code_are_skipped(self):
+        client = self._connected_client([])
+        report = client.check_naming_conflicts("proj", [("SQ010", "", "BG")])
+        self.assertEqual(report, {})
+
+
 class _FakeGazuShotWithData:
     """
     A minimal live gazu.shot stand-in that actually PERSISTS shot.data

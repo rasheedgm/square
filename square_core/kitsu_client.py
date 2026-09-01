@@ -1,8 +1,11 @@
 import os
+import re
 import logging
 import uuid
 
 logger = logging.getLogger("SquareKitsu")
+
+_NAME_SEPARATOR_RE = re.compile(r"[\s_\-]+")
 
 class KitsuClient:
     """Wrapper around CGWire gazu API for live Kitsu DB operations."""
@@ -423,6 +426,155 @@ class KitsuClient:
                     ),
                     "sequences": sorted(found),
                 }
+        return report
+
+    @staticmethod
+    def _normalize_name(name):
+        """
+        Strips separators and case so 'SH0100', 'SH_0100' and 'sh-01 00' all
+        compare equal -- used only to catch a likely formatting slip, never
+        to decide two names ARE the same (that's still an exact match).
+        """
+        return _NAME_SEPARATOR_RE.sub("", (name or "")).strip().upper()
+
+    def check_naming_conflicts(self, project, rows):
+        """
+        Pre-flight rows for a near-duplicate NAME already in Kitsu -- a
+        client folder called "SH_0100" when Kitsu already has "SH0100" is
+        almost always the same shot with a formatting slip, not a
+        deliberately different one, and check_shots() only matches exact
+        (case-insensitive) names so it would wave this straight through as
+        "new shot, will be created," silently producing a confusing
+        near-duplicate.
+
+        `rows` is an iterable of (sequence_code, shot_code, media_name).
+        Checks, per row, shot name against every shot in the project,
+        sequence name against every sequence, and media name against the
+        OTHER media already recorded on that same shot (media names aren't
+        project-global, only meaningful per shot) -- shot first, then
+        sequence, then media name; a row gets at most one finding, the
+        highest-priority one that applies.
+
+        An EXACT match is never flagged here (that's fine, or it's
+        check_shots' wrong-sequence/ambiguous territory). A name with
+        nothing close to it in Kitsu at all is not flagged either -- that's
+        just a genuinely new name.
+
+        Returns {(SEQ, SHOT, MEDIA_NAME): {"field", "existing", "message"}}
+        for only the rows with a finding.
+        """
+        pairs = []
+        seen = set()
+        for seq_code, shot_code, media_name in rows:
+            key = (
+                (seq_code or "").strip().upper(),
+                (shot_code or "").strip().upper(),
+                (media_name or "").strip().upper(),
+            )
+            if key[1] and key not in seen:
+                seen.add(key)
+                pairs.append(key)
+
+        if not pairs or not (self.gazu and self.is_connected):
+            return {}
+
+        project_arg = project if isinstance(project, dict) else {"id": str(project)}
+        try:
+            shots = self.gazu.shot.all_shots_for_project(project_arg) or []
+            sequences = self.gazu.shot.all_sequences_for_project(project_arg) or []
+        except Exception as e:
+            logger.error(f"[KitsuClient] Naming pre-flight failed: {e}")
+            self.last_error = str(e)
+            return {}
+
+        shot_exact, shot_norm = set(), {}
+        for shot in shots:
+            name = (shot.get("name") or "").strip()
+            if not name:
+                continue
+            shot_exact.add(name.upper())
+            shot_norm.setdefault(self._normalize_name(name), set()).add(name)
+
+        seq_exact, seq_norm = set(), {}
+        for seq in sequences:
+            name = (seq.get("name") or "").strip()
+            if not name:
+                continue
+            seq_exact.add(name.upper())
+            seq_norm.setdefault(self._normalize_name(name), set()).add(name)
+
+        # media names are only meaningful scoped to their own shot -- keyed
+        # SHOT_NAME_UPPER -> {"exact": {...}, "norm": {normalized: {names}}}.
+        # Relies on the project shot listing already carrying each shot's
+        # data.media_items (true for a real Kitsu server's listing
+        # endpoint); a shot with no media_items recorded yet just yields no
+        # media-name finding for rows against it -- fails safe, not wrong.
+        media_by_shot = {}
+        for shot in shots:
+            shot_name = (shot.get("name") or "").strip().upper()
+            if not shot_name:
+                continue
+            media_items = ((shot.get("data") or {}).get("media_items") or {})
+            exact = {m.upper() for m in media_items.keys()}
+            norm = {}
+            for m in media_items.keys():
+                norm.setdefault(self._normalize_name(m), set()).add(m)
+            media_by_shot[shot_name] = {"exact": exact, "norm": norm}
+
+        report = {}
+        for seq_up, shot_up, media_up in pairs:
+            finding = None
+
+            if shot_up not in shot_exact:
+                close = shot_norm.get(self._normalize_name(shot_up))
+                if close:
+                    existing = sorted(close)
+                    finding = {
+                        "field": "shot",
+                        "existing": existing,
+                        "message": (
+                            f"No shot named exactly '{shot_up}' in Kitsu, but "
+                            f"'{', '.join(existing)}' is a near-identical name already there "
+                            "(different spacing/underscore/case). Likely the same shot -- "
+                            "fix the Shot name to match exactly, or ignore if it's really different."
+                        ),
+                    }
+
+            if finding is None and seq_up not in seq_exact:
+                close = seq_norm.get(self._normalize_name(seq_up))
+                if close:
+                    existing = sorted(close)
+                    finding = {
+                        "field": "sequence",
+                        "existing": existing,
+                        "message": (
+                            f"No sequence named exactly '{seq_up}' in Kitsu, but "
+                            f"'{', '.join(existing)}' is a near-identical name already there. "
+                            "Likely the same sequence -- fix the Sequence name to match "
+                            "exactly, or ignore if it's really different."
+                        ),
+                    }
+
+            if finding is None and media_up and shot_up in media_by_shot:
+                info = media_by_shot[shot_up]
+                if media_up not in info["exact"]:
+                    close = info["norm"].get(self._normalize_name(media_up))
+                    if close:
+                        existing = sorted(close)
+                        finding = {
+                            "field": "media_name",
+                            "existing": existing,
+                            "message": (
+                                f"Shot '{shot_up}' already has media named '{', '.join(existing)}' "
+                                f"in Kitsu, close to this row's '{media_up}' (different spacing/"
+                                "underscore/case). Likely the same media -- fix the Media Name to "
+                                "match exactly, or ignore if it's really different."
+                            ),
+                        }
+
+            if finding:
+                report[(seq_up, shot_up, media_up)] = finding
+
         return report
 
     @staticmethod

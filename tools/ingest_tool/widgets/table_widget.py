@@ -148,6 +148,12 @@ class IngestTableWidget(QtWidgets.QWidget):
         # Override action) -- kept even after resolving so the tooltip can
         # keep saying so, distinct from item_version_conflict being cleared.
         self.item_override = set()
+        # id(item) the user explicitly accepted a Kitsu finding for (wrong-
+        # sequence, ambiguous, or a near-duplicate name) -- proceed anyway.
+        # Kept apart from kitsu_issues itself for the same reason item_override
+        # is kept apart from item_version_conflict: the finding stays visible
+        # in the tooltip even once acknowledged.
+        self.kitsu_acknowledged = set()
         # Restore points for the batch tools (Apply Rename, ALL CAPS/lowercase,
         # Set Version) -- newest last, capped so a long session can't grow it
         # unbounded. Each entry is {"label", "rows": [per-item snapshot, ...]}.
@@ -182,6 +188,7 @@ class IngestTableWidget(QtWidgets.QWidget):
         self.kitsu_issues = {}
         self.item_version_conflict = set()
         self.item_override = set()
+        self.kitsu_acknowledged = set()
         # A fresh load starts a new editing session -- nothing to undo into.
         self._undo_stack = []
         self._set_undo_button_state()
@@ -306,39 +313,68 @@ class IngestTableWidget(QtWidgets.QWidget):
         self._run_conflict_detection()
         self._refresh_table()
 
-    def apply_kitsu_check(self, report: dict):
+    def apply_kitsu_check(self, report: dict, naming_report: dict = None):
         """
-        Apply a KitsuClient.check_shots() report, keyed (SEQUENCE, SHOT).
+        Apply KitsuClient.check_shots() (report, keyed (SEQUENCE, SHOT)) and,
+        optionally, check_naming_conflicts() (naming_report, keyed
+        (SEQUENCE, SHOT, MEDIA_NAME)) together -- one "Check in Kitsu"
+        click, one consistent kitsu_issues state. Where both have a finding
+        for the same row, check_shots wins: an exact-name collision under
+        the wrong sequence is a confirmed fact, a near-duplicate name is a
+        heuristic guess that could be a false positive on a genuinely
+        different shot.
 
-        Only the two states that need a human decision -- the shot already
-        living under a different sequence, or under several -- mark the row as
-        a conflict. "Will be created" and "matches Kitsu" are recorded for the
-        row's tooltip but never block anything.
+        Only the states that need a human decision -- wrong sequence,
+        several sequences, or a near-duplicate name -- mark the row as a
+        conflict. "Will be created" and "matches Kitsu" are recorded for
+        the row's tooltip but never block anything, and -- critically --
+        never preempt a naming_report finding either: check_shots returns
+        SOME state (usually "new_shot" or "ok") for essentially every row
+        that has a shot code, so only its two genuine CONFLICT states may
+        skip the naming_report lookup below. Treating any finding at all as
+        preemptive silently made check_naming_conflicts() dead code for
+        almost every real row.
         """
         from square_core.kitsu_client import KitsuClient
 
+        naming_report = naming_report or {}
         self.kitsu_issues = {}
         for item in self.items_data:
-            key = (
-                (item.sequence_code or "").strip().upper(),
-                (item.shot_code or "").strip().upper(),
-            )
-            finding = report.get(key)
-            if not finding:
+            seq_up = (item.sequence_code or "").strip().upper()
+            shot_up = (item.shot_code or "").strip().upper()
+            media_up = (item.media_name or "").strip().upper()
+
+            finding = report.get((seq_up, shot_up))
+            if finding and finding.get("state") in KitsuClient.KITSU_CONFLICT_STATES:
+                self.kitsu_issues[id(item)] = {
+                    "state": finding.get("state"),
+                    "message": finding.get("message", ""),
+                    "conflict": True,
+                }
                 continue
-            self.kitsu_issues[id(item)] = {
-                "state": finding.get("state"),
-                "message": finding.get("message", ""),
-                "conflict": finding.get("state") in KitsuClient.KITSU_CONFLICT_STATES,
-            }
+
+            naming_finding = naming_report.get((seq_up, shot_up, media_up))
+            if naming_finding:
+                self.kitsu_issues[id(item)] = {
+                    "state": f"near_duplicate_{naming_finding.get('field')}",
+                    "message": naming_finding.get("message", ""),
+                    "conflict": True,
+                }
+            elif finding:
+                self.kitsu_issues[id(item)] = {
+                    "state": finding.get("state"),
+                    "message": finding.get("message", ""),
+                    "conflict": False,
+                }
         self._run_conflict_detection()
         self._refresh_table()
 
     def kitsu_conflict_count(self):
-        """How many active rows the last Kitsu pre-flight flagged."""
+        """How many active, un-acknowledged rows the last Kitsu pre-flight flagged."""
         return sum(
             1 for key, issue in self.kitsu_issues.items()
             if issue.get("conflict") and key not in self.item_discarded
+            and key not in self.kitsu_acknowledged
         )
 
     def has_unresolved_conflicts(self) -> bool:
@@ -572,13 +608,22 @@ class IngestTableWidget(QtWidgets.QWidget):
 
         kitsu_btn = QtWidgets.QPushButton("Check in Kitsu")
         kitsu_btn.setToolTip(
-            "Look every row's Sequence / Shot up in Kitsu before ingesting.\n"
-            "Flags shots that already exist under a different sequence, which\n"
-            "would otherwise create a duplicate shot. Hover a row's Status for\n"
-            "the finding."
+            "Look every row's Sequence / Shot / Media Name up in Kitsu before\n"
+            "ingesting. Flags a shot that already exists under a different\n"
+            "sequence (which would otherwise create a duplicate), and a name\n"
+            "that's close to an existing one but not an exact match -- likely\n"
+            "the same thing with a formatting slip (_, spacing, case). Hover\n"
+            "a row's Status for the finding."
         )
         kitsu_btn.clicked.connect(self.kitsu_conflict_check_requested.emit)
         bar_layout.addWidget(kitsu_btn)
+
+        self._ignore_kitsu_btn = QtWidgets.QPushButton("Ignore Kitsu Warning")
+        self._ignore_kitsu_btn.setStyleSheet("background:#7C2D12; color:white; padding:4px 8px;")
+        self._ignore_kitsu_btn.setEnabled(False)
+        self._ignore_kitsu_btn.setToolTip("No unresolved Kitsu findings right now.")
+        self._ignore_kitsu_btn.clicked.connect(self._on_ignore_kitsu_warning)
+        bar_layout.addWidget(self._ignore_kitsu_btn)
 
         return bar
 
@@ -706,9 +751,13 @@ class IngestTableWidget(QtWidgets.QWidget):
         when the table was still mid-check and nothing had been flagged yet.
         """
         any_conflict = bool(self.item_version_conflict)
+        any_already = any(
+            self._effective_status(item) == STATUS_ALREADY and id(item) not in self.item_override
+            for item in self.items_data
+        )
         any_unresolved = any(
             key not in self.item_override for key in self.item_version_conflict
-        )
+        ) or any_already
         self._version_up_btn.setEnabled(any_conflict)
         self._version_up_btn.setToolTip(
             "For conflicted rows in scope: ask the NAS for the real next-free version again."
@@ -716,9 +765,21 @@ class IngestTableWidget(QtWidgets.QWidget):
         )
         self._override_btn.setEnabled(any_unresolved)
         self._override_btn.setToolTip(
-            "For conflicted rows in scope: proceed anyway and overwrite the existing "
-            "version's content. Asks for confirmation first."
+            "For conflicted or Already Ingested rows in scope: proceed anyway -- overwrite "
+            "a conflicting version's content, or force a re-ingest of content that's already "
+            "on the NAS unchanged. Asks for confirmation first."
             if any_unresolved else "No unresolved version conflicts right now."
+        )
+
+        any_kitsu_unresolved = any(
+            issue.get("conflict") and key not in self.kitsu_acknowledged
+            for key, issue in self.kitsu_issues.items()
+        )
+        self._ignore_kitsu_btn.setEnabled(any_kitsu_unresolved)
+        self._ignore_kitsu_btn.setToolTip(
+            "For flagged rows in scope: confirm the Sequence/Shot/Media Name are correct "
+            "as typed and proceed anyway. Asks for confirmation first."
+            if any_kitsu_unresolved else "No unresolved Kitsu findings right now."
         )
 
     def _effective_status(self, item):
@@ -741,9 +802,10 @@ class IngestTableWidget(QtWidgets.QWidget):
             return STATUS_MISSING_DETAILS
         # A Kitsu pre-flight conflict outranks the NAS verdict: the row may be
         # a perfectly good "New Version" on disk and still be pointed at the
-        # wrong shot in Kitsu.
+        # wrong shot in Kitsu -- unless the user has explicitly acknowledged
+        # it and chosen to proceed anyway.
         issue = self.kitsu_issues.get(key)
-        if issue and issue.get("conflict"):
+        if issue and issue.get("conflict") and key not in self.kitsu_acknowledged:
             return STATUS_CONFLICT
         return self.item_status.get(key, STATUS_NEW)
 
@@ -751,12 +813,25 @@ class IngestTableWidget(QtWidgets.QWidget):
         """
         Tooltip text for a row whose CURRENT version was disk-verified (real
         path, real content hash -- see NASManager.check_specific_version) to
-        already hold different content. None once nothing is flagged.
+        already hold different content, OR that was overridden out of
+        Already Ingested (identical content, forced anyway). None once
+        nothing is flagged.
         """
         key = id(item)
-        if key not in self.item_version_conflict:
-            return None
         ver = self.item_version.get(key, 1)
+        if key in self.item_override and key not in self.item_version_conflict:
+            return (
+                f"Overriding: this exact content already exists on the NAS as v{ver:03d}. "
+                "Ingesting will re-copy/overwrite it anyway."
+            )
+        if key not in self.item_version_conflict:
+            if self._effective_status(item) == STATUS_ALREADY:
+                return (
+                    f"This exact content already exists on the NAS as v{ver:03d} -- nothing "
+                    "changed, so there's nothing to ingest. Use Override if you want to force "
+                    "it back in anyway."
+                )
+            return None
         if key in self.item_override:
             return (
                 f"Overriding: v{ver:03d} already exists on the NAS with different content. "
@@ -943,6 +1018,7 @@ class IngestTableWidget(QtWidgets.QWidget):
             self._pending_revalidation.add(key)
             # The finding was about the shot this row used to point at.
             self.kitsu_issues.pop(key, None)
+            self.kitsu_acknowledged.discard(key)
             if key not in self.item_discarded:
                 self.item_status[key] = STATUS_CHECKING
         self.revalidation_requested.emit(changed)
@@ -976,6 +1052,7 @@ class IngestTableWidget(QtWidgets.QWidget):
                 "kitsu_issue": self.kitsu_issues.get(key),
                 "version_conflict": key in self.item_version_conflict,
                 "override": key in self.item_override,
+                "kitsu_acknowledged": key in self.kitsu_acknowledged,
             })
         return snaps
 
@@ -1033,6 +1110,10 @@ class IngestTableWidget(QtWidgets.QWidget):
                 self.item_override.add(key)
             else:
                 self.item_override.discard(key)
+            if snap["kitsu_acknowledged"]:
+                self.kitsu_acknowledged.add(key)
+            else:
+                self.kitsu_acknowledged.discard(key)
         self._run_conflict_detection()
         self._refresh_table()
         self._set_undo_button_state()
@@ -1160,28 +1241,44 @@ class IngestTableWidget(QtWidgets.QWidget):
         """
         "override" | None (cancelled). Split out from _on_override_conflicts
         so the choice can be driven directly in tests without a live modal.
+
+        Covers two distinct verdicts under one button: a real content
+        mismatch (item_version_conflict) and an exact match the user wants
+        forced back in anyway (Already Ingested) -- worded generically since
+        a batch can contain a mix of both.
         """
         box = QtWidgets.QMessageBox(self)
-        box.setWindowTitle("Override Version Conflict")
+        box.setWindowTitle("Override")
         names = ", ".join(i.name for i in items[:5]) + (", ..." if len(items) > 5 else "")
         box.setText(
-            f"{len(items)} row(s) point at a version that already exists on the NAS with "
-            f"different content:\n\n{names}\n\n"
-            "Ingesting will overwrite that content on the NAS. This cannot be undone by this tool."
+            f"{len(items)} row(s) already have a version on the NAS matching this slot -- "
+            f"either different content at that version number, or the exact same content "
+            f"already ingested:\n\n{names}\n\n"
+            "Ingesting will write/overwrite that content on the NAS anyway. "
+            "This cannot be undone by this tool."
         )
         accept_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "AcceptRole")
         reject_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "RejectRole")
-        override_btn = box.addButton("Override and Overwrite", accept_role)
+        override_btn = box.addButton("Override and Proceed", accept_role)
         box.addButton("Cancel", reject_role)
         box.exec() if hasattr(box, "exec") else box.exec_()
         return "override" if box.clickedButton() is override_btn else None
 
     def _on_override_conflicts(self):
-        """Explicitly accept a version conflict and proceed anyway."""
+        """
+        Explicitly accept a version conflict OR an Already Ingested verdict
+        and proceed anyway. Same button, same confirmation -- the two cases
+        differ only in what item_status becomes and whether the row is a
+        disk-verified content mismatch (item_version_conflict) or an exact
+        match the user wants to force back in regardless.
+        """
         self._sync_edits_from_table()
         items = [
             i for i in self._items_in_scope()
-            if id(i) in self.item_version_conflict and id(i) not in self.item_override
+            if id(i) not in self.item_override and (
+                id(i) in self.item_version_conflict
+                or self._effective_status(i) == STATUS_ALREADY
+            )
         ]
         if not items:
             return
@@ -1193,6 +1290,49 @@ class IngestTableWidget(QtWidgets.QWidget):
             self.item_override.add(key)
             ver = self.item_version.get(key, 1)
             self.item_status[key] = STATUS_NEW_VERSION if ver > 1 else STATUS_NEW
+        self._run_conflict_detection()
+        self._refresh_table()
+
+    def _confirm_ignore_kitsu(self, items):
+        """
+        "ignore" | None (cancelled). Split out from _on_ignore_kitsu_warning
+        so the choice can be driven directly in tests without a live modal.
+        """
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Ignore Kitsu Warning")
+        names = ", ".join(i.name for i in items[:5]) + (", ..." if len(items) > 5 else "")
+        box.setText(
+            f"{len(items)} row(s) have a Kitsu naming finding not yet resolved "
+            f"(hover Status for the detail):\n\n{names}\n\n"
+            "Confirm these are correct as typed -- genuinely different from what "
+            "Kitsu already has -- and proceed anyway?"
+        )
+        accept_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "AcceptRole")
+        reject_role = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "RejectRole")
+        ignore_btn = box.addButton("Ignore and Proceed", accept_role)
+        box.addButton("Cancel", reject_role)
+        box.exec() if hasattr(box, "exec") else box.exec_()
+        return "ignore" if box.clickedButton() is ignore_btn else None
+
+    def _on_ignore_kitsu_warning(self):
+        """
+        Explicitly accept a Kitsu finding (wrong sequence, ambiguous, or a
+        near-duplicate name) and proceed anyway -- the row's Sequence/Shot/
+        Media Name are confirmed correct as typed, not a formatting slip.
+        """
+        self._sync_edits_from_table()
+        items = [
+            i for i in self._items_in_scope()
+            if id(i) in self.kitsu_issues and self.kitsu_issues[id(i)].get("conflict")
+            and id(i) not in self.kitsu_acknowledged
+        ]
+        if not items:
+            return
+        if self._confirm_ignore_kitsu(items) != "ignore":
+            return
+        self._push_undo("Ignore Kitsu Warning", items)
+        for item in items:
+            self.kitsu_acknowledged.add(id(item))
         self._run_conflict_detection()
         self._refresh_table()
 

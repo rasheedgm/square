@@ -1,0 +1,16 @@
+name: square_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - openimageio
+  - pip
+  - pip:
+    - gazu
+    - requests
+    - pillow
+    - xxhash
+    - imageio-ffmpeg
+    - keyring
+    - pyyaml

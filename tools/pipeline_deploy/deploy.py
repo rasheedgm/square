@@ -5,7 +5,10 @@ Ships a versioned release onto the studio NAS:
 
     releases/vX.Y.Z/    a frozen copy of square_core/ (+ tools/ if present)
     current             an NTFS junction -> the active release
-    config/             studio_config.json (from the template, kept on rollback)
+    config/             studio_config.json  -- NEVER overwritten after the first
+                        deploy; studio_config.template.json -- the reference,
+                        refreshed each deploy. Missing keys are reported (or
+                        added with --update-config).
     envs/               a Python venv built from requirements.txt
     launchers/          one .bat per deployed tool + square_rollback.bat
 
@@ -128,10 +131,63 @@ def write_launchers(launchers_dir: Path, release_dir: Path):
 
 
 # --------------------------------------------------------------------------
+# config
+# --------------------------------------------------------------------------
+
+def _reconcile_config(config_dir: Path, update: bool) -> None:
+    """The deployed studio_config.json is authoritative and is NEVER
+    overwritten -- it holds the studio's real Kitsu host / NAS roots / edits.
+
+    Deploy the template alongside it as a reference, then compare TOP-LEVEL
+    keys: report any the template has that the live config lacks (a setting
+    added in a newer release). With --update-config, add just those missing
+    keys (template values), back up the old file, and touch nothing else."""
+    tmpl_src = repo_root / "studio_config.template.json"
+    if not tmpl_src.exists():
+        return
+    template = json.loads(tmpl_src.read_text(encoding="utf-8"))
+
+    ref = config_dir / "studio_config.template.json"
+    shutil.copy2(tmpl_src, ref)                       # the reference copy IS refreshed
+
+    live = config_dir / "studio_config.json"
+    if not live.exists():
+        shutil.copy2(tmpl_src, live)
+        print(f"[deploy] seeded {live} -- fill in kitsu_host + nas_roots "
+              f"(credentials are per-user JWTs, not in this file)")
+        return
+
+    try:
+        current = json.loads(live.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"[deploy] WARN: {live} is not valid JSON ({e}); left untouched")
+        return
+
+    missing = [k for k in template if k not in current]
+    if not missing:
+        print(f"[deploy] {live.name}: up to date, unchanged")
+        return
+
+    if not update:
+        print(f"[deploy] NOTE: {live.name} is missing key(s) added in a newer "
+              f"template: {', '.join(missing)}")
+        print(f"        compare against {ref.name}, or re-run with --update-config "
+              f"to add them (existing values are never changed)")
+        return
+
+    backup = live.with_suffix(f".json.bak-{datetime.datetime.now():%Y%m%d-%H%M%S}")
+    shutil.copy2(live, backup)
+    for k in missing:
+        current[k] = template[k]
+    live.write_text(json.dumps(current, indent=4) + "\n", encoding="utf-8")
+    print(f"[deploy] {live.name}: added {', '.join(missing)} (backup: {backup.name})")
+
+
+# --------------------------------------------------------------------------
 # deploy
 # --------------------------------------------------------------------------
 
-def deploy(nas_root_path, target_tool=None, deploy_env=False):
+def deploy(nas_root_path, target_tool=None, deploy_env=False, update_config=False):
     nas_root = Path(nas_root_path).resolve()
     version_tag = f"v{__version__}"
     releases_dir = nas_root / "releases"
@@ -190,14 +246,7 @@ def deploy(nas_root_path, target_tool=None, deploy_env=False):
     # point `current` at this release
     make_junction(release_dir, current)
 
-    # config (only if absent -- rollback must not clobber a studio's edits)
-    target_config = config_dir / "studio_config.json"
-    if not target_config.exists():
-        tmpl = repo_root / "studio_config.template.json"
-        if tmpl.exists():
-            shutil.copy2(tmpl, target_config)
-            print(f"[deploy] seeded {target_config} from template "
-                  f"(fill in kitsu_host + nas_roots; credentials are per-user, not in this file)")
+    _reconcile_config(config_dir, update=update_config)
 
     write_launchers(launchers_dir, release_dir)
 
@@ -212,12 +261,16 @@ def _main():
     p.add_argument("--dest", "-d", default=default_dest, help="studio NAS pipeline root")
     p.add_argument("--tool", "-t", help="deploy one tool into the current release only")
     p.add_argument("--include-env", "-e", action="store_true", help="rebuild the venv")
+    p.add_argument("--update-config", action="store_true",
+                   help="add any missing keys from the template to studio_config.json "
+                        "(existing values untouched; backup written)")
     p.add_argument("--rollback", "-r", metavar="VERSION", help="flip 'current' to a past release")
     a = p.parse_args()
     if a.rollback:
         rollback(a.dest, a.rollback)
     else:
-        deploy(a.dest, target_tool=a.tool, deploy_env=a.include_env)
+        deploy(a.dest, target_tool=a.tool, deploy_env=a.include_env,
+               update_config=a.update_config)
 
 
 if __name__ == "__main__":

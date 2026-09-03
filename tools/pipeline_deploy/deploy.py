@@ -4,12 +4,15 @@ Square VFX Studio Pipeline — Deployment
 Ships a versioned release onto the studio NAS:
 
     releases/vX.Y.Z/    a frozen copy of square_core/ (+ tools/ if present)
-    current             a junction/symlink -> the active release
+    current             an NTFS junction -> the active release
     config/             studio_config.json (from the template, kept on rollback)
     envs/               a Python venv built from requirements.txt
     launchers/          one .bat per deployed tool + square_rollback.bat
 
-`current` is flipped atomically, so a rollback is instant.
+`current` is a junction, flipped by deleting it (os.rmdir -- detaches the
+junction, never touches the release it points at) and re-creating it, so a
+rollback is instant. Junctions need a local NTFS path: deploy to a path the
+workstations map locally, not a raw \\NAS share.
 
     python -m tools.pipeline_deploy.deploy --dest //NAS/pipeline
     python -m tools.pipeline_deploy.deploy --dest //NAS/pipeline --rollback v0.1.0
@@ -34,36 +37,38 @@ from square_core import __version__  # noqa: E402
 
 
 # --------------------------------------------------------------------------
-# link / rollback
+# the `current` junction
 # --------------------------------------------------------------------------
 
-def link_or_copy(source_dir, link_dir) -> str:
+def remove_junction(link) -> None:
+    """Detach `current` if it exists. os.rmdir removes a junction / symlink /
+    empty dir WITHOUT ever recursing into the target -- a populated real dir
+    raises instead of being deleted, so a release can't be nuked by accident."""
+    link = str(link)
+    if not os.path.lexists(link):
+        return
+    try:
+        os.rmdir(link)
+    except OSError as e:
+        raise SystemExit(
+            f"[ERROR] {link} is not a junction (won't delete a real directory tree): {e}"
+        )
+
+
+def make_junction(source_dir, link_dir) -> None:
     src = os.path.abspath(str(source_dir))
     link = os.path.abspath(str(link_dir))
-
-    if os.path.lexists(link):
-        try:
-            os.unlink(link) if os.path.islink(link) else shutil.rmtree(link, ignore_errors=True)
-        except Exception:
-            shutil.rmtree(link, ignore_errors=True)
-
-    try:
-        os.symlink(src, link, target_is_directory=True)
-        print(f"[deploy] symlink  {link} -> {src}")
-        return "symlink"
-    except Exception:
-        pass
-    try:
-        r = subprocess.run(f'cmd /c mklink /J "{link}" "{src}"', capture_output=True,
-                           text=True, shell=True)
-        if r.returncode == 0:
-            print(f"[deploy] junction {link} -> {src}")
-            return "junction"
-    except Exception:
-        pass
-    print(f"[deploy] links restricted; copying -> {link}")
-    shutil.copytree(src, link)
-    return "copy"
+    remove_junction(link)
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", link, src],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        raise SystemExit(
+            "[ERROR] mklink /J failed: "
+            + (r.stderr.strip() or r.stdout.strip() or "unknown")
+            + f"\n        A junction needs a local NTFS path -- '{link}' or '{src}' "
+              "looks like a network share. Deploy to a path the workstations map locally."
+        )
+    print(f"[deploy] junction  {link} -> {src}")
 
 
 def rollback(nas_root_path, version_tag: str):
@@ -75,7 +80,7 @@ def rollback(nas_root_path, version_tag: str):
         avail = [d.name for d in (nas_root / "releases").iterdir() if d.is_dir()] \
             if (nas_root / "releases").exists() else []
         sys.exit(f"[ERROR] release {version_tag} not found. available: {avail}")
-    link_or_copy(target, nas_root / "current")
+    make_junction(target, nas_root / "current")
     print(f"[OK] active production -> {version_tag}")
 
 
@@ -168,11 +173,7 @@ def deploy(nas_root_path, target_tool=None, deploy_env=False):
         shutil.rmtree(dst, ignore_errors=True)
         shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     else:
-        if current.exists() or current.is_symlink():
-            try:
-                os.unlink(current) if current.is_symlink() else shutil.rmtree(current, ignore_errors=True)
-            except Exception:
-                pass
+        remove_junction(current)                     # detach before writing into releases/
         release_dir.mkdir(parents=True, exist_ok=True)
         ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
         shutil.copytree(repo_root / "square_core", release_dir / "square_core",
@@ -186,8 +187,8 @@ def deploy(nas_root_path, target_tool=None, deploy_env=False):
             "source_path": str(repo_root),
         }, indent=2), encoding="utf-8")
 
-    # current pointer
-    link_or_copy(release_dir, current)
+    # point `current` at this release
+    make_junction(release_dir, current)
 
     # config (only if absent -- rollback must not clobber a studio's edits)
     target_config = config_dir / "studio_config.json"

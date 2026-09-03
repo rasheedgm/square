@@ -57,6 +57,18 @@ Credentials are **not** in the file — each user logs in once
 env\Scripts\python.exe -m unittest discover -s tests
 ```
 
+## Deploy to the studio NAS
+
+```
+python -m tools.pipeline_deploy.deploy --dest //NAS/pipeline
+python -m tools.pipeline_deploy.deploy --dest //NAS/pipeline --rollback v0.1.0
+```
+
+Ships a versioned release (`releases/vX.Y.Z/` + a `current` junction flipped
+atomically), builds a venv from `requirements.txt`, seeds
+`config/studio_config.json` from the template, and writes one launcher `.bat`
+per deployed tool plus `square_rollback.bat`.
+
 ## Docs
 
 - [`docs/pipeline_architecture.md`](docs/pipeline_architecture.md) — layers, the single Kitsu access point, services, tool inventory, build order

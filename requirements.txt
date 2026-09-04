@@ -1,0 +1,13 @@
+# square_core -- the pipeline core
+gazu>=0.10
+requests>=2.31.0
+pillow>=10.0.0
+xxhash>=3.3.0
+imageio-ffmpeg>=0.4.8
+OpenImageIO>=2.4
+keyring>=24            # optional -- JWT cache falls back to a 0600 file without it
+pyyaml>=6.0
+
+# desktop tools (ingest_tool, review_player, ...) additionally need:
+#   Qt.py>=1.3.0
+#   PySide6>=6.5.0

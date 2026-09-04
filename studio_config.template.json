@@ -1,0 +1,8 @@
+{
+    "kitsu_host": "http://kitsu-host/api",
+    "nas_roots": {
+        "default": "X:/projects"
+    },
+    "kitsu_project_templates": [],
+    "project_defaults": {}
+}

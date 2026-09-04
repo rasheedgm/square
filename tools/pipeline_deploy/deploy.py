@@ -236,7 +236,14 @@ def deploy(nas_root_path, target_tool=None, deploy_env=False, update_config=Fals
         try:
             subprocess.run([sys.executable, "-m", "venv", str(target_env)], check=True)
             pip = target_env / "Scripts" / "pip.exe"
-            req = repo_root / "requirements.txt"
+            # requirements-tools.txt (core + Qt) if present -- the deployed
+            # venv is shared by every launcher on the NAS, including desktop
+            # tools that need Qt; requirements.txt alone would leave them
+            # unable to import it. Installing Qt never hurts an env that
+            # doesn't strictly need it, so prefer the fuller file.
+            req = repo_root / "requirements-tools.txt"
+            if not req.exists():
+                req = repo_root / "requirements.txt"
             if pip.exists() and req.exists():
                 subprocess.run([str(pip), "install", "-r", str(req)], check=True)
         except Exception as e:

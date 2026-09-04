@@ -91,8 +91,11 @@ python -m tools.pipeline_deploy.deploy --dest //NAS/pipeline --rollback v0.1.0
 ```
 
 Ships a versioned release (`releases/vX.Y.Z/` + a `current` junction flipped
-atomically), builds a venv from `requirements.txt`, and writes one launcher
-`.bat` per deployed tool plus `square_rollback.bat`.
+atomically), builds a venv from `requirements-tools.txt` (falls back to
+`requirements.txt` if that file isn't present) — one venv, shared by every
+launcher on the NAS including the Qt-based desktop tools, so it needs the
+fuller dependency set even though `square_core` itself doesn't — and writes
+one launcher `.bat` per deployed tool plus `square_rollback.bat`.
 
 `config/studio_config.json` is seeded on the first deploy and **never
 overwritten** after that. Each deploy refreshes `studio_config.template.json`

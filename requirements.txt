@@ -8,6 +8,6 @@ OpenImageIO>=2.4
 keyring>=24            # optional -- JWT cache falls back to a 0600 file without it
 pyyaml>=6.0
 
-# desktop tools (ingest_tool, review_player, ...) additionally need:
-#   Qt.py>=1.3.0
-#   PySide6>=6.5.0
+# desktop tools (ingest_tool, config_editor, review_player, ...) additionally
+# need Qt -- see requirements-tools.txt. square_core itself never imports it,
+# so a farm/CI/service install stays lightweight with just this file.

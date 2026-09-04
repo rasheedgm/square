@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError, schema
-from square_core.config.project import DEFAULT_PROJECT_CONFIG
+from square_core.config.project import DEFAULT_PROJECT_CONFIG, _deep_merge
 
 ADMIN_ROLES = {"admin", "manager"}
 
@@ -85,14 +85,8 @@ def _clone(d):
     return json.loads(json.dumps(d))
 
 
-def _deep_merge(base: dict, over: dict) -> dict:
-    out = _clone(base)
-    for k, v in (over or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
+# _deep_merge is square_core.config.project's -- imported above, not
+# redefined here, so the two never drift apart
 
 
 def _atomic_write(path: Path, data: dict, *, backup: bool) -> Path | None:

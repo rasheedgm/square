@@ -15,6 +15,7 @@ Pure-ish: stdlib + `square_core.paths` (for template validation) only.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -130,7 +131,7 @@ _MEDIA_SOURCES = ("delivery", "publish", "work")
 
 
 def _deep_merge(base: dict, over: dict | None) -> dict:
-    out = json.loads(json.dumps(base))  # cheap deep copy
+    out = copy.deepcopy(base)
     for k, v in (over or {}).items():
         if isinstance(v, dict) and isinstance(out.get(k), dict):
             out[k] = _deep_merge(out[k], v)
@@ -143,7 +144,7 @@ def _migrate_v1(data: dict) -> dict:
     """Fold a v1 `templates` + `ingest` config into a v2 `media_types` registry,
     in memory. Best-effort -- a v1 config was never in production."""
     if int(data.get("schema_version", 1)) >= 2:
-        return data
+        return _backfill_v2_orphans(data)
     d = json.loads(json.dumps(data))
     templates = d.pop("templates", {}) or {}
     ingest = d.pop("ingest", {}) or {}
@@ -173,6 +174,38 @@ def _migrate_v1(data: dict) -> dict:
     d.setdefault("copy_workers", DEFAULT_PROJECT_CONFIG["copy_workers"])
     d.setdefault("tools", {})
     d["schema_version"] = SCHEMA_VERSION
+    return _backfill_v2_orphans(d)
+
+
+def _backfill_v2_orphans(data: dict) -> dict:
+    """A stayed-at-`schema_version: 2` change made within this codebase's own
+    v2 lifetime: `tools.ingest.copy_workers` moved to top-level `copy_workers`,
+    and `media_types` entries gained `source`. `_migrate_v1` only fires for a
+    literal `schema_version < 2`, so a config saved by an earlier commit of
+    THIS schema (still v2) would otherwise silently lose its configured
+    `copy_workers` and have every media type resolve as `source: "publish"`
+    regardless of `tools.ingest.media_types` having named it a delivery type.
+    Best-effort, in memory, never errors; a config that never had this shape
+    is returned untouched."""
+    ingest = (data.get("tools") or {}).get("ingest")
+    if not isinstance(ingest, dict):
+        return data
+    orphan_workers = "copy_workers" in ingest and "copy_workers" not in data
+    mt = data.get("media_types")
+    orphan_sources = []
+    if isinstance(mt, dict):
+        for name in (ingest.get("media_types") or []):
+            entry = mt.get(name)
+            if isinstance(entry, dict) and "source" not in entry:
+                orphan_sources.append(name)
+    if not orphan_workers and not orphan_sources:
+        return data
+
+    d = json.loads(json.dumps(data))
+    if orphan_workers:
+        d["copy_workers"] = d["tools"]["ingest"].pop("copy_workers")
+    for name in orphan_sources:
+        d["media_types"][name]["source"] = "delivery"
     return d
 
 

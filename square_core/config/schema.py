@@ -20,7 +20,7 @@ Pure stdlib. `square_core.paths` runs the template-specific checks separately
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger("square.config.schema")

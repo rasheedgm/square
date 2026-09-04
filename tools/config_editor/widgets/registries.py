@@ -31,10 +31,12 @@ _PROTECTED = {"_default"}
 class RegistryEditor(QtWidgets.QWidget):
     signal_changed = QtCore.Signal()
 
-    def __init__(self, fv, parent=None):
+    def __init__(self, fv, parent=None, *, version_pad: int = 3, frame_pad: int = 4):
         super().__init__(parent)
         self.fv = fv
         self._kind = fv.kind
+        self._version_pad = version_pad
+        self._frame_pad = frame_pad
         data = json.loads(json.dumps(fv.value or {}))
         self._string_mode = all(isinstance(v, str) for v in data.values()) and bool(data)
         if self._kind == "root":
@@ -52,8 +54,11 @@ class RegistryEditor(QtWidgets.QWidget):
         self.table.cellDoubleClicked.connect(self._maybe_build)
         lay.addWidget(self.table)
 
-        hint = QtWidgets.QLabel("double-click a dir / file / pattern cell to open "
-                               "the template builder")
+        hint = QtWidgets.QLabel(
+            "double-click a dir / file / pattern cell to open the template builder. "
+            "editing any row here and saving writes the whole table shown, including "
+            "rows still at their built-in value -- not just the row you changed.")
+        hint.setWordWrap(True)
         hint.setStyleSheet("color:#64748B;font-size:11px;")
         lay.addWidget(hint)
 
@@ -152,7 +157,8 @@ class RegistryEditor(QtWidgets.QWidget):
             return
         item = self.table.item(r, c) or QtWidgets.QTableWidgetItem("")
         new = TemplateBuilderDialog.edit_pattern(
-            self, item.text(), title=header, is_dir=(header == "dir"))
+            self, item.text(), title=header, is_dir=(header == "dir"),
+            version_pad=self._version_pad, frame_pad=self._frame_pad)
         if new is not None:
             item.setText(new)
             self.table.setItem(r, c, item)

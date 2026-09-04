@@ -227,6 +227,45 @@ class TestLoadSave(unittest.TestCase):
             self.assertEqual(cfg.copy_workers, 8)              # stayed top-level
             self.assertEqual(cfg.tools, {})
 
+    def test_orphaned_v2_ingest_keys_backfilled_on_load(self):
+        """A config saved under schema_version 2 by an EARLIER commit of this
+        same codebase (before copy_workers moved top-level and media_types
+        gained `source`) must not silently lose copy_workers or misclassify
+        every media type as source=publish just because schema_version never
+        changed. Regression test for a real bug found in review: _migrate_v1
+        only fires for schema_version < 2, so this v2-internal move needs its
+        own always-on backfill."""
+        with tempfile.TemporaryDirectory() as td:
+            old_v2 = {
+                "schema_version": 2,
+                "roots": DEFAULT_PROJECT_CONFIG["roots"],
+                "media_types": {
+                    "_default": DEFAULT_PROJECT_CONFIG["media_types"]["_default"],
+                    "Plate": {"dir": "plates/{name}_v{version}",
+                             "previewable": True, "colorspace": "ACEScg"},
+                    "CompRender": DEFAULT_PROJECT_CONFIG["media_types"]["CompRender"],
+                },
+                "tools": {"ingest": {"copy_workers": 8, "transfer_mode": "copy",
+                                     "media_types": ["Plate"]}},
+            }
+            p = Path(td) / "_pipeline" / "project_config.json"
+            p.parent.mkdir(parents=True)
+            p.write_text(json.dumps(old_v2), encoding="utf-8")
+
+            cfg = ProjectConfig.load(td)
+            self.assertEqual(cfg.copy_workers, 8)
+            self.assertEqual(cfg.media_type("Plate")["source"], "delivery")
+            self.assertIn("Plate", cfg.media_type_names(source="delivery"))
+            # a type never listed in tools.ingest.media_types keeps whatever
+            # source it already resolves to (here: the _default's, "publish")
+            # -- the backfill only tags what the old data actually told it to
+            self.assertEqual(cfg.media_type("CompRender")["source"], "publish")
+
+    def test_backfill_is_a_noop_for_a_config_that_never_had_the_old_shape(self):
+        cfg = ProjectConfig.from_defaults()
+        untouched = copy.deepcopy(cfg.data)
+        from square_core.config.project import _backfill_v2_orphans
+        self.assertEqual(_backfill_v2_orphans(cfg.data), untouched)
 
 
 

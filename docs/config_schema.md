@@ -201,6 +201,16 @@ offline session or a plain `user` gets a read-only window.
   `.bak`. This is what keeps the file matching what's actually configured:
   open a sparse config, look around, save without touching anything, and the
   file on disk is unchanged.
+  **Exception: `roots` / `media_types` / `delivery_presets`.** Touching is
+  tracked per *key*, not per row/cell — editing one row in a registry table
+  marks the whole key touched, and its saved value is the entire table shown
+  (every row, including ones still at their built-in value), not a diff of
+  just the row you changed. This is deliberate, not an oversight: a named
+  entry that isn't in the file at all (e.g. `Plate`) is simply not offered —
+  it does **not** fall back to a built-in `Plate` the way `_default` does (see
+  §3.1) — so a partial "only the changed row" save would silently drop every
+  other visible-but-untouched entry from the project's catalogue. The table
+  editor says as much inline.
 - The status bar always names the exact file the active tab reads/writes and
   where its `.bak-<timestamp>` will land (same folder, same name).
 - Headless: `python -m tools.config_editor --cli {list|get|set|reset|diff}` --

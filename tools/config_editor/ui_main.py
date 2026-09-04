@@ -56,6 +56,14 @@ class ScopePane(QtWidgets.QWidget):
             fields = []
             form.addRow(QtWidgets.QLabel("Open a project to edit project config."))
 
+        # the actual project's padding, not the schema's bare defaults, so the
+        # by-example template builder's preview matches what will really render
+        try:
+            version_pad = int(self.store.field(self.scope, "version_pad").value)
+            frame_pad = int(self.store.field(self.scope, "frame_pad").value)
+        except (KeyError, RuntimeError, TypeError, ValueError):
+            version_pad, frame_pad = 3, 4
+
         for fv in fields:
             label = QtWidgets.QLabel(fv.key)
             label.setToolTip(fv.description or fv.key)
@@ -64,7 +72,7 @@ class ScopePane(QtWidgets.QWidget):
             tag = QtWidgets.QLabel(("● override" if fv.overridden else fv.source))
             tag.setStyleSheet(f"color:{_SOURCE_COLOR.get(fv.source, '#94A3B8')};font-size:11px;")
 
-            editor = make_field_editor(fv)
+            editor = make_field_editor(fv, version_pad=version_pad, frame_pad=frame_pad)
             editor.signal_changed.connect(lambda k=fv.key: self._on_field_changed(k))
             self._editors[fv.key] = editor
 

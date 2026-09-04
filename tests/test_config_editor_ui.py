@@ -111,6 +111,23 @@ class TestEditorUI(unittest.TestCase):
             # media_types still resolves fully and is still sourced as builtin
             self.assertEqual(store.field("project", "media_types").source, "builtin")
 
+    def test_registry_editor_gets_the_projects_real_padding(self):
+        """The by-example template builder must preview against the project's
+        actual version_pad/frame_pad, not the schema's bare defaults (3/4) --
+        regression test for a review finding where RegistryEditor always used
+        the hardcoded defaults regardless of what the project configured."""
+        from tools.config_editor.core import ConfigStore
+        from tools.config_editor.ui_main import ScopePane
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project(td)
+            ProjectConfig.from_defaults(overrides={"version_pad": 5, "frame_pad": 6}).save(root)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+            store.open_project(root, "ABC")
+            pane = ScopePane("project", store)
+            self.assertEqual(pane._editors["media_types"]._version_pad, 5)
+            self.assertEqual(pane._editors["media_types"]._frame_pad, 6)
+            self.assertEqual(pane._editors["roots"]._version_pad, 5)
+
     def test_studio_scope_untouched_fields_are_not_written(self):
         from tools.config_editor.core import ConfigStore
         from tools.config_editor.ui_main import ScopePane

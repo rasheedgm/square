@@ -50,7 +50,9 @@ class _StrField(_Base):
             self._lay.addWidget(b)
 
     def _browse(self):
-        p = QtWidgets.QFileDialog.getExistingDirectory(self, "Choose", self.edit.text())
+        # every registered "path" key today (colorspace.ocio) names a file,
+        # not a folder
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Choose", self.edit.text())
         if p:
             self.edit.setText(p)
 
@@ -200,12 +202,12 @@ _SCALAR = {"str": _StrField, "path": _StrField, "int": _IntField,
            "float": _FloatField, "bool": _BoolField, "enum": _EnumField}
 
 
-def make_field_editor(fv, parent=None):
+def make_field_editor(fv, parent=None, *, version_pad: int = 3, frame_pad: int = 4):
     if fv.kind in _SCALAR:
         return _SCALAR[fv.kind](fv, parent)
     if fv.kind == "list":
         return _ListField(fv, parent)
     if fv.kind in ("root", "media_type_registry", "delivery_registry"):
         from .registries import RegistryEditor
-        return RegistryEditor(fv, parent)
+        return RegistryEditor(fv, parent, version_pad=version_pad, frame_pad=frame_pad)
     return _JsonField(fv, parent)     # dict, template, anything else

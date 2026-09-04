@@ -101,9 +101,19 @@ class GazuBackend:
 
     def get_project(self, ident: str) -> dict | None:
         try:
-            return self.g.project.get_project(ident)
+            p = self.g.project.get_project(ident)
+            if p:
+                return p
         except Exception:
-            return self.g.project.get_project_by_name(ident)
+            pass
+        p = self.g.project.get_project_by_name(ident)
+        if p:
+            return p
+        # by code -- gazu has no get_project_by_code
+        for p in (self.g.project.all_projects() or []):
+            if p.get("code") == ident:
+                return p
+        return None
 
     def new_project(self, name: str, production_type: str = "short") -> dict:
         return self.g.project.new_project(name, production_type=production_type)

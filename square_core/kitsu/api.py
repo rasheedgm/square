@@ -269,7 +269,14 @@ class KitsuApi:
 
     def output_files(self, entity, *, output_type_name: str | None = None) -> list:
         ot = self.ensure_output_type(output_type_name) if output_type_name else None
-        return [_map.output(o) for o in self._b.output_files_for_entity(_id(entity), output_type=ot)]
+        by_id = {o["id"]: o.get("name", "") for o in self._b.all_output_types()}
+        out = []
+        for o in self._b.output_files_for_entity(_id(entity), output_type=ot):
+            rec = _map.output(o)
+            if not rec.output_type:
+                rec.output_type = by_id.get(o.get("output_type_id"), "")
+            out.append(rec)
+        return out
 
     def record_working_file(self, task, *, revision: int, path: str, name: str = "main",
                             software: str | None = None, data: dict | None = None):

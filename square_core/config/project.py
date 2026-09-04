@@ -16,6 +16,7 @@ Pure-ish: stdlib + `square_core.paths` (for template validation) only.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from .conventions import SHOT_FOLDER_STRUCTURE
+
+_log = logging.getLogger("square.config.project")
 
 SCHEMA_VERSION = 2
 PIPELINE_DIRNAME = "_pipeline"
@@ -328,8 +331,18 @@ class ProjectConfig:
         return errs
 
     def check(self) -> None:
-        """Structural + template validation. Raises ConfigError on any problem."""
+        """Structural + schema + template validation. Raises ConfigError on any
+        problem; logs a warning for each unknown key (a tool not installed here,
+        or a typo)."""
+        from . import schema
+
         errs = self.structural_errors()
+
+        schema_errs, warnings = schema.validate(self.data, "project")
+        errs.extend(schema_errs)
+        for w in warnings:
+            _log.warning("project config: %s", w)
+
         if not errs:
             from square_core.paths import PathResolver, PathError
 

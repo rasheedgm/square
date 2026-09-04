@@ -80,6 +80,29 @@ class PipelineConfig:
                 cfg.project_defaults = merged
         return cfg
 
+    # ------------------------------------------------------------------
+
+    def as_dict(self) -> dict:
+        return {
+            "kitsu_host": self.kitsu_host,
+            "nas_roots": dict(self.nas_roots),
+            "kitsu_project_templates": list(self.kitsu_project_templates),
+            "project_defaults": self.project_defaults,
+        }
+
+    def check(self) -> None:
+        """Schema validation of the studio config. Raises `ConfigError`; logs a
+        warning per unknown key."""
+        import logging
+
+        from . import schema
+
+        errors, warnings = schema.validate(self.as_dict(), "studio")
+        for w in warnings:
+            logging.getLogger("square.config.pipeline").warning("studio config: %s", w)
+        if errors:
+            raise ConfigError("invalid studio config:\n  - " + "\n  - ".join(errors))
+
 
 def _clean_url(url: str) -> str:
     if not url or "://" not in url:

@@ -139,8 +139,8 @@ class TestProvenance(unittest.TestCase):
 
 
 class TestPathContext(unittest.TestCase):
-    def test_media_type_aliases_output_type(self):
-        self.assertEqual(PathContext("X:", "ABC", output_type="Plate").media_type, "Plate")
+    def test_media_type_field(self):
+        self.assertEqual(PathContext("X:", "ABC", media_type="Plate").media_type, "Plate")
 
     def test_with_override(self):
         ctx = PathContext("X:", "ABC", shot="SH0100")
@@ -160,9 +160,11 @@ class TestResults(unittest.TestCase):
     def test_shapes(self):
         pc = ProjectCreated(project=Project("p1", "ABC"), config_path="X:/ABC/_pipeline/project_config.json")
         self.assertEqual(pc.folders_created, [])
-        pr = PublishResult(output=Output(output_type="comp", revision=3), path="X:/o")
-        self.assertIsNone(pr.preview)
-        self.assertEqual(pr.checksums, {})
+        mr = PublishResult(media_type="CompRender", name="main", version=3,
+                           record=Output(output_type="comp", revision=3), dir="X:/o")
+        self.assertIsNone(mr.preview)
+        self.assertEqual(mr.checksums, {})
+        self.assertFalse(mr.copied)
 
 
 if __name__ == "__main__":

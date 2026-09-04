@@ -280,7 +280,10 @@ class KitsuApi:
 
     def record_output_file(self, entity, output_type_name: str, task, *, revision: int,
                            path: str, representation: str = "", name: str = "main",
-                           comment: str = "", data: dict | None = None):
+                           comment: str = "", data: dict | None = None,
+                           source_file_id: str = ""):
+        # `source_file_id` (a working_file) is carried in data["square"]["inputs"]
+        # by services.media -- gazu's new_entity_output_file has no clean field.
         ot = self.ensure_output_type(output_type_name)
         raw = self._b.new_output_file(_id(entity), ot, _task_type_ref(task), comment=comment,
                                       name=name, revision=revision, representation=representation)

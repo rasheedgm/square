@@ -1,10 +1,14 @@
-"""ProjectConfig -- the per-project path/naming/convention config that travels
-with the project on the NAS (`{project_root}/_pipeline/project_config.json`).
+"""ProjectConfig -- the per-project path/naming config that travels with the
+project on the NAS (`{project_root}/_pipeline/project_config.json`).
 
-Written by `projects.create` from `StudioConfig.project_defaults` + a thin
-`ProjectSpec`. Read live by every tool -- never snapshotted into a session.
-`load()` validates and refuses a broken config (a bad template means writes
-land in the wrong place). Schema: `docs/config_and_paths.md` §4.
+Written by `projects.create` from `PipelineConfig.project_defaults` + a thin
+`ProjectSpec`. Read live by every tool -- never snapshotted. `load()` validates
+and refuses a broken config (a bad template means writes land in the wrong
+place). Schema: `docs/config_and_paths.md`.
+
+v2 (2026-09-04): one `media_types` registry -- ingest and render-output are the
+same operation. `templates.output` / `templates.workfile` / `ingest.by_type`
+are gone. A `schema_version < 2` file is migrated in memory on load.
 
 Pure-ish: stdlib + `square_core.paths` (for template validation) only.
 """
@@ -20,7 +24,7 @@ from typing import Any
 
 from .conventions import SHOT_FOLDER_STRUCTURE
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PIPELINE_DIRNAME = "_pipeline"
 PROJECT_CONFIG_FILENAME = "project_config.json"
 
@@ -30,8 +34,7 @@ class ConfigError(RuntimeError):
 
 
 # --------------------------------------------------------------------------
-# Built-in default -- the shape `StudioConfig.project_defaults` should hold,
-# seeded from today's config.py constants so behaviour matches the ingest tool.
+# Built-in default -- the shape `PipelineConfig.project_defaults` should hold.
 # --------------------------------------------------------------------------
 
 DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
@@ -48,50 +51,58 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "version_pad": 3,
     "frame_pad": 4,
     "slugify": {"spaces_to": "_", "strip": '<>:"/\\|?*', "collapse": "_"},
+
     "roots": {
         "project": "{nas_root}/{project}",
         "shot": "{project_root}/{episode}/shots/{sequence}/{shot}",
         "asset": "{project_root}/assets/{asset_type}/{asset}",
         "delivery": "{project_root}/_delivery",
     },
-    "templates": {
-        "workfile": {
-            "base": "shot",
-            "dir": "work/{task}/{software}",
-            "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.{ext}",
-        },
-        "output": {
-            "base": "shot",
-            "dir": "output/{output_type}/v{version}/{representation}",
-            "file": "{project}_{sequence}_{shot}_{output_type}_{name}_v{version}.{frame}.{ext}",
-        },
-    },
-    "ingest": {
-        "default": {
+
+    # the media-type registry: every ingest / render / workfile goes through this.
+    # each entry deep-merges over "_default".
+    "media_types": {
+        "_default": {
             "base": "shot",
             "dir": "input/{media_type}/{name}_v{version}",
             "file": "{project}_{sequence}_{shot}_{media_type}_{name}_v{version}.{frame}.{ext}",
+            "kitsu_kind": "output",          # output -> Kitsu output_file; working -> working_file
+            "previewable": False,
+            "colorspace": "",               # assumed for this type if a file doesn't declare one
         },
-        "by_type": {
-            "Plate": {"dir": "plates/{name}_v{version}"},
-            "Ref": {"dir": "ref/{name}_v{version}"},
-            "BG Plate": {"dir": "bg_plates/{name}_v{version}"},
-            "Comp Render": {"dir": "comp/{name}_v{version}"},
-            "Precomp": {"dir": "precomp/{name}_v{version}"},
-            "Element": {"dir": "elements/{name}_v{version}"},
-            "LUT": {"dir": "luts/{name}_v{version}"},
-            "Audio": {"dir": "audio/{name}_v{version}"},
-            "Matte": {"dir": "mattes/{name}_v{version}"},
-        },
+        "Plate":      {"dir": "plates/{name}_v{version}", "previewable": True, "colorspace": "ACEScg"},
+        "Ref":        {"dir": "ref/{name}_v{version}", "previewable": True},
+        "BG Plate":   {"dir": "bg_plates/{name}_v{version}", "previewable": True, "colorspace": "ACEScg"},
+        "Element":    {"dir": "elements/{name}_v{version}"},
+        "LUT":        {"dir": "luts/{name}_v{version}"},
+        "Audio":      {"dir": "audio/{name}_v{version}"},
+        "Matte":      {"dir": "mattes/{name}_v{version}"},
+
+        "CompRender": {"dir": "output/comp/v{version}/{representation}",
+                       "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{frame}.{ext}",
+                       "previewable": True, "colorspace": "ACEScg"},
+        "Precomp":    {"dir": "output/precomp/v{version}/{representation}",
+                       "file": "{project}_{sequence}_{shot}_precomp_{name}_v{version}.{frame}.{ext}"},
+        "Cache":      {"dir": "output/cache/{name}/v{version}", "representation": "abc",
+                       "file": "{project}_{sequence}_{shot}_{name}_v{version}.{frame}.{ext}"},
+
+        "NukeScript": {"kitsu_kind": "working",
+                       "dir": "work/comp/nuke",
+                       "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.nk"},
+        "MayaScene":  {"kitsu_kind": "working",
+                       "dir": "work/{task}/maya",
+                       "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.ma"},
     },
+
     "shot_folder_structure": list(SHOT_FOLDER_STRUCTURE),
     "asset_folder_structure": [],
     "project_folder_structure": ["shots", "assets", "_delivery", "_pipeline"],
+
     "delivery_presets": {
-        "default": {
+        "_default": {
             "base": "delivery",
             "dir": "{client}/{package}",
-            "file": "{shot}_{output_type}_v{version}.{frame}.{ext}",
+            "file": "{shot}_{media_type}_v{version}.{frame}.{ext}",
             "case": "preserve",
             "container": "exr",
             "frame_pad": 4,
@@ -100,16 +111,19 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
             "burnin": [],
         },
     },
+
+    # per-tool settings (a schema/registry + editor lands in Phase B;
+    # for now tools read straight from here)
+    "tools": {
+        "ingest": {
+            "copy_workers": 4,
+            "transfer_mode": "copy",
+            "media_types": ["Plate", "Ref", "BG Plate", "Element", "LUT", "Audio", "Matte"],
+        },
+    },
 }
 
-# fields the ingest tool still reads off a plain settings blob
-_INGEST_RUN_DEFAULTS = {
-    "copy_workers": 4,
-    "transfer_mode": "copy",
-    "preview_enabled_media_types": ["Plate", "Ref", "BG Plate", "Comp Render", "Precomp"],
-}
-
-_REQUIRED_TOP_KEYS = ("roots", "templates", "ingest")
+_DEFAULT_ENTRY = "_default"
 _REQUIRED_ROOTS = ("project", "shot")
 
 
@@ -123,11 +137,48 @@ def _deep_merge(base: dict, over: dict | None) -> dict:
     return out
 
 
+def _migrate_v1(data: dict) -> dict:
+    """Fold a v1 `templates` + `ingest` config into a v2 `media_types` registry,
+    in memory. Best-effort -- a v1 config was never in production."""
+    if int(data.get("schema_version", 1)) >= 2:
+        return data
+    d = json.loads(json.dumps(data))
+    templates = d.pop("templates", {}) or {}
+    ingest = d.pop("ingest", {}) or {}
+
+    mt: dict = {}
+    base_default = dict(ingest.get("default") or {})
+    base_default.setdefault("kitsu_kind", "output")
+    base_default.setdefault("previewable", False)
+    base_default.setdefault("colorspace", "")
+    mt[_DEFAULT_ENTRY] = base_default or DEFAULT_PROJECT_CONFIG["media_types"][_DEFAULT_ENTRY]
+
+    for name, entry in (ingest.get("by_type") or {}).items():
+        mt[name] = dict(entry)
+    if templates.get("output"):
+        mt.setdefault("Output", {**templates["output"], "kitsu_kind": "output"})
+    if templates.get("workfile"):
+        mt.setdefault("Workfile", {**templates["workfile"], "kitsu_kind": "working"})
+
+    prev = set(d.pop("preview_enabled_media_types", []) or [])
+    for name in prev:
+        if name in mt:
+            mt[name]["previewable"] = True
+
+    d["media_types"] = mt
+    tools = d.setdefault("tools", {}).setdefault("ingest", {})
+    for k in ("copy_workers", "transfer_mode"):
+        if k in d:
+            tools.setdefault(k, d.pop(k))
+    d["schema_version"] = SCHEMA_VERSION
+    return d
+
+
 @dataclass
 class ProjectConfig:
     data: dict = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)))
 
-    # ---- typed views -----------------------------------------------------
+    # ---- typed views -------------------------------------------------
 
     @property
     def fps(self) -> float:
@@ -158,8 +209,8 @@ class ProjectConfig:
         return dict(self.data.get("roots") or {})
 
     @property
-    def templates(self) -> dict:
-        return dict(self.data.get("templates") or {})
+    def media_types(self) -> dict:
+        return dict(self.data.get("media_types") or {})
 
     @property
     def shot_folder_structure(self) -> list:
@@ -177,38 +228,42 @@ class ProjectConfig:
     def delivery_presets(self) -> dict:
         return dict(self.data.get("delivery_presets") or {})
 
-    # ---- template lookups (with inheritance) ---------------------------
+    @property
+    def tools(self) -> dict:
+        return dict(self.data.get("tools") or {})
 
-    def template(self, kind: str) -> dict:
-        """A `templates.<kind>` block (workfile / output)."""
-        try:
-            return dict(self.data["templates"][kind])
-        except (KeyError, TypeError):
-            raise ConfigError(f"no template block named {kind!r}")
+    def tool(self, name: str) -> dict:
+        return dict((self.data.get("tools") or {}).get(name) or {})
 
-    def ingest_template(self, media_type: str) -> dict:
-        ing = self.data.get("ingest") or {}
-        base = dict(ing.get("default") or {})
-        override = (ing.get("by_type") or {}).get(media_type) or {}
-        base.update(override)
-        if not base:
-            raise ConfigError("ingest.default is missing")
-        return base
+    # ---- registry lookups (with inheritance) -----------------------
+
+    def media_type(self, name: str) -> dict:
+        """The fully-resolved config entry for a media type: `_default` with the
+        named entry deep-merged on top. An unknown name still resolves (uses
+        `_default`, `{media_type}` renders as the name)."""
+        reg = self.data.get("media_types") or {}
+        base = reg.get(_DEFAULT_ENTRY)
+        if not isinstance(base, dict):
+            raise ConfigError("media_types._default is missing")
+        return _deep_merge(base, reg.get(name) or {})
+
+    def media_type_names(self) -> list:
+        return [k for k in (self.data.get("media_types") or {}) if k != _DEFAULT_ENTRY]
 
     def delivery_template(self, client: str = "") -> dict:
         presets = self.data.get("delivery_presets") or {}
-        base = dict(presets.get("default") or {})
+        base = dict(presets.get(_DEFAULT_ENTRY) or presets.get("default") or {})
         if client and client in presets:
-            base.update(presets[client])
+            base = _deep_merge(base, presets[client])
         if not base:
-            raise ConfigError("delivery_presets.default is missing")
+            raise ConfigError("delivery_presets._default is missing")
         return base
 
-    # ---- build / load / save ------------------------------------------
+    # ---- build / load / save --------------------------------------
 
     @classmethod
     def from_defaults(cls, defaults: dict | None = None, *, overrides: dict | None = None) -> "ProjectConfig":
-        merged = _deep_merge(defaults or DEFAULT_PROJECT_CONFIG, overrides)
+        merged = _deep_merge(_migrate_v1(defaults or DEFAULT_PROJECT_CONFIG), overrides)
         merged.setdefault("schema_version", SCHEMA_VERSION)
         cfg = cls(data=merged)
         cfg.check()
@@ -231,7 +286,7 @@ class ProjectConfig:
             raise ConfigError(
                 f"{p} is schema v{data['schema_version']}, this build understands v{SCHEMA_VERSION}"
             )
-        cfg = cls(data=data)
+        cfg = cls(data=_migrate_v1(data))
         cfg.check()
         return cfg
 
@@ -248,29 +303,34 @@ class ProjectConfig:
                 os.unlink(tmp)
         return p
 
-    # ---- validation --------------------------------------------------
+    # ---- validation ----------------------------------------------
 
     def structural_errors(self) -> list[str]:
         errs: list[str] = []
-        for key in _REQUIRED_TOP_KEYS:
-            if not isinstance(self.data.get(key), dict):
-                errs.append(f"missing or non-object '{key}'")
-        roots = self.data.get("roots") or {}
+        roots = self.data.get("roots")
+        if not isinstance(roots, dict):
+            errs.append("missing or non-object 'roots'")
+            roots = {}
         for r in _REQUIRED_ROOTS:
             if not roots.get(r):
                 errs.append(f"roots.{r} is required")
-        tmpl = self.data.get("templates") or {}
-        for kind in ("workfile", "output"):
-            block = tmpl.get(kind)
-            if not isinstance(block, dict) or "file" not in block:
-                errs.append(f"templates.{kind} needs at least a 'file'")
+
+        reg = self.data.get("media_types")
+        if not isinstance(reg, dict) or _DEFAULT_ENTRY not in reg:
+            errs.append("media_types._default is required")
+        elif "file" not in (reg.get(_DEFAULT_ENTRY) or {}):
+            errs.append("media_types._default needs at least a 'file'")
+
+        for name in [n for n in (reg or {}) if n != _DEFAULT_ENTRY]:
+            kind = self.media_type(name).get("kitsu_kind", "output")
+            if kind not in ("output", "working"):
+                errs.append(f"media_types.{name}.kitsu_kind must be 'output' or 'working', not {kind!r}")
         return errs
 
     def check(self) -> None:
         """Structural + template validation. Raises ConfigError on any problem."""
         errs = self.structural_errors()
         if not errs:
-            # template rendering / version-variance checks live in the resolver
             from square_core.paths import PathResolver, PathError
 
             try:

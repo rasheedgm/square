@@ -18,8 +18,20 @@ class ProjectCreated:
 
 
 @dataclass
-class PublishResult:
-    output: Output
-    path: str = ""
+class MediaResult:
+    """The result of `services.media.publish` -- one versioned media (of a
+    configured media type) landed on disk and recorded in Kitsu."""
+    media_type: str
+    name: str
+    version: int
+    kitsu_kind: str = "output"                        # output | working
+    record: Output | None = None                     # the Kitsu file record
+    dir: str = ""
+    files: list = field(default_factory=list)         # dest file paths
     preview: PreviewMedia | None = None
     checksums: dict = field(default_factory=dict)     # dest file -> hash
+    copied: bool = False                              # False = files were already in place
+
+
+# kept as an alias so existing `work.publish_output` callers don't break
+PublishResult = MediaResult

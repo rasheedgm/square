@@ -28,10 +28,9 @@ class TestFromDefaults(unittest.TestCase):
 
     def test_broken_override_rejected(self):
         with self.assertRaises(ConfigError):
-            ProjectConfig.from_defaults(overrides={"templates": {
-                "workfile": {"base": "shot", "file": "{shot}.{ext}"},        # no version
-                "output": {"base": "shot", "file": "{shot}_v{version}.{ext}"},
-            }})
+            ProjectConfig.from_defaults(overrides={"media_types": {
+                "_default": {"base": "shot", "dir": "in/{media_type}/{name}",
+                             "file": "{shot}_{media_type}.{ext}"}}})       # no version
 
     def test_missing_root_rejected(self):
         data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
@@ -42,30 +41,41 @@ class TestFromDefaults(unittest.TestCase):
             cfg.check()
 
 
-class TestTemplateLookup(unittest.TestCase):
+class TestMediaTypeLookup(unittest.TestCase):
     def setUp(self):
         self.cfg = ProjectConfig.from_defaults()
 
-    def test_ingest_template_inherits_file_from_default(self):
-        t = self.cfg.ingest_template("Plate")
+    def test_entry_inherits_file_from_default(self):
+        t = self.cfg.media_type("Plate")
         self.assertEqual(t["dir"], "plates/{name}_v{version}")
-        self.assertIn("{frame}", t["file"])          # inherited from ingest.default
+        self.assertIn("{frame}", t["file"])              # inherited from _default
         self.assertEqual(t["base"], "shot")
+        self.assertEqual(t["kitsu_kind"], "output")
+        self.assertTrue(t["previewable"])                # from the Plate entry
 
-    def test_ingest_template_unknown_falls_back(self):
-        t = self.cfg.ingest_template("NoSuchType")
+    def test_unknown_type_uses_default(self):
+        t = self.cfg.media_type("NoSuchType")
         self.assertEqual(t["dir"], "input/{media_type}/{name}_v{version}")
+
+    def test_working_kind(self):
+        self.assertEqual(self.cfg.media_type("NukeScript")["kitsu_kind"], "working")
+
+    def test_media_type_names_excludes_default(self):
+        names = self.cfg.media_type_names()
+        self.assertIn("Plate", names)
+        self.assertIn("CompRender", names)
+        self.assertNotIn("_default", names)
 
     def test_delivery_template_client_overrides_default(self):
         cfg = ProjectConfig.from_defaults(overrides={"delivery_presets": {
             "ACME": {"container": "dpx"}}})
         d = cfg.delivery_template("ACME")
         self.assertEqual(d["container"], "dpx")
-        self.assertEqual(d["colorspace"], "Rec.709")     # from default
+        self.assertEqual(d["colorspace"], "Rec.709")     # from _default
 
-    def test_template_missing_raises(self):
-        with self.assertRaises(ConfigError):
-            self.cfg.template("nope")
+    def test_tool_config(self):
+        self.assertEqual(self.cfg.tool("ingest")["copy_workers"], 4)
+        self.assertIn("Plate", self.cfg.tool("ingest")["media_types"])
 
 
 class TestLoadSave(unittest.TestCase):
@@ -104,15 +114,46 @@ class TestLoadSave(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 ProjectConfig.load(td)
 
-    def test_load_broken_templates_rejected(self):
+    def test_load_broken_media_type_rejected(self):
         with tempfile.TemporaryDirectory() as td:
             data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
-            data["templates"]["output"] = {"base": "shot", "file": "{shot}.{ext}"}  # no version
+            data["media_types"]["_default"]["dir"] = "in/{media_type}/{name}"
+            data["media_types"]["_default"]["file"] = "{shot}_{media_type}.{ext}"  # no version
             p = Path(td) / "_pipeline" / "project_config.json"
             p.parent.mkdir(parents=True)
             p.write_text(json.dumps(data), encoding="utf-8")
             with self.assertRaises(ConfigError):
                 ProjectConfig.load(td)
+
+    def test_v1_config_migrates_on_load(self):
+        with tempfile.TemporaryDirectory() as td:
+            v1 = {
+                "schema_version": 1,
+                "roots": DEFAULT_PROJECT_CONFIG["roots"],
+                "templates": {
+                    "output": {"base": "shot", "dir": "output/{output_type}/v{version}",
+                               "file": "{shot}_{output_type}_v{version}.{frame}.{ext}"},
+                    "workfile": {"base": "shot", "dir": "work/{task}",
+                                 "file": "{shot}_{task}_v{version}.{ext}"},
+                },
+                "ingest": {
+                    "default": {"base": "shot", "dir": "in/{media_type}/{name}_v{version}",
+                                "file": "{shot}_{media_type}_{name}_v{version}.{frame}.{ext}"},
+                    "by_type": {"Plate": {"dir": "plates/{name}_v{version}"}},
+                },
+                "copy_workers": 8,
+            }
+            p = Path(td) / "_pipeline" / "project_config.json"
+            p.parent.mkdir(parents=True)
+            p.write_text(json.dumps(v1), encoding="utf-8")
+
+            cfg = ProjectConfig.load(td)
+            self.assertEqual(cfg.data["schema_version"], SCHEMA_VERSION)
+            self.assertNotIn("templates", cfg.data)
+            self.assertNotIn("ingest", cfg.data)
+            self.assertEqual(cfg.media_type("Plate")["dir"], "plates/{name}_v{version}")
+            self.assertEqual(cfg.media_type("Workfile")["kitsu_kind"], "working")
+            self.assertEqual(cfg.tool("ingest")["copy_workers"], 8)
 
 
 

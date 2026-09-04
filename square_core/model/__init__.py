@@ -29,7 +29,7 @@ from .entities import (
 from .media import MediaInfo
 from .provenance import Provenance, KITSU_DATA_KEY
 from .paths import PathContext
-from .results import ProjectCreated, PublishResult
+from .results import ProjectCreated, PublishResult, MediaResult
 
 __all__ = [
     "EntityRef",
@@ -54,4 +54,5 @@ __all__ = [
     "PathContext",
     "ProjectCreated",
     "PublishResult",
+    "MediaResult",
 ]

@@ -25,7 +25,7 @@ class PathContext:
     department: str = ""
     software: str = ""
 
-    output_type: str = ""            # `media_type` is an alias in templates
+    media_type: str = ""             # `{output_type}` / `{type}` are template aliases
     name: str = "main"
 
     version: int = 1
@@ -43,10 +43,6 @@ class PathContext:
     date: str = ""
     user: str = ""
     site: str = ""
-
-    @property
-    def media_type(self) -> str:
-        return self.output_type
 
     def with_(self, **over) -> "PathContext":
         """A copy with fields overridden -- e.g. `ctx.with_(frame=1001)`."""

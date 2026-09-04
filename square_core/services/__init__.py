@@ -9,6 +9,6 @@ Grows as tools need it -- most of ingest stays in the ingest tool for now.
 
 from __future__ import annotations
 
-from . import projects, breakdown, work, review
+from . import projects, breakdown, media, work, review
 
-__all__ = ["projects", "breakdown", "work", "review"]
+__all__ = ["projects", "breakdown", "media", "work", "review"]

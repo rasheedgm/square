@@ -8,7 +8,7 @@ from pathlib import Path
 from square_core.context import PipelineContext
 from square_core.config.pipeline import PipelineConfig
 from square_core.kitsu import OfflineApi
-from square_core.services import projects, breakdown, work, review
+from square_core.services import projects, breakdown, media, work, review
 from square_core.services.projects import ProjectSpec
 
 
@@ -16,6 +16,7 @@ class RecordingKitsu(OfflineApi):
     """OfflineApi that remembers publishes / statuses so we can assert."""
     def __init__(self):
         self.outputs = []
+        self.workfiles = []
         self.previews = []
         self.statuses = []
         self.comments = []
@@ -24,6 +25,15 @@ class RecordingKitsu(OfflineApi):
     def next_output_revision(self, entity, output_type_name, task=None, *, name="main"):
         key = (getattr(entity, "id", entity), output_type_name, name)
         return self._rev.get(key, 0) + 1
+
+    def next_working_revision(self, task, *, name="main"):
+        return len([w for w in self.workfiles if w["name"] == name]) + 1
+
+    def record_working_file(self, task, *, revision, path, name="main", software=None, data=None):
+        self.workfiles.append({"revision": revision, "path": path, "name": name,
+                               "data": data or {}})
+        from square_core.model import Workfile
+        return Workfile(revision=revision, path=path, name=name, data=data or {})
 
     def record_output_file(self, entity, output_type_name, task, *, revision, path,
                            representation="", name="main", comment="", data=None):
@@ -59,13 +69,12 @@ def _pctx(nas, kitsu=None):
     return ctx.project("ABC")
 
 
-class TestPublishOutput(unittest.TestCase):
-    def test_publish_copies_frames_and_records_output(self):
+class TestMediaPublish(unittest.TestCase):
+    def test_publish_copies_frames_and_records(self):
         with tempfile.TemporaryDirectory() as td:
             pctx = _pctx(td)
             shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", frame_in=1001, frame_out=1003)
-            tasks = breakdown.build_task_grid(pctx, [shot], ["Comp"])
-            comp = tasks[0]
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
 
             render = Path(td) / "scratch"
             render.mkdir()
@@ -75,19 +84,18 @@ class TestPublishOutput(unittest.TestCase):
                 p.write_bytes(f"frame{f}".encode() * 50)
                 frames.append(str(p))
 
-            result = work.publish_output(
-                pctx, shot, comp, output_type="comp", frames=frames,
-                sequence="SQ010", shot="SH0100", representation="exr",
-                make_review_proxy=True, proxy_dry_run=True,
-            )
+            r = media.publish(pctx, shot, "CompRender", comp, files=frames,
+                              proxy_dry_run=True)
 
-            self.assertEqual(result.output.revision, 1)
-            self.assertIn("/output/comp/v001/exr", result.path)
+            self.assertEqual(r.version, 1)
+            self.assertEqual(r.kitsu_kind, "output")
+            self.assertIn("/output/comp/v001/exr", r.dir)
+            self.assertTrue(r.copied)
             for f in (1001, 1002, 1003):
-                self.assertTrue((Path(result.path) / f"comp.{f}.exr").exists())
+                self.assertTrue((Path(r.dir) / f"comp.{f}.exr").exists())
             self.assertEqual(len(pctx.kitsu.outputs), 1)
             self.assertEqual(pctx.kitsu.outputs[0]["data"]["square"]["kind"], "publish")
-            self.assertEqual(len(pctx.kitsu.previews), 1)      # dry-run proxy uploaded
+            self.assertEqual(len(pctx.kitsu.previews), 1)      # CompRender is previewable
 
     def test_second_publish_increments_version(self):
         with tempfile.TemporaryDirectory() as td:
@@ -96,11 +104,35 @@ class TestPublishOutput(unittest.TestCase):
             comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
             src = Path(td) / "f.1001.exr"
             src.write_bytes(b"x" * 100)
-            r1 = work.publish_output(pctx, shot, comp, output_type="comp", frames=[str(src)],
-                                     sequence="SQ010", shot="SH0100", make_review_proxy=False)
-            r2 = work.publish_output(pctx, shot, comp, output_type="comp", frames=[str(src)],
-                                     sequence="SQ010", shot="SH0100", make_review_proxy=False)
-            self.assertEqual((r1.output.revision, r2.output.revision), (1, 2))
+            r1 = media.publish(pctx, shot, "CompRender", comp, files=[str(src)],
+                               make_review_proxy=False)
+            r2 = media.publish(pctx, shot, "CompRender", comp, files=[str(src)],
+                               make_review_proxy=False)
+            self.assertEqual((r1.version, r2.version), (1, 2))
+
+    def test_workfile_media_type_records_working_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            nk = Path(td) / "comp_v001.nk"
+            nk.write_bytes(b"nuke script")
+            r = media.publish(pctx, shot, "NukeScript", comp, files=[str(nk)])
+            self.assertEqual(r.kitsu_kind, "working")
+            self.assertTrue(r.files[0].endswith(".nk"))
+            self.assertEqual(len(pctx.kitsu.workfiles), 1)
+
+    def test_inputs_recorded_as_dependency(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            exr = Path(td) / "c.1001.exr"; exr.write_bytes(b"x" * 50)
+            r = media.publish(pctx, shot, "CompRender", comp, files=[str(exr)],
+                              make_review_proxy=False,
+                              inputs=[{"kind": "working", "id": "wf-42"}])
+            deps = pctx.kitsu.outputs[0]["data"]["square"]["inputs"]
+            self.assertIn({"kind": "working", "id": "wf-42"}, deps)
 
 
 class TestReview(unittest.TestCase):

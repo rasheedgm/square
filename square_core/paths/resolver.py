@@ -27,8 +27,8 @@ _ALIASES = {
     "seq": "sequence",
     "sequence_code": "sequence",
     "shot_code": "shot",
-    "media_type": "output_type",
-    "type": "output_type",
+    "output_type": "media_type",
+    "type": "media_type",
     "media_name": "name",
     "task_type": "task",
     "dept": "department",
@@ -181,34 +181,37 @@ class PathResolver:
     def asset_dir(self, ctx: PathContext) -> str:
         return self._render_root("asset", ctx, required=("asset", "asset_type"))
 
-    # ---- work / publish ---------------------------------------------
+    # ---- media -- ONE path for ingest / render / workfile / cache ----
 
-    def workfile_path(self, ctx: PathContext) -> str:
-        return self._render_block("workfile", self.config.template("workfile"), ctx,
-                                  required=("sequence", "shot", "task"))
+    def media_entry(self, media_type: str) -> dict:
+        return self.config.media_type(media_type)
 
-    def output_dir(self, ctx: PathContext) -> str:
-        block = dict(self.config.template("output"))
-        block.pop("file", None)
-        return self._render_block("output", block, ctx, required=("sequence", "shot", "output_type"))
+    def _media_required(self, entry: dict, ctx: PathContext) -> tuple:
+        base = entry.get("base")
+        if base == "asset":
+            return ("asset", "asset_type")
+        return ("sequence", "shot")
 
-    def output_path(self, ctx: PathContext) -> str:
-        return self._render_block("output", self.config.template("output"), ctx,
-                                  required=("sequence", "shot", "output_type"))
+    def media_dir(self, media_type: str, ctx: PathContext) -> str:
+        entry = self.config.media_type(media_type)
+        block = {k: v for k, v in entry.items() if k != "file"}
+        ctx = _with_media_type(ctx, media_type)
+        return self._render_block(f"media[{media_type}]", block, ctx,
+                                  required=self._media_required(entry, ctx))
 
-    # ---- ingest ----------------------------------------------------
+    def media_file(self, media_type: str, ctx: PathContext) -> str:
+        entry = self.config.media_type(media_type)
+        return self._render_file(entry, _with_media_type(ctx, media_type))
 
-    def ingest_dest_dir(self, ctx: PathContext) -> str:
-        block = dict(self.config.ingest_template(ctx.media_type))
-        block.pop("file", None)
-        return self._render_block("ingest", block, ctx, required=("sequence", "shot", "output_type"))
+    def media_path(self, media_type: str, ctx: PathContext) -> str:
+        entry = self.config.media_type(media_type)
+        ctx = _with_media_type(ctx, media_type)
+        return self._render_block(f"media[{media_type}]", entry, ctx,
+                                  required=self._media_required(entry, ctx))
 
-    def ingest_dest_file(self, ctx: PathContext) -> str:
-        return self._render_file(self.config.ingest_template(ctx.media_type), ctx)
-
-    def ingest_sequence_files(self, ctx: PathContext, frames) -> list:
-        d = self.ingest_dest_dir(ctx)
-        return [f"{d}/{self.ingest_dest_file(ctx.with_(frame=f))}" for f in frames]
+    def media_sequence(self, media_type: str, ctx: PathContext, frames) -> list:
+        d = self.media_dir(media_type, ctx)
+        return [f"{d}/{self.media_file(media_type, ctx.with_(frame=f))}" for f in frames]
 
     # ---- delivery ------------------------------------------------
 
@@ -252,7 +255,7 @@ class PathResolver:
     def _render_block(self, kind: str, block: dict, ctx: PathContext, required=()) -> str:
         base_name = block.get("base")
         if base_name and base_name not in self._roots:
-            raise PathError(f"templates.{kind}.base = {base_name!r} names no root")
+            raise PathError(f"{kind}.base = {base_name!r} names no root")
         parts = []
         if base_name:
             parts.append(self._roots[base_name])
@@ -286,22 +289,19 @@ class PathResolver:
 
         blocks = []
         cfg = self.config
-        for kind in ("workfile", "output"):
+        for mt in [None, *cfg.media_type_names()]:
             try:
-                blocks.append((f"templates.{kind}", cfg.template(kind)))
+                blocks.append((f"media[{mt or '_default'}]", cfg.media_type(mt or "_probe_")))
             except Exception as e:
                 errs.append(str(e))
-        ing = cfg.data.get("ingest") or {}
-        for mt in [None, *(ing.get("by_type") or {})]:
-            try:
-                blocks.append((f"ingest[{mt or 'default'}]", cfg.ingest_template(mt or "")))
-            except Exception as e:
-                errs.append(str(e))
-        for client in cfg.delivery_presets:
-            try:
-                blocks.append((f"delivery[{client}]", cfg.delivery_template(client)))
-            except Exception as e:
-                errs.append(str(e))
+        presets = cfg.delivery_presets
+        if presets:                                  # delivery config is optional
+            for client in [""] + [c for c in presets if c not in ("_default", "default")]:
+                try:
+                    blocks.append((f"delivery[{client or '_default'}]",
+                                   cfg.delivery_template(client)))
+                except Exception as e:
+                    errs.append(str(e))
 
         for label, block in blocks:
             if "{frame" in (block.get("dir") or ""):
@@ -374,6 +374,10 @@ def _apply_case(s: str, case: str) -> str:
     return s
 
 
+def _with_media_type(ctx: PathContext, media_type: str) -> PathContext:
+    return ctx if ctx.media_type == media_type else ctx.with_(media_type=media_type)
+
+
 def _probe_ctx() -> PathContext:
     return PathContext(
         nas_root="X:/projects",
@@ -386,7 +390,7 @@ def _probe_ctx() -> PathContext:
         task="comp",
         department="2d",
         software="nuke",
-        output_type="Plate",
+        media_type="Plate",
         name="bg",
         version=1,
         minor=0,

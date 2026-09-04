@@ -61,6 +61,14 @@ python -m tools.config_editor --cli list --scope project --project ABC
 python -m tools.config_editor --cli set  --scope project --project ABC fps 25
 ```
 
+It edits `studio_config.json` (resolved the same way as everything else:
+`$STUDIO_CONFIG_PATH`, else `<repo>/studio_config.json` — the deploy launcher
+sets `STUDIO_CONFIG_PATH` to `config/studio_config.json` on the NAS) and, once
+a project is picked, `{project_root}/_pipeline/project_config.json`. The GUI's
+status bar names the exact file the active tab writes. Every save keeps a
+timestamped backup **next to the file it just wrote**:
+`studio_config.json.bak-20260904-170203`.
+
 Write access needs a Kitsu role of `admin` or `manager`.
 
 ## Tests
@@ -84,6 +92,15 @@ atomically), builds a venv from `requirements.txt`, and writes one launcher
 overwritten** after that. Each deploy refreshes `studio_config.template.json`
 alongside it and reports any keys the template added since; `--update-config`
 adds just those (existing values untouched, a backup written).
+
+Each generated launcher runs the tool **in the same console** (not detached)
+and `pause`s if it exits with an error, so a startup failure is readable
+instead of the window flashing shut. Every tool also installs
+`tools.crash_handler.install_global_crash_handler(...)` as the first line of
+its `main.py`: an unhandled exception is always written to
+`~/.square/logs/crashes/` and, if a display is available, shown in a modal
+crash dialog — this covers a crash *before* the tool's own `QApplication`
+exists too (e.g. a bad config during startup).
 
 ## Docs
 

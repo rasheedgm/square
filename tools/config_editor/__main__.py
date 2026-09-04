@@ -14,6 +14,8 @@ def main() -> None:
         from tools.config_editor.cli import main as cli_main
         cli_main(argv[1:])
         return
+    from tools.crash_handler import install_global_crash_handler
+    install_global_crash_handler("Square Config Editor")
     from tools.config_editor.app import main as gui_main
     gui_main()
 

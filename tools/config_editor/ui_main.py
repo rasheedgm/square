@@ -176,11 +176,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_pane = ScopePane("project", store)
         self.tabs.addTab(self.studio_pane, "Studio")
         self.tabs.addTab(self.project_pane, "Project")
+        self.tabs.currentChanged.connect(self._update_status)
         self.setCentralWidget(self.tabs)
 
         for pane in (self.studio_pane, self.project_pane):
             pane.dirtyChanged.connect(self._update_title)
         self._update_title()
+        self._update_status()
 
     # ----
 
@@ -202,10 +204,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self.store.close_project()
         self.project_pane.rebuild()
         self._update_title()
+        self._update_status()
 
     def _save(self):
         self._current_pane().save()
         self._update_title()
+        self._update_status()
+
+    def _update_status(self, *_):
+        """Show exactly which file the active tab reads/writes, and where its
+        `.bak-<timestamp>` lands on save -- same directory, same name."""
+        from square_core.config import ProjectConfig
+
+        if self.tabs.currentWidget() is self.studio_pane:
+            path = self.store.studio_path
+        elif self.store.project_root:
+            path = ProjectConfig.path_for(self.store.project_root)
+        else:
+            path = None
+        msg = f"{path}   (backup on save: {path.name}.bak-<timestamp>, same folder)" \
+            if path else "No project open."
+        self.statusBar().showMessage(msg)
 
     def _revert(self):
         if self._any_dirty() and not self._confirm_discard():

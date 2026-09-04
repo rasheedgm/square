@@ -98,7 +98,17 @@ set STUDIO_CONFIG_PATH=%PIPELINE_ROOT%\\config\\studio_config.json
 set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\Scripts\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=python.exe
-start "" "%PYTHON_EXE%" "{entry}" %*
+rem run in THIS console (not detached via `start`) so a crash before the
+rem tool's own crash handler is installed is still visible instead of just
+rem flashing the window shut
+"%PYTHON_EXE%" "{entry}" %*
+if errorlevel 1 (
+    echo.
+    echo [Square] {title} exited with an error.
+    echo A crash report, if the tool got that far, is under %USERPROFILE%\\.square\\logs\\crashes\\
+    echo.
+    pause
+)
 """
 
 _ROLLBACK_LAUNCHER = """@echo off

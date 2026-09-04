@@ -98,8 +98,8 @@ class ScopePane(QtWidgets.QWidget):
         self.dirtyChanged.emit(on)
 
     def _reset(self, key: str):
-        self.store.reset(key)
-        self._flush_into_store()
+        self._flush_into_store()      # keep other unsaved edits
+        self.store.reset(key)         # then drop this one back to the studio default
         self.rebuild()
 
     # ----

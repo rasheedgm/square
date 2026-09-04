@@ -117,6 +117,7 @@ every tool; never snapshotted. Every key is described in
 
   "version_pad": 3,
   "frame_pad": 4,
+  "copy_workers": 4,                 // parallel file copies for any media.publish transfer
   "slugify": { "spaces_to": "_", "strip": "<>:\"/\\|?*", "collapse": "_" },
 
   // roots may reference each other with {<name>_root}; resolved in dependency order
@@ -136,15 +137,16 @@ every tool; never snapshotted. Every key is described in
       "dir":  "input/{media_type}/{name}_v{version}",
       "file": "{project}_{sequence}_{shot}_{media_type}_{name}_v{version}.{frame}.{ext}",
       "kitsu_kind": "output",        // output | working
+      "source": "publish",          // delivery | publish | work -- the stage the media comes from
       "previewable": false,
       "colorspace": ""               // assumed for this type when a file doesn't declare one
     },
-    "Plate":       { "dir": "plates/{name}_v{version}",     "previewable": true, "colorspace": "ACEScg" },
-    "Ref":         { "dir": "ref/{name}_v{version}",        "previewable": true },
-    "BG Plate":    { "dir": "bg_plates/{name}_v{version}",  "previewable": true, "colorspace": "ACEScg" },
-    "Element":     { "dir": "elements/{name}_v{version}" },
-    "LUT":         { "dir": "luts/{name}_v{version}" },
-    "Audio":       { "dir": "audio/{name}_v{version}" },
+    "Plate":       { "source": "delivery", "dir": "plates/{name}_v{version}",    "previewable": true, "colorspace": "ACEScg" },
+    "Ref":         { "source": "delivery", "dir": "ref/{name}_v{version}",       "previewable": true },
+    "BG Plate":    { "source": "delivery", "dir": "bg_plates/{name}_v{version}", "previewable": true, "colorspace": "ACEScg" },
+    "Element":     { "source": "delivery", "dir": "elements/{name}_v{version}" },
+    "LUT":         { "source": "delivery", "dir": "luts/{name}_v{version}" },
+    "Audio":       { "source": "delivery", "dir": "audio/{name}_v{version}" },
 
     "CompRender":  { "dir": "output/comp/v{version}/{representation}",
                      "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{frame}.{ext}",
@@ -152,10 +154,10 @@ every tool; never snapshotted. Every key is described in
     "Precomp":     { "dir": "output/precomp/v{version}/{representation}" },
     "Cache":       { "dir": "output/cache/{name}/v{version}", "representation": "abc" },
 
-    "NukeScript":  { "kitsu_kind": "working", "previewable": false,
+    "NukeScript":  { "kitsu_kind": "working", "source": "work", "previewable": false,
                      "dir":  "work/comp/nuke",
                      "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.nk" },
-    "MayaScene":   { "kitsu_kind": "working",
+    "MayaScene":   { "kitsu_kind": "working", "source": "work",
                      "dir":  "work/{task}/maya",
                      "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.ma" }
   },
@@ -177,12 +179,10 @@ every tool; never snapshotted. Every key is described in
     "ACME": { "file": "ACME_{shot}_comp_v{version}.{frame}.{ext}", "case": "upper", "container": "dpx" }
   },
 
-  // per-tool settings (schema-registered by each tool; see config_schema.md)
-  "tools": {
-    "ingest": { "copy_workers": 4, "transfer_mode": "copy",
-                "media_types": ["Plate", "Ref", "BG Plate", "Element", "LUT", "Audio"] },
-    "nuke":   { "output_types": ["CompRender", "Precomp"], "workfile_type": "NukeScript" }
-  }
+  // per-tool settings -- each tool registers its own `tools.<tool>.*` keys with
+  // `config.schema` when installed and writes them through the config editor.
+  // `square_core` ships none. See config_schema.md.
+  "tools": {}
 }
 ```
 
@@ -194,14 +194,15 @@ every tool; never snapshotted. Every key is described in
 | `dir` | folder template, relative to `base` |
 | `file` | filename template |
 | `kitsu_kind` | `output` → stored as a Kitsu `output_file`; `working` → a `working_file`. Decides which side of Kitsu's model it lives on (matters for Kitsu's own review UI). |
+| `source` | `delivery` (arrives from outside — ingest), `publish` (produced by a DCC / farm publish), `work` (a workfile). A tool offers the types matching its stage: `cfg.media_type_names(source="delivery")`. There is no separate per-tool media-type list. |
 | `representation` | default representation token, if the type has one fixed kind (`Cache` → `abc`) |
 | `previewable` | generate a review proxy on publish |
 | `colorspace` | assumed colorspace for this type when a file's header doesn't carry one (still flagged unverified) |
 | `case` | optional per-entry case override |
 
 Inheritance: an entry deep-merges over `_default`; a project entry deep-merges
-over the studio entry of the same name. `tools.*` entries pick *which* media
-types a given tool offers — the registry itself is just resolution config.
+over the studio entry of the same name. A tool filters the registry by `source`
+(and `kitsu_kind`) — it never keeps its own list of type names.
 
 Baked-in rules:
 - Every media type **must vary by version** — `validate()` renders `dir + file`
@@ -226,7 +227,7 @@ Baked-in rules:
     "roots": { … }, "media_types": { … },
     "shot_folder_structure": [ … ], "asset_folder_structure": [ … ],
     "project_folder_structure": [ … ], "delivery_presets": { … },
-    "tools": { … }
+    "copy_workers": 4, "tools": {}
   }
 }
 ```
@@ -353,7 +354,7 @@ class PathContext:
 | creating folders | `storage.layout` |
 | copying / verifying bytes | `storage.transfer` |
 | writing the Kitsu record | `kitsu.record_media(...)` — `output_file` or `working_file` per `kitsu_kind`; sets `source_file_id` + `data["square"]["inputs"]` for dependencies |
-| deciding a tool's offered types | `tools.<tool>.*` config |
+| deciding a tool's offered types | `cfg.media_type_names(source=…)` — filter the one registry, no per-tool list |
 
 `media.publish(pctx, entity, media_type, task, *, files, name, source=, media_info=, inputs=)`
 is the single service call ingest and Nuke both make — it resolves the path,
@@ -373,8 +374,10 @@ trickles a review proxy behind it.
 | `PathResolver.output_dir/output_path/workfile_path/ingest_dest_*` | `media_dir/media_file/media_path/media_sequence(media_type, ctx)` |
 | `PathContext.output_type` | `PathContext.media_type` |
 | `kitsu.record_output_file` / `record_working_file` | still the primitives; `kitsu.record_media` / `services.media.publish` dispatch on `kitsu_kind` |
-| copy_workers / transfer_mode / preview-enabled types (scattered) | `tools.ingest.*` |
-| `schema_version: 1` | `schema_version: 2` (loader migrates: fold `templates`+`ingest` into `media_types`) |
+| `copy_workers` (scattered) | top-level `copy_workers` (core transfer setting) |
+| `transfer_mode` (stored) | a `media.publish(transfer_mode=…)` arg; a tool that wants a stored default registers its own `tools.<tool>.transfer_mode` |
+| `preview_enabled_media_types` / per-tool media-type lists | `media_types.<Name>.previewable` / `media_types.<Name>.source` |
+| `schema_version: 1` | `schema_version: 2` (loader migrates: fold `templates`+`ingest` into `media_types`, `copy_workers` stays top-level, drop `transfer_mode`) |
 
 `path_pattern.py` / `token_parser.py` (incoming delivery-folder matching) are
 **unchanged and unrelated** — they parse a vendor's folder shape, not outgoing

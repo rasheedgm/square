@@ -96,9 +96,12 @@ schema.register("tools.ingest.media_types", "list", item_kind="str", scope="proj
   usually a tool that isn't installed here, occasionally a typo. A registered
   `dict` / `root` / `media_type_registry` key is a leaf: `validate()` does not
   walk into it looking for unknown sub-keys.
-- The scalar built-ins mirror `DEFAULT_PROJECT_CONFIG` field-for-field;
-  `tools.ingest.*` is registered by `schema.py` itself for now and moves to
-  `tools/ingest_tool/core/` when that tool is ported.
+- The scalar built-ins mirror `DEFAULT_PROJECT_CONFIG` field-for-field.
+  **No `tools.*` key is a built-in** — `square_core` ships no tool. Each desktop
+  tool registers its own `tools.<tool>.*` when installed; `tools: {}` in a
+  config until then. A tool never keeps its own list of media types either — it
+  filters the one `media_types` registry by `source` (`cfg.media_type_names(
+  source="delivery")` for ingest, `"publish"` for a DCC publish panel).
 
 ---
 
@@ -161,15 +164,18 @@ offline session or a plain `user` gets a read-only window.
 
 ## 6. What lives where
 
-| in `PipelineConfig` (studio) | in `ProjectConfig` (project) |
+| only in `studio_config.json` (top level) | a project setting (`scope="both"`) |
 |---|---|
-| `kitsu_host`, `nas_roots`, `kitsu_project_templates` | fps, resolution, aspect_ratio, colorspace |
-| `project_defaults` = a full ProjectConfig template | `roots`, `media_types`, `delivery_presets` |
-| studio-wide `tools.*` defaults | folder-structure lists |
-| | per-project `tools.*` overrides |
+| `kitsu_host`, `nas_roots`, `kitsu_project_templates` | fps, resolution, aspect_ratio, colorspace, `copy_workers` |
+| `project_defaults` — where the studio's copy of every `scope="both"` key lives | `roots`, `media_types`, `delivery_presets` |
+| | folder-structure lists, `tools.<tool>.*` |
 
-`media_types`, `roots`, `templates`, `tools.*` are `scope="both"` — a studio
-default that a project may override.
+`scope="studio"` keys are the three at top left. **Everything else is
+`scope="both"`** — a project setting. In `studio_config.json` those live under
+`project_defaults` (copied into each new project); the config editor's Studio
+tab reads and writes them there, not at the file's top level. `square_core`
+registers **no `tools.*` key** — a desktop tool `schema.register()`s its own
+`tools.<tool>.*` descriptors when it is installed.
 
 ---
 

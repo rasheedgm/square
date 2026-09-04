@@ -101,7 +101,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
     pairs = [(s, d) for s, d in zip(files, dest_files)
              if Path(s).resolve() != Path(d).resolve()]
     if pairs:
-        workers = pctx.config.tool("ingest").get("copy_workers", 4)
+        workers = pctx.config.copy_workers
         rs = transfer.transfer_sequence(pairs, mode=transfer_mode, workers=workers)
         result.checksums = {r.dest: r.hash for r in rs if r.hash}
         result.copied = True

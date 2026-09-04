@@ -66,6 +66,15 @@ class TestMediaTypeLookup(unittest.TestCase):
         self.assertIn("CompRender", names)
         self.assertNotIn("_default", names)
 
+    def test_media_type_names_filtered_by_source(self):
+        delivery = self.cfg.media_type_names(source="delivery")
+        self.assertIn("Plate", delivery)
+        self.assertIn("Ref", delivery)
+        self.assertNotIn("CompRender", delivery)      # source=publish (inherited)
+        self.assertNotIn("NukeScript", delivery)      # source=work
+        self.assertIn("CompRender", self.cfg.media_type_names(source="publish"))
+        self.assertIn("NukeScript", self.cfg.media_type_names(source="work"))
+
     def test_delivery_template_client_overrides_default(self):
         cfg = ProjectConfig.from_defaults(overrides={"delivery_presets": {
             "ACME": {"container": "dpx"}}})
@@ -73,9 +82,12 @@ class TestMediaTypeLookup(unittest.TestCase):
         self.assertEqual(d["container"], "dpx")
         self.assertEqual(d["colorspace"], "Rec.709")     # from _default
 
-    def test_tool_config(self):
-        self.assertEqual(self.cfg.tool("ingest")["copy_workers"], 4)
-        self.assertIn("Plate", self.cfg.tool("ingest")["media_types"])
+    def test_copy_workers_default(self):
+        self.assertEqual(self.cfg.copy_workers, 4)
+
+    def test_core_ships_no_tool_config(self):
+        self.assertEqual(self.cfg.tools, {})
+        self.assertEqual(self.cfg.tool("ingest"), {})    # a tool fills this in when installed
 
 
 class TestLoadSave(unittest.TestCase):
@@ -153,7 +165,10 @@ class TestLoadSave(unittest.TestCase):
             self.assertNotIn("ingest", cfg.data)
             self.assertEqual(cfg.media_type("Plate")["dir"], "plates/{name}_v{version}")
             self.assertEqual(cfg.media_type("Workfile")["kitsu_kind"], "working")
-            self.assertEqual(cfg.tool("ingest")["copy_workers"], 8)
+            self.assertEqual(cfg.media_type("Workfile")["source"], "work")
+            self.assertEqual(cfg.media_type("Plate")["source"], "delivery")
+            self.assertEqual(cfg.copy_workers, 8)              # stayed top-level
+            self.assertEqual(cfg.tools, {})
 
 
 

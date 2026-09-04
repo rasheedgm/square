@@ -82,7 +82,9 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
   ctx)`, and one `services.media.publish(...)` that ingest and Nuke both call.
   `templates.output` / `templates.workfile` / `ingest.by_type` are gone.
   `media_type` maps to Kitsu `output_type`, or `working_file` when the entry
-  says `kitsu_kind: "working"`. "A version containing multiple files"
+  says `kitsu_kind: "working"`. Each entry also carries `source` (`delivery` /
+  `publish` / `work`) so a tool filters the one registry for the types at its
+  stage — there is no per-tool media-type list. "A version containing multiple files"
   (`CompOut_v001 → {nk, exr}`) is Kitsu's `(entity, output_type, name,
   revision)` grouping + `representation` — no parallel storage. Dependency
   tracking is optional: `output_file.source_file_id` + `data["square"]["inputs"]`.
@@ -99,7 +101,14 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
   (`tools/config_editor/`, GUI + `--cli`) is the only writer of
   `studio_config.json` / `project_config.json`; write access needs Kitsu role
   `admin` / `manager`; every other tool (ingest included — its Settings dialog
-  goes away) is read-only. Studio-file save preserves unknown / legacy keys.
+  goes away) is read-only. Studio-file save preserves unknown / legacy keys and
+  canonicalises the two aliases (`kitsu_url`→`kitsu_host`, `nas_root`→
+  `nas_roots`); every `scope="both"` key is written under `project_defaults`.
+  **`square_core` registers no `tools.*` key** — a tool registers its own when
+  installed. A tool picks *which* media types it offers by filtering the one
+  registry on `media_types.<Name>.source` (`delivery` / `publish` / `work`) —
+  no separate per-tool list. `copy_workers` is a core top-level key (transfer
+  perf), not tool config.
 - **Auth: per-user login; JWT + refresh cached** (keyring or
   `~/.square/session.json`, mode 600), shared by every tool + DCC on a
   workstation. `kitsu/auth.py` is **non-interactive** (`login(email, pw)` /

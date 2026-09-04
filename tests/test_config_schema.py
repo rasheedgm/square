@@ -72,8 +72,8 @@ class TestResolve(RegistryCase):
         self.assertEqual(schema.resolve({}, "version_pad"), 3)
 
     def test_dotted(self):
-        data = {"tools": {"ingest": {"copy_workers": 12}}}
-        self.assertEqual(schema.resolve(data, "tools.ingest.copy_workers"), 12)
+        data = {"colorspace": {"working": "sRGB"}}
+        self.assertEqual(schema.resolve(data, "colorspace.working"), "sRGB")
 
     def test_unknown_key_resolves_none(self):
         self.assertIsNone(schema.resolve({}, "no.such.key"))
@@ -107,7 +107,8 @@ class TestCheckValue(RegistryCase):
         self.assertFalse(schema.check_value(ck, 4))
 
     def test_enum(self):
-        ck = schema.get("tools.ingest.transfer_mode")
+        ck = schema.register("tools.demo.mode", "enum", scope="project",
+                             default="copy", choices=("copy", "hardlink", "symlink"))
         self.assertFalse(schema.check_value(ck, "copy"))
         self.assertTrue(schema.check_value(ck, "teleport"))
 

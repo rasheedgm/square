@@ -20,7 +20,7 @@ from tools.qt_compat import (HEADER_RESIZE_INTERACTIVE, HEADER_RESIZE_STRETCH,
 from .template_builder import TemplateBuilderDialog
 
 # columns we always surface for a dict-entry registry, in order
-_MEDIA_COLS = ["base", "dir", "file", "kitsu_kind", "representation",
+_MEDIA_COLS = ["base", "source", "dir", "file", "kitsu_kind", "representation",
                "previewable", "colorspace"]
 _DELIVERY_COLS = ["base", "dir", "file", "case", "container", "frame_pad",
                   "colorspace", "slate", "burnin"]
@@ -45,9 +45,17 @@ class RegistryEditor(QtWidgets.QWidget):
 
         self.table = QtWidgets.QTableWidget(0, 0)
         self.table.verticalHeader().setVisible(False)
+        self.table.setMinimumHeight(220)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
         self.table.cellChanged.connect(lambda *_: self.signal_changed.emit())
         self.table.cellDoubleClicked.connect(self._maybe_build)
         lay.addWidget(self.table)
+
+        hint = QtWidgets.QLabel("double-click a dir / file / pattern cell to open "
+                               "the template builder")
+        hint.setStyleSheet("color:#64748B;font-size:11px;")
+        lay.addWidget(hint)
 
         row = QtWidgets.QHBoxLayout()
         add = QtWidgets.QPushButton("Add")

@@ -272,8 +272,8 @@ def _leaf_paths(data: dict, prefix: str = "") -> list[str]:
     out: list[str] = []
     for k, v in (data.items() if isinstance(data, dict) else []):
         p = f"{prefix}.{k}" if prefix else k
-        if p not in _REGISTRY and isinstance(v, dict) and v:
-            out.extend(_leaf_paths(v, p))
+        if p not in _REGISTRY and isinstance(v, dict):
+            out.extend(_leaf_paths(v, p))   # recurse; an empty {} contributes nothing
         else:
             out.append(p)
     return out
@@ -305,6 +305,8 @@ def _register_builtins() -> None:
              description="zero-pad width for {version}")
     register("frame_pad", "int", scope="both", default=4, minimum=1, maximum=9,
              description="zero-pad width for {frame}")
+    register("copy_workers", "int", scope="both", default=4, minimum=1, maximum=32,
+             description="parallel file copies for a media.publish transfer")
 
     register("colorspace.ocio", "path", scope="both", default="",
              description="path to an OCIO config, or empty for the studio default")
@@ -331,13 +333,9 @@ def _register_builtins() -> None:
     register("project_folder_structure", "list", item_kind="str", scope="both",
              default=["shots", "assets", "_delivery", "_pipeline"])
 
-    # --- built-in tool: ingest ----------------------------------
-    register("tools.ingest.copy_workers", "int", scope="both", default=4,
-             minimum=1, maximum=32, description="parallel file copies during ingest")
-    register("tools.ingest.transfer_mode", "enum", scope="both", default="copy",
-             choices=("copy", "hardlink", "symlink"))
-    register("tools.ingest.media_types", "list", item_kind="str", scope="both",
-             default=[], description="media types the ingest tool offers")
+    # No `tools.*` keys here -- each desktop tool registers its own
+    # `tools.<tool>.*` descriptors with `schema.register()` at import time.
+    # `square_core` itself ships no tool.
 
 
 _register_builtins()

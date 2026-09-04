@@ -109,6 +109,18 @@ class TestEdits(unittest.TestCase):
             self.assertEqual(back["kitsu_host"], "http://kitsu.local/api")
             self.assertEqual(back["kitsu_user"], "admin@example.com")     # untouched
 
+    def test_studio_scope_both_key_goes_into_project_defaults(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            s = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            # a scope=both key is a project setting -> lives under project_defaults
+            s.set("studio", "fps", 48.0)
+            s.save_studio()
+            back = json.loads(sp.read_text(encoding="utf-8"))
+            self.assertEqual(back["project_defaults"]["fps"], 48.0)
+            self.assertNotIn("fps", {k for k in back if k != "project_defaults"})
+            self.assertEqual(s.field("studio", "fps").value, 48.0)
+
     def test_save_rejects_config_that_breaks_paths(self):
         with tempfile.TemporaryDirectory() as td:
             s = self._store(td)

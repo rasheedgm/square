@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError, schema
-from square_core.config.pipeline import DEFAULT_PROJECT_CONFIG
+from square_core.config.project import DEFAULT_PROJECT_CONFIG
 
 ADMIN_ROLES = {"admin", "manager"}
 
@@ -81,8 +81,18 @@ def _del_path(data: dict, dotted: str) -> bool:
     return False
 
 
-def _clone(d: dict) -> dict:
+def _clone(d):
     return json.loads(json.dumps(d))
+
+
+def _deep_merge(base: dict, over: dict) -> dict:
+    out = _clone(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
 
 
 def _atomic_write(path: Path, data: dict, *, backup: bool) -> Path | None:
@@ -115,10 +125,16 @@ class ConfigStore:
                                 or PipelineConfig._resolve_path(None)
                                 or "studio_config.json")
         # a working copy of the raw studio file -- unknown / legacy keys are
-        # preserved untouched on save
+        # preserved untouched on save; the two *aliased* keys are canonicalised
+        # (`kitsu_url` -> `kitsu_host`, `nas_root` -> `nas_roots`) so an edit
+        # gently migrates the file to the current shape.
         self.studio_raw: dict = {}
         if self.studio_path.exists():
             self.studio_raw = json.loads(self.studio_path.read_text(encoding="utf-8"))
+        if "kitsu_url" in self.studio_raw and "kitsu_host" not in self.studio_raw:
+            self.studio_raw["kitsu_host"] = self.studio_raw.pop("kitsu_url")
+        if "nas_root" in self.studio_raw and "nas_roots" not in self.studio_raw:
+            self.studio_raw["nas_roots"] = {"default": self.studio_raw.pop("nas_root")}
 
         self.project_root: Path | None = None
         self.project_code: str = ""
@@ -149,7 +165,8 @@ class ConfigStore:
         self.project_raw = _clone(cfg.data)
 
     def close_project(self) -> None:
-        self.project_root = self.project_code = None
+        self.project_root = None
+        self.project_code = ""
         self.project_raw = None
 
     @property
@@ -172,6 +189,16 @@ class ConfigStore:
             return builtin, "builtin"
         return v, ("studio-default" if v != builtin else "builtin")
 
+    def _studio_container(self, key: str) -> dict:
+        """Where a key lives in `studio_config.json`. The true studio keys
+        (`kitsu_host`, `nas_roots`, ...) sit at the top level; every
+        `scope="both"` key is a *project* setting and lives under
+        `project_defaults` (that blob is copied into each new project)."""
+        ck = schema.get(key)
+        if ck is not None and ck.scope == "both":
+            return self.studio_raw.setdefault("project_defaults", {})
+        return self.studio_raw
+
     def field(self, scope: str, key: str) -> FieldView:
         ck = schema.get(key)
         if ck is None:
@@ -180,10 +207,12 @@ class ConfigStore:
                       choices=ck.choices, minimum=ck.minimum, maximum=ck.maximum,
                       item_kind=ck.item_kind, required=ck.required, secret=ck.secret)
         if scope == "studio":
-            v = _dig(self.studio_raw, key)
+            v = _dig(self._studio_container(key), key)
             if v is not _MISSING:
                 return FieldView(value=v, source="studio", **common)
-            return FieldView(value=(ck.default), source="builtin", **common)
+            b = _dig(DEFAULT_PROJECT_CONFIG, key)
+            return FieldView(value=(b if b is not _MISSING else ck.default),
+                             source="builtin", **common)
 
         # project scope: effective value is the project's own if present, else
         # the studio default. It counts as an *override* only when the project
@@ -203,9 +232,9 @@ class ConfigStore:
 
     # ---- edits (in memory) -------------------------------------
 
-    def _target(self, scope: str) -> dict:
+    def _target(self, scope: str, key: str) -> dict:
         if scope == "studio":
-            return self.studio_raw
+            return self._studio_container(key)
         if self.project_raw is None:
             raise RuntimeError("no project open")
         return self.project_raw
@@ -219,7 +248,7 @@ class ConfigStore:
         errs = schema.check_value(ck, value)
         if errs:
             raise ValueError("; ".join(errs))
-        schema.put(self._target(scope), key, value)
+        schema.put(self._target(scope, key), key, value)
 
     def reset(self, key: str) -> bool:
         """Undo a project override: put the studio default value back (the
@@ -233,26 +262,29 @@ class ConfigStore:
             return False
         if dflt is None and schema.get(key) is None:
             return _del_path(self.project_raw, key)
-        schema.put(self.project_raw, key, _clone({"_": dflt})["_"] if isinstance(dflt, (dict, list)) else dflt)
+        schema.put(self.project_raw, key,
+                   _clone(dflt) if isinstance(dflt, (dict, list)) else dflt)
         return True
 
     # ---- diff vs disk ------------------------------------------
 
-    def _on_disk(self, scope: str) -> dict:
+    def _disk_container(self, scope: str, key: str) -> dict:
         if scope == "studio":
-            if self.studio_path.exists():
-                return json.loads(self.studio_path.read_text(encoding="utf-8"))
-            return {}
+            disk = (json.loads(self.studio_path.read_text(encoding="utf-8"))
+                    if self.studio_path.exists() else {})
+            ck = schema.get(key)
+            if ck is not None and ck.scope == "both":
+                return disk.get("project_defaults") or {}
+            return disk
         p = ProjectConfig.path_for(self.project_root)
         return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
     def pending(self, scope: str) -> dict:
         """`{key: (old, new)}` for every registered key whose value changed."""
-        disk = self._on_disk(scope)
-        cur = self._target(scope)
         out = {}
         for ck in schema.for_scope(scope):
-            a, b = _dig(disk, ck.key), _dig(cur, ck.key)
+            a = _dig(self._disk_container(scope, ck.key), ck.key)
+            b = _dig(self._target(scope, ck.key), ck.key)
             if a != b:
                 out[ck.key] = (None if a is _MISSING else a,
                                None if b is _MISSING else b)
@@ -260,9 +292,20 @@ class ConfigStore:
 
     # ---- validate + save -------------------------------------
 
+    def _effective_project_from_studio(self) -> dict:
+        """What a new project would get: built-in defaults <- project_defaults."""
+        return _deep_merge(DEFAULT_PROJECT_CONFIG,
+                           self.studio_raw.get("project_defaults") or {})
+
     def validate(self, scope: str) -> tuple[list[str], list[str]]:
         if scope == "studio":
-            return schema.validate(self.studio_raw, "studio")
+            errs, warns = schema.validate(self.studio_raw, "studio")
+            # the project_defaults blob must itself be a sound project config
+            try:
+                ProjectConfig(data=self._effective_project_from_studio()).check()
+            except ConfigError as e:
+                errs.append(f"project_defaults: {e}")
+            return errs, warns
         cfg = ProjectConfig(data=_clone(self.project_raw))
         try:
             cfg.check()

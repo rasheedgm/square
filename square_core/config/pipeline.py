@@ -16,7 +16,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .project import DEFAULT_PROJECT_CONFIG, ConfigError
+from .project import DEFAULT_PROJECT_CONFIG, ConfigError, _deep_merge
 
 _DEFAULT_HOST = os.getenv("KITSU_URL", "http://localhost/api")
 _DEFAULT_NAS = os.getenv("SQUARE_NAS_ROOT", "X:/projects")
@@ -75,9 +75,9 @@ class PipelineConfig:
             cfg.kitsu_project_templates = list(data.get("kitsu_project_templates") or [])
             pd = data.get("project_defaults")
             if isinstance(pd, dict) and pd:
-                merged = json.loads(json.dumps(DEFAULT_PROJECT_CONFIG))
-                merged.update(pd)
-                cfg.project_defaults = merged
+                # deep merge -- a studio that overrides only colorspace.working
+                # must keep the other colorspace keys
+                cfg.project_defaults = _deep_merge(DEFAULT_PROJECT_CONFIG, pd)
         return cfg
 
     # ------------------------------------------------------------------

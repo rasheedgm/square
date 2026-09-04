@@ -53,6 +53,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     },
     "version_pad": 3,
     "frame_pad": 4,
+    "copy_workers": 4,          # parallel file copies for any media.publish transfer
     "slugify": {"spaces_to": "_", "strip": '<>:"/\\|?*', "collapse": "_"},
 
     "roots": {
@@ -70,16 +71,18 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
             "dir": "input/{media_type}/{name}_v{version}",
             "file": "{project}_{sequence}_{shot}_{media_type}_{name}_v{version}.{frame}.{ext}",
             "kitsu_kind": "output",          # output -> Kitsu output_file; working -> working_file
+            "source": "publish",            # delivery | publish | work -- where the media comes from;
+                                            #   a tool offers the types matching its stage
             "previewable": False,
             "colorspace": "",               # assumed for this type if a file doesn't declare one
         },
-        "Plate":      {"dir": "plates/{name}_v{version}", "previewable": True, "colorspace": "ACEScg"},
-        "Ref":        {"dir": "ref/{name}_v{version}", "previewable": True},
-        "BG Plate":   {"dir": "bg_plates/{name}_v{version}", "previewable": True, "colorspace": "ACEScg"},
-        "Element":    {"dir": "elements/{name}_v{version}"},
-        "LUT":        {"dir": "luts/{name}_v{version}"},
-        "Audio":      {"dir": "audio/{name}_v{version}"},
-        "Matte":      {"dir": "mattes/{name}_v{version}"},
+        "Plate":      {"source": "delivery", "dir": "plates/{name}_v{version}", "previewable": True, "colorspace": "ACEScg"},
+        "Ref":        {"source": "delivery", "dir": "ref/{name}_v{version}", "previewable": True},
+        "BG Plate":   {"source": "delivery", "dir": "bg_plates/{name}_v{version}", "previewable": True, "colorspace": "ACEScg"},
+        "Element":    {"source": "delivery", "dir": "elements/{name}_v{version}"},
+        "LUT":        {"source": "delivery", "dir": "luts/{name}_v{version}"},
+        "Audio":      {"source": "delivery", "dir": "audio/{name}_v{version}"},
+        "Matte":      {"source": "delivery", "dir": "mattes/{name}_v{version}"},
 
         "CompRender": {"dir": "output/comp/v{version}/{representation}",
                        "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{frame}.{ext}",
@@ -89,10 +92,10 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
         "Cache":      {"dir": "output/cache/{name}/v{version}", "representation": "abc",
                        "file": "{project}_{sequence}_{shot}_{name}_v{version}.{frame}.{ext}"},
 
-        "NukeScript": {"kitsu_kind": "working",
+        "NukeScript": {"kitsu_kind": "working", "source": "work",
                        "dir": "work/comp/nuke",
                        "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.nk"},
-        "MayaScene":  {"kitsu_kind": "working",
+        "MayaScene":  {"kitsu_kind": "working", "source": "work",
                        "dir": "work/{task}/maya",
                        "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.ma"},
     },
@@ -115,19 +118,15 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
         },
     },
 
-    # per-tool settings (a schema/registry + editor lands in Phase B;
-    # for now tools read straight from here)
-    "tools": {
-        "ingest": {
-            "copy_workers": 4,
-            "transfer_mode": "copy",
-            "media_types": ["Plate", "Ref", "BG Plate", "Element", "LUT", "Audio", "Matte"],
-        },
-    },
+    # per-tool settings. Each tool registers its own `tools.<tool>.*` keys with
+    # `config.schema` when it is installed and writes them here through the
+    # config editor -- core ships none (there is no tool inside `square_core`).
+    "tools": {},
 }
 
 _DEFAULT_ENTRY = "_default"
 _REQUIRED_ROOTS = ("project", "shot")
+_MEDIA_SOURCES = ("delivery", "publish", "work")
 
 
 def _deep_merge(base: dict, over: dict | None) -> dict:
@@ -157,11 +156,12 @@ def _migrate_v1(data: dict) -> dict:
     mt[_DEFAULT_ENTRY] = base_default or DEFAULT_PROJECT_CONFIG["media_types"][_DEFAULT_ENTRY]
 
     for name, entry in (ingest.get("by_type") or {}).items():
-        mt[name] = dict(entry)
+        mt[name] = {"source": "delivery", **dict(entry)}
     if templates.get("output"):
         mt.setdefault("Output", {**templates["output"], "kitsu_kind": "output"})
     if templates.get("workfile"):
-        mt.setdefault("Workfile", {**templates["workfile"], "kitsu_kind": "working"})
+        mt.setdefault("Workfile", {**templates["workfile"],
+                                   "kitsu_kind": "working", "source": "work"})
 
     prev = set(d.pop("preview_enabled_media_types", []) or [])
     for name in prev:
@@ -169,10 +169,9 @@ def _migrate_v1(data: dict) -> dict:
             mt[name]["previewable"] = True
 
     d["media_types"] = mt
-    tools = d.setdefault("tools", {}).setdefault("ingest", {})
-    for k in ("copy_workers", "transfer_mode"):
-        if k in d:
-            tools.setdefault(k, d.pop(k))
+    d.pop("transfer_mode", None)          # now a per-publish arg, not stored
+    d.setdefault("copy_workers", DEFAULT_PROJECT_CONFIG["copy_workers"])
+    d.setdefault("tools", {})
     d["schema_version"] = SCHEMA_VERSION
     return d
 
@@ -198,6 +197,10 @@ class ProjectConfig:
     @property
     def frame_pad(self) -> int:
         return int(self.data.get("frame_pad") or 4)
+
+    @property
+    def copy_workers(self) -> int:
+        return int(self.data.get("copy_workers") or 4)
 
     @property
     def slugify(self) -> dict:
@@ -241,17 +244,27 @@ class ProjectConfig:
     # ---- registry lookups (with inheritance) -----------------------
 
     def media_type(self, name: str) -> dict:
-        """The fully-resolved config entry for a media type: `_default` with the
-        named entry deep-merged on top. An unknown name still resolves (uses
-        `_default`, `{media_type}` renders as the name)."""
+        """The fully-resolved config entry for a media type: the built-in
+        `_default`, then this config's `_default`, then the named entry, each
+        deep-merged on top. Merging the built-in first means a key added to
+        `_default` in a newer release (e.g. `source`) is present even for a
+        config written before it. An unknown name still resolves."""
         reg = self.data.get("media_types") or {}
-        base = reg.get(_DEFAULT_ENTRY)
-        if not isinstance(base, dict):
+        own_default = reg.get(_DEFAULT_ENTRY)
+        if not isinstance(own_default, dict):
             raise ConfigError("media_types._default is missing")
+        base = _deep_merge(DEFAULT_PROJECT_CONFIG["media_types"][_DEFAULT_ENTRY], own_default)
         return _deep_merge(base, reg.get(name) or {})
 
-    def media_type_names(self) -> list:
-        return [k for k in (self.data.get("media_types") or {}) if k != _DEFAULT_ENTRY]
+    def media_type_names(self, *, source: str | None = None) -> list:
+        """Configured media-type names (never `_default`). With `source` given
+        (`delivery` / `publish` / `work`), only the types a tool at that stage
+        offers -- e.g. ingest passes `source="delivery"`, a DCC publish panel
+        `source="publish"`. A missing `source` on an entry inherits `_default`'s."""
+        names = [k for k in (self.data.get("media_types") or {}) if k != _DEFAULT_ENTRY]
+        if source is None:
+            return names
+        return [n for n in names if self.media_type(n).get("source") == source]
 
     def delivery_template(self, client: str = "") -> dict:
         presets = self.data.get("delivery_presets") or {}
@@ -325,9 +338,13 @@ class ProjectConfig:
             errs.append("media_types._default needs at least a 'file'")
 
         for name in [n for n in (reg or {}) if n != _DEFAULT_ENTRY]:
-            kind = self.media_type(name).get("kitsu_kind", "output")
+            entry = self.media_type(name)
+            kind = entry.get("kitsu_kind", "output")
             if kind not in ("output", "working"):
                 errs.append(f"media_types.{name}.kitsu_kind must be 'output' or 'working', not {kind!r}")
+            src = entry.get("source", "publish")
+            if src not in _MEDIA_SOURCES:
+                errs.append(f"media_types.{name}.source must be one of {list(_MEDIA_SOURCES)}, not {src!r}")
         return errs
 
     def check(self) -> None:

@@ -122,7 +122,7 @@ class _ListField(_Base):
         super().__init__(fv, parent)
         self.text = QtWidgets.QPlainTextEdit("\n".join(str(x) for x in (fv.value or [])))
         self.text.setPlaceholderText("one item per line")
-        self.text.setFixedHeight(90)
+        self.text.setMinimumHeight(120)
         self.text.textChanged.connect(self.signal_changed)
         self._lay.addWidget(self.text)
 

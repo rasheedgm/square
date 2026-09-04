@@ -134,6 +134,41 @@ class TestMediaPublish(unittest.TestCase):
             deps = pctx.kitsu.outputs[0]["data"]["square"]["inputs"]
             self.assertIn({"kind": "working", "id": "wf-42"}, deps)
 
+    def test_pool_and_progress_are_forwarded_to_the_transfer(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            frames = []
+            for f in (1001, 1002):
+                p = Path(td) / f"c.{f}.exr"; p.write_bytes(b"x" * 20)
+                frames.append(str(p))
+            calls = []
+            with ThreadPoolExecutor(max_workers=2) as shared_pool:
+                r = media.publish(pctx, shot, "CompRender", comp, files=frames,
+                                  make_review_proxy=False, pool=shared_pool,
+                                  progress=lambda done, total: calls.append((done, total)))
+            self.assertTrue(r.copied)
+            self.assertEqual(calls[-1], (2, 2))
+
+    def test_preview_pool_defers_the_proxy_and_returns_a_future(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            exr = Path(td) / "p.1001.exr"; exr.write_bytes(b"x" * 20)
+            with ThreadPoolExecutor(max_workers=1) as preview_pool:
+                r = media.publish(pctx, shot, "Plate", comp, files=[str(exr)],
+                                  name="bg", proxy_dry_run=True, preview_pool=preview_pool)
+                self.assertIsNone(r.preview)
+                self.assertIsNotNone(r.preview_future)
+                r.preview_future.result(timeout=5)
+            self.assertEqual(len(pctx.kitsu.previews), 1)
+
 
 class TestReview(unittest.TestCase):
     def test_submit_record_approve(self):

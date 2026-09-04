@@ -117,7 +117,11 @@ set PIPELINE_ROOT=%~dp0..
 set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\Scripts\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=python.exe
-"%PYTHON_EXE%" -m tools.pipeline_deploy.rollback_cli "%PIPELINE_ROOT%"
+rem run the script BY PATH, not `-m tools.pipeline_deploy...` -- `-m` needs
+rem `tools` importable from the cwd/PYTHONPATH, which a double-clicked .bat
+rem does not set up. rollback_cli.py is stdlib-only and self-contained, so
+rem running it directly works regardless of sys.path.
+"%PYTHON_EXE%" "%PIPELINE_ROOT%\\current\\tools\\pipeline_deploy\\rollback_cli.py" "%PIPELINE_ROOT%"
 pause
 """
 

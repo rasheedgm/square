@@ -39,6 +39,20 @@ class TestLauncherBat(unittest.TestCase):
             write_launchers(launchers, release)
             self.assertTrue((launchers / "square_rollback.bat").exists())
 
+    def test_rollback_launcher_runs_by_path_not_dash_m(self):
+        # `-m tools.pipeline_deploy.rollback_cli` needs `tools` importable
+        # from the cwd/PYTHONPATH, which a double-clicked .bat never sets up
+        # -- this is exactly what broke ("No module named 'tools'")
+        with tempfile.TemporaryDirectory() as td:
+            launchers = Path(td) / "launchers"
+            write_launchers(launchers, Path(td) / "release")
+            bat = (launchers / "square_rollback.bat").read_text(encoding="utf-8")
+            invoke_lines = [ln for ln in bat.splitlines() if ln.startswith('"%PYTHON_EXE%"')]
+            self.assertEqual(len(invoke_lines), 1)
+            self.assertNotIn("-m tools", invoke_lines[0])
+            self.assertIn(r"%PIPELINE_ROOT%\current\tools\pipeline_deploy\rollback_cli.py",
+                          invoke_lines[0])
+
 
 if __name__ == "__main__":
     unittest.main()

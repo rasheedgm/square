@@ -3,6 +3,32 @@
 Locked calls, with the short reason. Change one only by adding a new dated
 entry that supersedes it — don't silently edit.
 
+## No migration before v1.0 (2026-09-04, standing policy)
+
+**Nothing in this repo has ever been in production. Nothing depends on
+backward compatibility with anything.** Every `schema_version`, format, or
+shape that has existed so far — including "v2" of `ProjectConfig` — was
+never a real deployed version; it's internal bookkeeping while the pipeline
+core and its concepts are still being settled.
+
+- **Do not write migration code speculatively.** No "fold the old shape into
+  the new one on load," no "backfill a key that moved," no silent in-memory
+  upgrade of anything, for data that has never existed for real. A
+  `schema_version` mismatch (in either direction) is a hard `ConfigError`
+  asking for a fresh config — not a transform. (Undone 2026-09-04: a
+  `_migrate_v1` fold + a `_backfill_v2_orphans` patch were both built and then
+  removed the same day for exactly this reason — see
+  `square_core/config/project.py`'s `load()`.)
+- This holds **until the pipeline reaches major version 1** and something is
+  actually running in production. After that, real migrations will be needed
+  and will be asked for explicitly — build them then, against real data, not
+  ahead of time against a hypothetical shape.
+- This is about **schema/data migration**, not about correctness fixes,
+  validation, or config *key aliasing* the current code already accepts
+  (e.g. `PipelineConfig.load()` reading either `kitsu_host` or the older
+  `kitsu_url` spelling in the one `studio_config.json` this repo actually
+  has) — those stay in scope as normal bug fixes.
+
 ## Pipeline architecture (2026-09-02)
 
 Full design in `pipeline_architecture.md`. The load-bearing calls:

@@ -8,7 +8,12 @@ place). Schema: `docs/config_and_paths.md`.
 
 v2 (2026-09-04): one `media_types` registry -- ingest and render-output are the
 same operation. `templates.output` / `templates.workfile` / `ingest.by_type`
-are gone. A `schema_version < 2` file is migrated in memory on load.
+are gone.
+
+No migration path: `load()` requires `schema_version == SCHEMA_VERSION`
+exactly and rejects anything else. Nothing has shipped to production, so
+there is no old-shape data to accommodate -- see decisions.md "No migration
+before v1.0". Migration code gets written only when it's actually needed.
 
 Pure-ish: stdlib + `square_core.paths` (for template validation) only.
 """
@@ -140,75 +145,6 @@ def _deep_merge(base: dict, over: dict | None) -> dict:
     return out
 
 
-def _migrate_v1(data: dict) -> dict:
-    """Fold a v1 `templates` + `ingest` config into a v2 `media_types` registry,
-    in memory. Best-effort -- a v1 config was never in production."""
-    if int(data.get("schema_version", 1)) >= 2:
-        return _backfill_v2_orphans(data)
-    d = json.loads(json.dumps(data))
-    templates = d.pop("templates", {}) or {}
-    ingest = d.pop("ingest", {}) or {}
-
-    mt: dict = {}
-    base_default = dict(ingest.get("default") or {})
-    base_default.setdefault("kitsu_kind", "output")
-    base_default.setdefault("previewable", False)
-    base_default.setdefault("colorspace", "")
-    mt[_DEFAULT_ENTRY] = base_default or DEFAULT_PROJECT_CONFIG["media_types"][_DEFAULT_ENTRY]
-
-    for name, entry in (ingest.get("by_type") or {}).items():
-        mt[name] = {"source": "delivery", **dict(entry)}
-    if templates.get("output"):
-        mt.setdefault("Output", {**templates["output"], "kitsu_kind": "output"})
-    if templates.get("workfile"):
-        mt.setdefault("Workfile", {**templates["workfile"],
-                                   "kitsu_kind": "working", "source": "work"})
-
-    prev = set(d.pop("preview_enabled_media_types", []) or [])
-    for name in prev:
-        if name in mt:
-            mt[name]["previewable"] = True
-
-    d["media_types"] = mt
-    d.pop("transfer_mode", None)          # now a per-publish arg, not stored
-    d.setdefault("copy_workers", DEFAULT_PROJECT_CONFIG["copy_workers"])
-    d.setdefault("tools", {})
-    d["schema_version"] = SCHEMA_VERSION
-    return _backfill_v2_orphans(d)
-
-
-def _backfill_v2_orphans(data: dict) -> dict:
-    """A stayed-at-`schema_version: 2` change made within this codebase's own
-    v2 lifetime: `tools.ingest.copy_workers` moved to top-level `copy_workers`,
-    and `media_types` entries gained `source`. `_migrate_v1` only fires for a
-    literal `schema_version < 2`, so a config saved by an earlier commit of
-    THIS schema (still v2) would otherwise silently lose its configured
-    `copy_workers` and have every media type resolve as `source: "publish"`
-    regardless of `tools.ingest.media_types` having named it a delivery type.
-    Best-effort, in memory, never errors; a config that never had this shape
-    is returned untouched."""
-    ingest = (data.get("tools") or {}).get("ingest")
-    if not isinstance(ingest, dict):
-        return data
-    orphan_workers = "copy_workers" in ingest and "copy_workers" not in data
-    mt = data.get("media_types")
-    orphan_sources = []
-    if isinstance(mt, dict):
-        for name in (ingest.get("media_types") or []):
-            entry = mt.get(name)
-            if isinstance(entry, dict) and "source" not in entry:
-                orphan_sources.append(name)
-    if not orphan_workers and not orphan_sources:
-        return data
-
-    d = json.loads(json.dumps(data))
-    if orphan_workers:
-        d["copy_workers"] = d["tools"]["ingest"].pop("copy_workers")
-    for name in orphan_sources:
-        d["media_types"][name]["source"] = "delivery"
-    return d
-
-
 @dataclass
 class ProjectConfig:
     data: dict = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)))
@@ -337,7 +273,7 @@ class ProjectConfig:
 
     @classmethod
     def from_defaults(cls, defaults: dict | None = None, *, overrides: dict | None = None) -> "ProjectConfig":
-        merged = _deep_merge(_migrate_v1(defaults or DEFAULT_PROJECT_CONFIG), overrides)
+        merged = _deep_merge(defaults or DEFAULT_PROJECT_CONFIG, overrides)
         merged.setdefault("schema_version", SCHEMA_VERSION)
         cfg = cls(data=merged)
         cfg.check()
@@ -349,6 +285,11 @@ class ProjectConfig:
 
     @classmethod
     def load(cls, project_root: str | Path) -> "ProjectConfig":
+        # No migration path, deliberately: nothing has shipped to production
+        # yet, so there is no old-shape data anywhere to accommodate. A
+        # schema_version mismatch in either direction means recreate the
+        # config, not silently patch it up -- see decisions.md "No migration
+        # before v1.0".
         p = cls.path_for(project_root)
         if not p.exists():
             raise ConfigError(f"no project config at {p}")
@@ -356,11 +297,13 @@ class ProjectConfig:
             data = json.loads(p.read_text(encoding="utf-8"))
         except Exception as e:
             raise ConfigError(f"{p} is not valid JSON: {e}") from e
-        if int(data.get("schema_version", 1)) > SCHEMA_VERSION:
+        version = int(data.get("schema_version", 0))
+        if version != SCHEMA_VERSION:
             raise ConfigError(
-                f"{p} is schema v{data['schema_version']}, this build understands v{SCHEMA_VERSION}"
+                f"{p} is schema v{version}, this build understands v{SCHEMA_VERSION} -- "
+                f"recreate the project config (no migration path before v1.0)"
             )
-        cfg = cls(data=_migrate_v1(data))
+        cfg = cls(data=data)
         cfg.check()
         return cfg
 

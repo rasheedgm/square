@@ -376,7 +376,13 @@ trickles a review proxy behind it.
 
 ---
 
-## 10. Migration
+## 10. What replaced what (v1 → v2, conceptual — not an automated migration)
+
+Nothing has shipped to production, so there is no old-shape data to migrate
+and `ProjectConfig.load()` does not attempt to (`decisions.md` "No migration
+before v1.0" — it rejects any `schema_version` that isn't exactly current).
+This table is only for a reader coming from the old code / old docs, to map
+a since-removed name to its replacement.
 
 | v1 / pre-pipeline | v2 |
 |---|---|
@@ -390,7 +396,7 @@ trickles a review proxy behind it.
 | `copy_workers` (scattered) | top-level `copy_workers` (core transfer setting) |
 | `transfer_mode` (stored) | a `media.publish(transfer_mode=…)` arg; a tool that wants a stored default registers its own `tools.<tool>.transfer_mode` |
 | `preview_enabled_media_types` / per-tool media-type lists | `media_types.<Name>.previewable` / `media_types.<Name>.source` |
-| `schema_version: 1` | `schema_version: 2` (loader migrates: fold `templates`+`ingest` into `media_types`, `copy_workers` stays top-level, drop `transfer_mode`) |
+| `schema_version: 1` | `schema_version: 2` — a v1 file is simply rejected by `load()`, not migrated |
 
 `path_pattern.py` / `token_parser.py` (incoming delivery-folder matching) are
 **unchanged and unrelated** — they parse a vendor's folder shape, not outgoing

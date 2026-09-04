@@ -20,8 +20,9 @@ Config is JSON on disk, but it is **not** free-form:
 - **Validation** — a typo'd key (`nas_root` vs `nas_roots`) or a wrong type
   (`version_pad: "3"`) should fail loud at deploy / project-create, not
   silently at 2am mid-render.
-- **Defaults & migration** — a new release adds a key; the schema says its
-  default and the loader fills it (see `config_and_paths.md` §10).
+- **Defaults, not migration** — a new release adds a key; the schema says its
+  default and an absent key just resolves to it (§3.1) — no transform step,
+  no migration code (`decisions.md` "No migration before v1.0").
 - **Tool settings** — a tool declares the settings it needs; the editor shows
   them; an uninstalled tool's keys stay untouched in existing configs.
 
@@ -237,9 +238,12 @@ registers **no `tools.*` key** — a desktop tool `schema.register()`s its own
 
 ## 7. Resolved
 
-1. **Migration hook** — done. `ProjectConfig.load()` runs `_migrate_v1()` in
-   memory on a `schema_version < 2` file; `ConfigStore.save_project()` re-writes
-   it in v2.
+1. **Migration hook** — superseded 2026-09-04, see `decisions.md` "No
+   migration before v1.0". `ProjectConfig.load()` had a `_migrate_v1()` fold
+   for a `schema_version < 2` file; it's been removed. Nothing has shipped, so
+   there's no old-shape data to fold — `load()` now requires
+   `schema_version == SCHEMA_VERSION` exactly and rejects anything else.
+   Migration code gets written only when a real migration is actually needed.
 2. **`kitsu_kind: working` + our path** — verified live 2026-09-04: the
    `media.publish` E2E recorded a `NukeScript` working file at our resolver
    path (`work/comp/nuke/…_v001.nk`), same `PUT` override as output files.

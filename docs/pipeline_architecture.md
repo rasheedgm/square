@@ -684,11 +684,14 @@ then the thinnest tool that proves them, then a live pass against a throwaway
 
 1. **Annotation read shape** — deferred to the review player (Phase D). Write is
    confirmed (`update_preview_annotations`); spike the drawing-object schema then.
-2. **Config schema details** (`config_schema.md` §7) — v1→v2 migration hook
-   location; whether a `working_file` path `PUT` works like `output_file`'s
-   (verified) against live Zou; the Kitsu admin-role gate for the editor.
 
 *(Resolved 2026-09-02: `ProjectConfig` + `PathResolver` — `{token}` templates,
 case-preserving, pure resolver, Kitsu `data` key `"square"`, we `PUT` our path
 onto the Kitsu file record. `projects.create` sets a throwaway minimal
 file_tree.)*
+
+*(Resolved 2026-09-04: `working_file` path `PUT` verified live, same as
+`output_file`'s; the config editor's Kitsu admin-role gate is built
+(`admin`/`manager`). The "v1→v2 migration hook" item is superseded, not
+resolved — see `decisions.md` "No migration before v1.0": there is no
+migration hook at all now, on purpose.)*

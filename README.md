@@ -45,11 +45,17 @@ breakdown.build_task_grid(pctx, [shot], ["Ingest", "Comp"])
 
 ## Config
 
-Copy `studio_config.template.json` → `studio_config.json` (or point
-`STUDIO_CONFIG_PATH` at it) and fill in your Kitsu host + NAS root(s).
-Credentials are **not** in the file — each user logs in once
-(`square_core.kitsu.auth.login`) and the JWT caches to the OS keyring or
-`~/.square/`.
+`studio_config.template.json` is the **full reference** — every key
+`ProjectConfig` supports, generated from code
+(`python -m tools.pipeline_deploy.gen_studio_template`; re-run after touching
+`DEFAULT_PROJECT_CONFIG` and commit the file — `tests/test_studio_template.py`
+checks it hasn't drifted). It is *not* a starter meant to be copied in full: a
+real `studio_config.json` only needs `kitsu_host` + `nas_roots` (or point
+`STUDIO_CONFIG_PATH` at one) — every other key already has the same code
+default and resolves per sub-key when absent from the file (see
+`docs/config_schema.md` §3.1). Credentials are **not** in the file — each user
+logs in once (`square_core.kitsu.auth.login`) and the JWT caches to the OS
+keyring or `~/.square/`.
 
 Every config key is described by a `ConfigKey` in `square_core/config/schema.py`
 (kind / scope / default / range). The admin **config editor** is the only tool

@@ -181,57 +181,78 @@ class ProjectConfig:
     data: dict = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)))
 
     # ---- typed views -------------------------------------------------
+    #
+    # Every one of these falls back to `DEFAULT_PROJECT_CONFIG`, not a second,
+    # separately-maintained literal: a key **absent from this config's `data`**
+    # resolves from code; a key **present** (even partially, for a dict) wins,
+    # merged over the built-in so an admin only ever has to write the part
+    # they're actually changing. This is why `studio_config.template.json` /
+    # a freshly-created project file can start from just a few keys and still
+    # resolve everything -- and why the config editor can show every key
+    # (source `builtin`) without any of them being written back on save unless
+    # the admin actually touches that field.
 
     @property
     def fps(self) -> float:
-        return float(self.data.get("fps") or 0.0)
+        return float(self.data.get("fps", DEFAULT_PROJECT_CONFIG["fps"]))
 
     @property
     def resolution(self) -> str:
-        return str(self.data.get("resolution") or "")
+        return str(self.data.get("resolution", DEFAULT_PROJECT_CONFIG["resolution"]))
+
+    @property
+    def aspect_ratio(self) -> str:
+        return str(self.data.get("aspect_ratio", DEFAULT_PROJECT_CONFIG["aspect_ratio"]))
 
     @property
     def version_pad(self) -> int:
-        return int(self.data.get("version_pad") or 3)
+        return int(self.data.get("version_pad", DEFAULT_PROJECT_CONFIG["version_pad"]))
 
     @property
     def frame_pad(self) -> int:
-        return int(self.data.get("frame_pad") or 4)
+        return int(self.data.get("frame_pad", DEFAULT_PROJECT_CONFIG["frame_pad"]))
 
     @property
     def copy_workers(self) -> int:
-        return int(self.data.get("copy_workers") or 4)
+        return int(self.data.get("copy_workers", DEFAULT_PROJECT_CONFIG["copy_workers"]))
 
     @property
     def slugify(self) -> dict:
-        return dict(self.data.get("slugify") or DEFAULT_PROJECT_CONFIG["slugify"])
+        return _deep_merge(DEFAULT_PROJECT_CONFIG["slugify"], self.data.get("slugify") or {})
 
     @property
     def colorspace(self) -> dict:
-        return dict(self.data.get("colorspace") or {})
+        return _deep_merge(DEFAULT_PROJECT_CONFIG["colorspace"], self.data.get("colorspace") or {})
 
     @property
     def roots(self) -> dict:
-        return dict(self.data.get("roots") or {})
+        return _deep_merge(DEFAULT_PROJECT_CONFIG["roots"], self.data.get("roots") or {})
 
     @property
     def media_types(self) -> dict:
+        """The raw registry as configured (unmerged) -- for listing / the
+        editor. Use `media_type(name)` for a fully-resolved entry."""
         return dict(self.data.get("media_types") or {})
 
     @property
     def shot_folder_structure(self) -> list:
-        return list(self.data.get("shot_folder_structure") or [])
+        v = self.data.get("shot_folder_structure")
+        return list(v if v is not None else DEFAULT_PROJECT_CONFIG["shot_folder_structure"])
 
     @property
     def asset_folder_structure(self) -> list:
-        return list(self.data.get("asset_folder_structure") or [])
+        v = self.data.get("asset_folder_structure")
+        return list(v if v is not None else DEFAULT_PROJECT_CONFIG["asset_folder_structure"])
 
     @property
     def project_folder_structure(self) -> list:
-        return list(self.data.get("project_folder_structure") or [])
+        v = self.data.get("project_folder_structure")
+        return list(v if v is not None else DEFAULT_PROJECT_CONFIG["project_folder_structure"])
 
     @property
     def delivery_presets(self) -> dict:
+        """The raw registry as configured (unmerged) -- use `delivery_template()`
+        for a fully-resolved preset."""
         return dict(self.data.get("delivery_presets") or {})
 
     @property
@@ -245,15 +266,17 @@ class ProjectConfig:
 
     def media_type(self, name: str) -> dict:
         """The fully-resolved config entry for a media type: the built-in
-        `_default`, then this config's `_default`, then the named entry, each
-        deep-merged on top. Merging the built-in first means a key added to
-        `_default` in a newer release (e.g. `source`) is present even for a
-        config written before it. An unknown name still resolves."""
+        `_default`, this config's own `_default` (if any), then the named
+        entry, each deep-merged on top. `_default` can never truly go missing
+        -- merging the built-in first means a key added to it in a newer
+        release (e.g. `source`) is present even for a config written before
+        it, and an entirely absent `media_types` key resolves the same as an
+        empty one. An unknown name still resolves (as `_default`)."""
         reg = self.data.get("media_types") or {}
         own_default = reg.get(_DEFAULT_ENTRY)
-        if not isinstance(own_default, dict):
-            raise ConfigError("media_types._default is missing")
-        base = _deep_merge(DEFAULT_PROJECT_CONFIG["media_types"][_DEFAULT_ENTRY], own_default)
+        if own_default is not None and not isinstance(own_default, dict):
+            raise ConfigError("media_types._default must be an object")
+        base = _deep_merge(DEFAULT_PROJECT_CONFIG["media_types"][_DEFAULT_ENTRY], own_default or {})
         return _deep_merge(base, reg.get(name) or {})
 
     def media_type_names(self, *, source: str | None = None) -> list:
@@ -267,12 +290,14 @@ class ProjectConfig:
         return [n for n in names if self.media_type(n).get("source") == source]
 
     def delivery_template(self, client: str = "") -> dict:
+        """Same inheritance shape as `media_type()`: the built-in
+        `_default`, this config's own `_default` (if any), then the named
+        client preset, deep-merged on top."""
         presets = self.data.get("delivery_presets") or {}
-        base = dict(presets.get(_DEFAULT_ENTRY) or presets.get("default") or {})
+        own_default = presets.get(_DEFAULT_ENTRY) or presets.get("default") or {}
+        base = _deep_merge(DEFAULT_PROJECT_CONFIG["delivery_presets"][_DEFAULT_ENTRY], own_default)
         if client and client in presets:
             base = _deep_merge(base, presets[client])
-        if not base:
-            raise ConfigError("delivery_presets._default is missing")
         return base
 
     # ---- build / load / save --------------------------------------
@@ -322,29 +347,46 @@ class ProjectConfig:
     # ---- validation ----------------------------------------------
 
     def structural_errors(self) -> list[str]:
+        """Checks the *effective* (built-in-merged) config, so a key that is
+        simply absent from this file is never an error -- only a key that is
+        present with a value that breaks resolution (wrong type, or an
+        override that blanks a required value) is."""
         errs: list[str] = []
-        roots = self.data.get("roots")
-        if not isinstance(roots, dict):
-            errs.append("missing or non-object 'roots'")
-            roots = {}
-        for r in _REQUIRED_ROOTS:
-            if not roots.get(r):
-                errs.append(f"roots.{r} is required")
 
-        reg = self.data.get("media_types")
-        if not isinstance(reg, dict) or _DEFAULT_ENTRY not in reg:
-            errs.append("media_types._default is required")
-        elif "file" not in (reg.get(_DEFAULT_ENTRY) or {}):
-            errs.append("media_types._default needs at least a 'file'")
+        raw_roots = self.data.get("roots")
+        if raw_roots is not None and not isinstance(raw_roots, dict):
+            errs.append("'roots' must be an object")
+        else:
+            roots = self.roots                              # built-in-merged
+            for r in _REQUIRED_ROOTS:
+                if not roots.get(r):
+                    errs.append(f"roots.{r} is required")
 
-        for name in [n for n in (reg or {}) if n != _DEFAULT_ENTRY]:
-            entry = self.media_type(name)
-            kind = entry.get("kitsu_kind", "output")
-            if kind not in ("output", "working"):
-                errs.append(f"media_types.{name}.kitsu_kind must be 'output' or 'working', not {kind!r}")
-            src = entry.get("source", "publish")
-            if src not in _MEDIA_SOURCES:
-                errs.append(f"media_types.{name}.source must be one of {list(_MEDIA_SOURCES)}, not {src!r}")
+        raw_reg = self.data.get("media_types")
+        if raw_reg is not None and not isinstance(raw_reg, dict):
+            errs.append("'media_types' must be an object")
+        else:
+            names = [n for n in (raw_reg or {}) if n != _DEFAULT_ENTRY]
+            try:
+                default_entry = self.media_type(_DEFAULT_ENTRY)
+            except ConfigError as e:
+                errs.append(str(e))
+                default_entry = None
+            if default_entry is not None and not default_entry.get("file"):
+                errs.append("media_types._default needs at least a 'file'")
+
+            for name in names:
+                try:
+                    entry = self.media_type(name)
+                except ConfigError as e:
+                    errs.append(str(e))
+                    continue
+                kind = entry.get("kitsu_kind", "output")
+                if kind not in ("output", "working"):
+                    errs.append(f"media_types.{name}.kitsu_kind must be 'output' or 'working', not {kind!r}")
+                src = entry.get("source", "publish")
+                if src not in _MEDIA_SOURCES:
+                    errs.append(f"media_types.{name}.source must be one of {list(_MEDIA_SOURCES)}, not {src!r}")
         return errs
 
     def check(self) -> None:

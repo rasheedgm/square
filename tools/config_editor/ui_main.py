@@ -31,6 +31,7 @@ class ScopePane(QtWidgets.QWidget):
         self.scope = scope
         self.store = store
         self._editors: dict[str, object] = {}
+        self._touched: set[str] = set()      # keys actually edited since the last rebuild
         self._dirty = False
 
         outer = QtWidgets.QVBoxLayout(self)
@@ -43,6 +44,7 @@ class ScopePane(QtWidgets.QWidget):
 
     def rebuild(self):
         self._editors.clear()
+        self._touched.clear()
         body = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(body)
         form.setLabelAlignment(ALIGN_TOP)
@@ -63,7 +65,7 @@ class ScopePane(QtWidgets.QWidget):
             tag.setStyleSheet(f"color:{_SOURCE_COLOR.get(fv.source, '#94A3B8')};font-size:11px;")
 
             editor = make_field_editor(fv)
-            editor.signal_changed.connect(self._mark_dirty)
+            editor.signal_changed.connect(lambda k=fv.key: self._on_field_changed(k))
             self._editors[fv.key] = editor
 
             cell = QtWidgets.QWidget()
@@ -90,7 +92,8 @@ class ScopePane(QtWidgets.QWidget):
         self._scroll.setWidget(body)
         self._set_dirty(False)
 
-    def _mark_dirty(self):
+    def _on_field_changed(self, key: str):
+        self._touched.add(key)
         self._set_dirty(True)
 
     def _set_dirty(self, on: bool):
@@ -105,9 +108,16 @@ class ScopePane(QtWidgets.QWidget):
     # ----
 
     def _flush_into_store(self):
-        """Push every editor's value into the store (in memory)."""
+        """Push only the fields the user actually edited into the store (in
+        memory). A field never touched keeps showing its resolved value
+        (`builtin` / `studio-default`) but must NOT be written to disk on
+        save -- that would turn "inherits the shipped default" into a
+        permanent, unnecessary override the moment anyone hits Save."""
         errs = []
-        for key, editor in self._editors.items():
+        for key in self._touched:
+            editor = self._editors.get(key)
+            if editor is None:
+                continue
             try:
                 self.store.set(self.scope, key, editor.get_value())
             except (ValueError, KeyError) as e:

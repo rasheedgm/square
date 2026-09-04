@@ -232,6 +232,19 @@ Baked-in rules:
 }
 ```
 
+**None of this needs to be typed by hand.** `studio_config.template.json` is
+generated from `PipelineConfig.default_template()` (`python -m
+tools.pipeline_deploy.gen_studio_template`, re-run whenever
+`DEFAULT_PROJECT_CONFIG` changes; `tests/test_studio_template.py` catches
+drift) and already has `project_defaults` fully populated with every key
+above — it's the maximal reference, not a starter you're expected to edit
+down. A real `studio_config.json` only needs `kitsu_host` + `nas_roots`;
+`project_defaults` can be `{}` or omitted entirely, because every one of
+those keys already has the same code default and resolves per sub-key when
+absent (`config_schema.md` §3.1) -- write only what you're actually
+overriding, and the config editor's Save only ever writes what you actually
+touched.
+
 `projects.create(spec)`:
 1. `kitsu.create_project(spec)` → apply `spec.kitsu_template`, set a minimal file_tree
 2. `cfg = ProjectConfig.from_defaults(studio.project_defaults, overrides=spec.overrides)`

@@ -109,6 +109,24 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
   registry on `media_types.<Name>.source` (`delivery` / `publish` / `work`) —
   no separate per-tool list. `copy_workers` is a core top-level key (transfer
   perf), not tool config.
+- **A config key absent from a file is inheritance, not an error (2026-09-04,
+  user-reported).** Only `kitsu_host` / `nas_roots` stay `required=True` in the
+  schema; every other key -- including `roots` and `media_types`, previously
+  hard-required -- falls back to `DEFAULT_PROJECT_CONFIG`, merged **per
+  sub-key** (`ProjectConfig.roots`, `.colorspace`, `.slugify`, `.media_type()`,
+  `.delivery_template()`; `structural_errors()` checks the merged view, not raw
+  presence). `_default` in `media_types` / `delivery_presets` can never truly
+  go missing (built-in merges under it first) and is the one entry the editor
+  won't let you remove; every other named entry is exactly what the file
+  lists. `studio_config.template.json` is now **generated** from
+  `PipelineConfig.default_template()` (`tools/pipeline_deploy/
+  gen_studio_template.py`, drift-checked by `tests/test_studio_template.py`)
+  with `project_defaults` fully populated — the maximal reference, not a
+  starter meant to be copied verbatim. The config editor's Save flushes only
+  the fields actually edited (per-key "touched" tracking) — a field shown at
+  its resolved `builtin` value is never baked into the file just because Save
+  was pressed; opening a sparse config and saving without touching anything
+  leaves the file unchanged. `config_schema.md` §3.1.
 - **Auth: per-user login; JWT + refresh cached** (keyring or
   `~/.square/session.json`, mode 600), shared by every tool + DCC on a
   workstation. `kitsu/auth.py` is **non-interactive** (`login(email, pw)` /

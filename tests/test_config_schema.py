@@ -125,10 +125,19 @@ class TestValidate(RegistryCase):
         self.assertEqual(warns, [])
 
     def test_required_missing_is_error(self):
+        errs, _ = schema.validate({}, "studio")     # kitsu_host / nas_roots are still required
+        self.assertTrue(any("kitsu_host" in e for e in errs))
+        self.assertTrue(any("nas_roots" in e for e in errs))
+
+    def test_media_types_and_roots_are_not_required(self):
+        # they fall back to DEFAULT_PROJECT_CONFIG per sub-key when the whole
+        # key is absent (ProjectConfig.roots / .media_type()) -- schema-level
+        # "required" would fight that, so neither is required here
         data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
         del data["media_types"]
+        del data["roots"]
         errs, _ = schema.validate(data, "project")
-        self.assertTrue(any("media_types" in e for e in errs))
+        self.assertEqual(errs, [])
 
     def test_studio_scope_does_not_require_both_keys(self):
         # roots/media_types are scope=both but live in project_defaults, not

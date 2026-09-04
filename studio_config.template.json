@@ -4,5 +4,195 @@
         "default": "X:/projects"
     },
     "kitsu_project_templates": [],
-    "project_defaults": {}
+    "project_defaults": {
+        "schema_version": 2,
+        "fps": 24.0,
+        "resolution": "3840x2160",
+        "aspect_ratio": "",
+        "colorspace": {
+            "ocio": "",
+            "working": "ACEScg",
+            "delivery": "Rec.709",
+            "plate_assumed": "ACEScg"
+        },
+        "version_pad": 3,
+        "frame_pad": 4,
+        "copy_workers": 4,
+        "slugify": {
+            "spaces_to": "_",
+            "strip": "<>:\"/\\|?*",
+            "collapse": "_"
+        },
+        "roots": {
+            "project": "{nas_root}/{project}",
+            "shot": "{project_root}/{episode}/shots/{sequence}/{shot}",
+            "asset": "{project_root}/assets/{asset_type}/{asset}",
+            "delivery": "{project_root}/_delivery"
+        },
+        "media_types": {
+            "_default": {
+                "base": "shot",
+                "dir": "input/{media_type}/{name}_v{version}",
+                "file": "{project}_{sequence}_{shot}_{media_type}_{name}_v{version}.{frame}.{ext}",
+                "kitsu_kind": "output",
+                "source": "publish",
+                "previewable": false,
+                "colorspace": ""
+            },
+            "Plate": {
+                "source": "delivery",
+                "dir": "plates/{name}_v{version}",
+                "previewable": true,
+                "colorspace": "ACEScg"
+            },
+            "Ref": {
+                "source": "delivery",
+                "dir": "ref/{name}_v{version}",
+                "previewable": true
+            },
+            "BG Plate": {
+                "source": "delivery",
+                "dir": "bg_plates/{name}_v{version}",
+                "previewable": true,
+                "colorspace": "ACEScg"
+            },
+            "Element": {
+                "source": "delivery",
+                "dir": "elements/{name}_v{version}"
+            },
+            "LUT": {
+                "source": "delivery",
+                "dir": "luts/{name}_v{version}"
+            },
+            "Audio": {
+                "source": "delivery",
+                "dir": "audio/{name}_v{version}"
+            },
+            "Matte": {
+                "source": "delivery",
+                "dir": "mattes/{name}_v{version}"
+            },
+            "CompRender": {
+                "dir": "output/comp/v{version}/{representation}",
+                "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{frame}.{ext}",
+                "previewable": true,
+                "colorspace": "ACEScg"
+            },
+            "Precomp": {
+                "dir": "output/precomp/v{version}/{representation}",
+                "file": "{project}_{sequence}_{shot}_precomp_{name}_v{version}.{frame}.{ext}"
+            },
+            "Cache": {
+                "dir": "output/cache/{name}/v{version}",
+                "representation": "abc",
+                "file": "{project}_{sequence}_{shot}_{name}_v{version}.{frame}.{ext}"
+            },
+            "NukeScript": {
+                "kitsu_kind": "working",
+                "source": "work",
+                "dir": "work/comp/nuke",
+                "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.nk"
+            },
+            "MayaScene": {
+                "kitsu_kind": "working",
+                "source": "work",
+                "dir": "work/{task}/maya",
+                "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.ma"
+            }
+        },
+        "shot_folder_structure": [
+            "2D/comp/dailes",
+            "2D/comp/elements/DMP",
+            "2D/comp/elements/precomp",
+            "2D/comp/feedback",
+            "2D/comp/ref",
+            "2D/comp/render/exr",
+            "2D/comp/render/mov",
+            "2D/comp/workfiles/mocha",
+            "2D/comp/workfiles/nuke",
+            "2D/comp/workfiles/sfx",
+            "2D/dmp/dailes",
+            "2D/dmp/elements/DMP",
+            "2D/dmp/elements/precomp",
+            "2D/dmp/feedback",
+            "2D/dmp/ref",
+            "2D/dmp/render/exr",
+            "2D/dmp/render/mov",
+            "2D/dmp/workfiles/mocha",
+            "2D/dmp/workfiles/nuke",
+            "2D/dmp/workfiles/sfx",
+            "2D/prep/dailes",
+            "2D/prep/elements/DMP",
+            "2D/prep/elements/precomp",
+            "2D/prep/feedback",
+            "2D/prep/ref",
+            "2D/prep/render/exr",
+            "2D/prep/render/mov",
+            "2D/prep/workfiles/mocha",
+            "2D/prep/workfiles/nuke",
+            "2D/prep/workfiles/sfx",
+            "2D/roto/dailes",
+            "2D/roto/elements/DMP",
+            "2D/roto/elements/precomp",
+            "2D/roto/feedback",
+            "2D/roto/ref",
+            "2D/roto/render/exr",
+            "2D/roto/render/mov",
+            "2D/roto/workfiles/mocha",
+            "2D/roto/workfiles/nuke",
+            "2D/roto/workfiles/sfx",
+            "2D/temp",
+            "3D/animation/reference",
+            "3D/animation/render",
+            "3D/animation/temp",
+            "3D/animation/workfiles",
+            "3D/env/reference",
+            "3D/env/render",
+            "3D/env/temp",
+            "3D/env/workfiles",
+            "3D/fx/reference",
+            "3D/fx/render",
+            "3D/fx/temp",
+            "3D/fx/workfiles",
+            "3D/grooming/reference",
+            "3D/grooming/render",
+            "3D/grooming/temp",
+            "3D/grooming/workfiles",
+            "3D/lighting/reference",
+            "3D/lighting/render",
+            "3D/lighting/temp",
+            "3D/lighting/workfiles",
+            "3D/matchmove/camera",
+            "3D/matchmove/dailies",
+            "3D/matchmove/geo",
+            "3D/matchmove/LD",
+            "3D/matchmove/workfiles",
+            "3D/rotoanim/reference",
+            "3D/rotoanim/render",
+            "3D/rotoanim/temp",
+            "3D/rotoanim/workfiles",
+            "input"
+        ],
+        "asset_folder_structure": [],
+        "project_folder_structure": [
+            "shots",
+            "assets",
+            "_delivery",
+            "_pipeline"
+        ],
+        "delivery_presets": {
+            "_default": {
+                "base": "delivery",
+                "dir": "{client}/{package}",
+                "file": "{shot}_{media_type}_v{version}.{frame}.{ext}",
+                "case": "preserve",
+                "container": "exr",
+                "frame_pad": 4,
+                "colorspace": "Rec.709",
+                "slate": false,
+                "burnin": []
+            }
+        },
+        "tools": {}
+    }
 }

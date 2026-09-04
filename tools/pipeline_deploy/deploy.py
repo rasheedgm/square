@@ -148,23 +148,32 @@ def _reconcile_config(config_dir: Path, update: bool) -> None:
     """The deployed studio_config.json is authoritative and is NEVER
     overwritten -- it holds the studio's real Kitsu host / NAS roots / edits.
 
-    Deploy the template alongside it as a reference, then compare TOP-LEVEL
-    keys: report any the template has that the live config lacks (a setting
-    added in a newer release). With --update-config, add just those missing
-    keys (template values), back up the old file, and touch nothing else."""
-    tmpl_src = repo_root / "studio_config.template.json"
-    if not tmpl_src.exists():
-        return
-    template = json.loads(tmpl_src.read_text(encoding="utf-8"))
+    The reference template is generated from `PipelineConfig.default_template()`
+    -- the actual code default, including the full `DEFAULT_PROJECT_CONFIG`
+    under `project_defaults` -- not a hand-maintained JSON file, so it can
+    never drift out of sync. Deploy it alongside the live config, then compare
+    TOP-LEVEL keys: report any the template has that the live config lacks (a
+    setting added in a newer release). With --update-config, add just those
+    missing keys (template values), back up the old file, and touch nothing
+    else. None of this is required reading -- every key in the template
+    already falls back to the same default if it's simply absent from the
+    live file; the template exists purely as a complete reference."""
+    from square_core.config.pipeline import default_template
 
+    template = default_template()
     ref = config_dir / "studio_config.template.json"
-    shutil.copy2(tmpl_src, ref)                       # the reference copy IS refreshed
+    ref.write_text(json.dumps(template, indent=4) + "\n", encoding="utf-8")
 
     live = config_dir / "studio_config.json"
     if not live.exists():
-        shutil.copy2(tmpl_src, live)
+        # seed a MINIMAL live config -- the studio only needs to fill in
+        # kitsu_host + nas_roots; everything else already has a code default
+        seed = {"kitsu_host": template["kitsu_host"], "nas_roots": template["nas_roots"],
+                "kitsu_project_templates": [], "project_defaults": {}}
+        live.write_text(json.dumps(seed, indent=4) + "\n", encoding="utf-8")
         print(f"[deploy] seeded {live} -- fill in kitsu_host + nas_roots "
-              f"(credentials are per-user JWTs, not in this file)")
+              f"(credentials are per-user JWTs, not in this file). See "
+              f"{ref.name} for every key project_defaults supports.")
         return
 
     try:

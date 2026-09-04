@@ -320,9 +320,13 @@ def _register_builtins() -> None:
              description="how a token value is cleaned for the filesystem")
 
     # --- structured (PathResolver does the deep validation) -------
-    register("roots", "root", scope="both", required=True,
+    # NOT required: each falls back to the matching DEFAULT_PROJECT_CONFIG
+    # entry (deep-merged, per sub-key) when absent from a file entirely --
+    # see ProjectConfig.roots / .media_type() / .delivery_template(). A file
+    # only needs to hold what it actually overrides.
+    register("roots", "root", scope="both",
              default={}, description="named path roots; each may reference {<name>_root}")
-    register("media_types", "media_type_registry", scope="both", required=True,
+    register("media_types", "media_type_registry", scope="both",
              default={}, description="every ingest / render / workfile media type")
     register("delivery_presets", "delivery_registry", scope="project", default={},
              description="per-client delivery packaging")

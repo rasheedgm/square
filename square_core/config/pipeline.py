@@ -22,6 +22,23 @@ _DEFAULT_HOST = os.getenv("KITSU_URL", "http://localhost/api")
 _DEFAULT_NAS = os.getenv("SQUARE_NAS_ROOT", "X:/projects")
 
 
+def default_template() -> dict:
+    """The full studio-config reference: every `PipelineConfig` key plus
+    `project_defaults` populated with the complete `DEFAULT_PROJECT_CONFIG` --
+    not a sparse example. This is the single source for
+    `studio_config.template.json` (both the repo copy and the one a deploy
+    refreshes on the NAS) so the reference can never drift from the code that
+    actually resolves it. Nothing here is required to be copied into a real
+    `studio_config.json` -- every key already falls back to this same default
+    if it's simply absent from the file."""
+    return {
+        "kitsu_host": "http://kitsu-host/api",
+        "nas_roots": {"default": "X:/projects"},
+        "kitsu_project_templates": [],
+        "project_defaults": json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)),
+    }
+
+
 @dataclass
 class PipelineConfig:
     kitsu_host: str = _DEFAULT_HOST

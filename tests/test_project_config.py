@@ -32,13 +32,70 @@ class TestFromDefaults(unittest.TestCase):
                 "_default": {"base": "shot", "dir": "in/{media_type}/{name}",
                              "file": "{shot}_{media_type}.{ext}"}}})       # no version
 
-    def test_missing_root_rejected(self):
+    def test_partial_root_override_inherits_the_rest(self):
+        # a project overriding only 'project' still gets the built-in 'shot'/
+        # 'asset'/'delivery' roots -- omission is inheritance, not an error
         data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
-        data["roots"] = {"project": "{nas_root}/{project}"}      # no 'shot'
+        data["roots"] = {"project": "{nas_root}/{project}/CUSTOM"}
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.structural_errors(), [])
+        self.assertEqual(cfg.roots["shot"], DEFAULT_PROJECT_CONFIG["roots"]["shot"])
+        self.assertIn("CUSTOM", cfg.roots["project"])
+
+    def test_explicitly_blanked_root_rejected(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        data["roots"] = {"shot": ""}          # an explicit override, not an omission
         cfg = ProjectConfig(data=data)
         self.assertIn("roots.shot is required", cfg.structural_errors())
         with self.assertRaises(ConfigError):
             cfg.check()
+
+    def test_roots_key_entirely_absent_is_fine(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        del data["roots"]
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.structural_errors(), [])
+        self.assertEqual(cfg.roots, DEFAULT_PROJECT_CONFIG["roots"])
+
+    def test_media_types_key_entirely_absent_is_fine(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        del data["media_types"]
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.structural_errors(), [])
+        self.assertEqual(cfg.media_type_names(), [])          # no named entries configured
+        self.assertEqual(cfg.media_type("anything")["kitsu_kind"], "output")   # _default still resolves
+
+    def test_delivery_presets_key_entirely_absent_is_fine(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        del data["delivery_presets"]
+        cfg = ProjectConfig(data=data)
+        d = cfg.delivery_template()
+        self.assertEqual(d, DEFAULT_PROJECT_CONFIG["delivery_presets"]["_default"])
+
+    def test_scalar_and_list_fields_fall_back_when_absent(self):
+        data = {"roots": DEFAULT_PROJECT_CONFIG["roots"],
+               "media_types": DEFAULT_PROJECT_CONFIG["media_types"]}   # nothing else at all
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.fps, DEFAULT_PROJECT_CONFIG["fps"])
+        self.assertEqual(cfg.version_pad, DEFAULT_PROJECT_CONFIG["version_pad"])
+        self.assertEqual(cfg.frame_pad, DEFAULT_PROJECT_CONFIG["frame_pad"])
+        self.assertEqual(cfg.copy_workers, DEFAULT_PROJECT_CONFIG["copy_workers"])
+        self.assertEqual(cfg.colorspace, DEFAULT_PROJECT_CONFIG["colorspace"])
+        self.assertEqual(cfg.slugify, DEFAULT_PROJECT_CONFIG["slugify"])
+        # the real bug this locks in: project_folder_structure used to fall
+        # back to [] instead of the built-in 4-entry list
+        self.assertEqual(cfg.project_folder_structure,
+                         DEFAULT_PROJECT_CONFIG["project_folder_structure"])
+        self.assertEqual(cfg.asset_folder_structure,
+                         DEFAULT_PROJECT_CONFIG["asset_folder_structure"])
+
+    def test_partial_colorspace_inherits_siblings(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        data["colorspace"] = {"working": "sRGB"}       # only one key set
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.colorspace["working"], "sRGB")
+        self.assertEqual(cfg.colorspace["delivery"], DEFAULT_PROJECT_CONFIG["colorspace"]["delivery"])
+        self.assertEqual(cfg.colorspace["ocio"], DEFAULT_PROJECT_CONFIG["colorspace"]["ocio"])
 
 
 class TestMediaTypeLookup(unittest.TestCase):

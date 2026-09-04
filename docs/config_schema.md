@@ -68,8 +68,7 @@ schema.register("version_pad", "int", scope="both", default=3, minimum=1, maximu
                 description="zero-pad width for {version}")
 schema.register("nas_roots", "dict", scope="studio", default={"default": "X:/projects"},
                 required=True, description="named NAS roots; a project picks one")
-schema.register("media_types", "media_type_registry", scope="both", default={...},
-                required=True)
+schema.register("media_types", "media_type_registry", scope="both", default={})
 schema.register("colorspace.working", "str", scope="project", default="ACEScg")
 ```
 
@@ -81,9 +80,48 @@ schema.register("tools.ingest.copy_workers", "int", scope="project", default=4,
                 minimum=1, maximum=32, description="parallel file copies")
 schema.register("tools.ingest.transfer_mode", "enum", scope="project",
                 default="copy", choices=("copy", "hardlink", "symlink"))
-schema.register("tools.ingest.media_types", "list", item_kind="str", scope="project",
-                default=[], description="media types the ingest tool offers")
 ```
+
+`copy_workers` here is illustrative only — the real one is a **core** key
+(`square_core/config/schema.py`, top-level `copy_workers`) because
+`services.media.publish` uses it for every transfer, not just ingest's. A
+tool never registers its own "which media types do I offer" list either — see
+§3.1.
+
+### 3.1 Absence means "use the code default," not "invalid"
+
+Only `kitsu_host` and `nas_roots` (`scope="studio"`) are `required=True` —
+genuinely site-specific, no sensible universal default. **Every other key,
+including `roots` and `media_types`, is optional.** When a key is absent from
+a config file, `ProjectConfig` resolves it from `DEFAULT_PROJECT_CONFIG`,
+**merged per sub-key** (`ProjectConfig.roots`, `.colorspace`, `.slugify`,
+`.media_type(name)`, `.delivery_template()` — not the raw `self.data.get(...)`
+a naive reader might reach for):
+
+- `data["roots"]` missing entirely → all four built-in roots apply.
+  `data["roots"] = {"project": "..."}` (only one key) → `shot`/`asset`/
+  `delivery` still come from the built-in; only `project` is overridden.
+- `data["media_types"]` missing entirely → `media_type_names()` is `[]` (no
+  *named* type is configured), but `media_type(anything)` still resolves —
+  `_default` merges the built-in `_default` first, so it can never actually
+  go missing. `_default` is the one entry the config editor won't let you
+  remove (it can still be edited); every other named entry (`Plate`,
+  `CompRender`, ...) is exactly what the file lists — a project that never
+  mentions `Plate` simply doesn't offer it, no auto-resurrection.
+- Same shape for `delivery_template()`, `colorspace`, `slugify`, and every
+  scalar (`fps`, `version_pad`, `frame_pad`, `copy_workers`, the three
+  folder-structure lists).
+
+This is why `studio_config.template.json` can be **the full reference** (every
+key `DEFAULT_PROJECT_CONFIG` supports, under `project_defaults` — see
+`config_and_paths.md`) while a real `studio_config.json` only needs
+`kitsu_host` + `nas_roots` to be valid: nothing else is required *because* it
+already has a code default, and the template exists to show what that default
+is, not because any of it needs to be copied in.
+
+`structural_errors()` follows the same rule: a key that is **present** with a
+value that breaks resolution (wrong type, or an override that blanks a
+required root) is an error; a key that is simply **absent** never is.
 
 - `schema.all()` → `{key: ConfigKey}` (the editor iterates this).
 - `schema.for_scope("project")` → keys editable at project level
@@ -155,10 +193,18 @@ offline session or a plain `user` gets a read-only window.
 - `roots` / `media_types` / `delivery_presets` open a table sub-editor;
   `dir` / `file` / pattern cells open the **by-example template builder**
   (live preview rendered against a sample `PathContext`, token palette).
-- Save flushes every field into the `ConfigStore`, runs the full `check()`
-  (schema + `PathResolver`), refuses on error, writes atomically, keeps a
-  timestamped `.bak`.
-- Headless: `python -m tools.config_editor --cli {list|get|set|reset|diff}`.
+- Save flushes only the fields **actually edited** since the pane was last
+  built into the `ConfigStore` (per-key "touched" tracking) — a field the
+  editor is merely showing at its resolved `builtin` value is never written
+  just because Save was pressed. Then it runs the full `check()` (schema +
+  `PathResolver`), refuses on error, writes atomically, keeps a timestamped
+  `.bak`. This is what keeps the file matching what's actually configured:
+  open a sparse config, look around, save without touching anything, and the
+  file on disk is unchanged.
+- The status bar always names the exact file the active tab reads/writes and
+  where its `.bak-<timestamp>` will land (same folder, same name).
+- Headless: `python -m tools.config_editor --cli {list|get|set|reset|diff}` --
+  same one-key-at-a-time behavior; `set` only ever touches the key you name.
 
 ---
 

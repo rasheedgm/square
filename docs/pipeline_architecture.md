@@ -324,28 +324,29 @@ build_task_grid(entities, task_template) -> [Task]   # "roadmap": tasks per enti
 assign(task, users)
 ```
 
+### `media` — one call for ingest, render, workfile, cache … (`config_and_paths.md` v2)
+```
+publish(pctx, entity, media_type, task, *, files, name="main", version=None,
+        source=None, media_info=None, inputs=(), dry_run=False) -> MediaResult
+    # resolve path (paths.media_path(media_type, ctx))
+    # → transfer + verify (storage.transfer) -- skipped for files already in place
+    # → kitsu.record_media: output_file or working_file per media_type.kitsu_kind,
+    #     with our path + Provenance in data["square"]; source_file_id + inputs
+    # → if media_type.previewable: deferred media.proxy + kitsu.upload_preview
+next_version(pctx, entity, media_type, task) -> int
+list_versions(pctx, entity, media_type) / latest(pctx, entity, media_type)
+```
+Ingest calls `media.publish(..., media_type=<Plate|Ref|…>, source=<delivery files>)`;
+Nuke calls `media.publish(..., media_type="CompRender", inputs=[nk_workfile])`.
+`work.save_workfile` / `work.publish_output` become thin wrappers.
+
 ### `ingest` — client material in (mostly stays in `tools/ingest_tool/core/`)
 ```
 # thin shared slice, promoted only when tool #8 needs it:
-commit(project_ctx, resolved_items, *, dry_run) -> IngestResult
-    # per item: ensure shot (breakdown) → create folders (storage.layout)
-    #           → transfer + verify (storage.transfer)
-    #           → kitsu.ensure_output_type(media_type) + kitsu.record_output_file
-    #           → deferred preview (media.proxy + kitsu.upload_preview)
-    # ingest landing path from ProjectConfig (not file_tree); local
-    # ingest_ledger dup-check stays inside the ingest tool for now
-```
-
-### `work` — workfiles & outputs
-```
-workfile_path(task, software, revision) -> str            # paths.PathResolver
-next_version(task, output_type) -> Version                # kitsu.next_output_revision
-save_workfile(task, src_path, *, comment) -> Workfile     # resolver path → copy →
-                                                         #   kitsu.record_working_file(path=ours)
-publish_output(task, *, source_workfile, output_type, files, media_info) -> PublishResult
-    # resolver path → transfer+verify → kitsu.record_output_file(path=ours, data=provenance)
-    #   → optional media.proxy → kitsu.upload_preview
-make_preview(source) -> PreviewMedia                      # proxy/slate/burn-in via media.proxy
+commit(pctx, resolved_items, *, dry_run) -> IngestResult
+    # per item: ensure shot (breakdown) → media.publish(pctx, shot, item.media_type,
+    #           ingest_task, files=item.source_files, source=item.source_files)
+    # local ingest_ledger dup-check stays inside the ingest tool for now
 ```
 
 ### `review` — supervisor loop
@@ -394,14 +395,13 @@ current()  -> ProjectContext | None                    # from cwd / open file / 
 ### `square_core/paths/`
 Computes **every** on-disk path (§5.1); Kitsu only assigns version numbers.
 **Full spec: [`config_and_paths.md`](config_and_paths.md).**
-- `resolver.py` — `PathResolver(config)` + `PathContext`. `{token}` templates
-  from `ProjectConfig`; case preserved + slugified; strict on missing required
-  tokens; `validate()` refuses a config whose templates don't vary by version.
-- `templates.py` — the render/validate primitives (from `format_dest_filename`
-  / `dest_template_versions_safely` *(exist in config.py)*).
-- `conventions.py` — folder-skeleton lists, `version_pad` / `frame_pad`.
-- `path_pattern.py` *(exists)* — build-by-example matcher for messy *incoming*
-  delivery folders (ingest); unrelated to the outgoing resolver.
+- `resolver.py` *(built)* — `PathResolver(config)` + `PathContext`. `{token}`
+  templates from `ProjectConfig`, case-preserving + slugified, strict on missing
+  required tokens, `validate()`. **v2:** ingest + render-output collapse into one
+  **`media_types` registry**; `media_path/media_dir/media_file/media_sequence(
+  media_type, ctx)` replace the separate `output_*` / `ingest_dest_*` methods.
+- `path_pattern.py` / `token_parser.py` *(built)* — build-by-example matcher for
+  messy *incoming* delivery folders (ingest); unrelated to the resolver.
 
 ### `square_core/media/`
 - `scanner.py` — image-sequence + video discovery, frame-range parsing. From
@@ -425,19 +425,24 @@ Computes **every** on-disk path (§5.1); Kitsu only assigns version numbers.
 `tools/ingest_tool/core/`.)
 
 ### `square_core/config/`
-Schemas in [`config_and_paths.md`](config_and_paths.md) §4–§5.
-- `studio.py` — `StudioConfig`, per install: Kitsu host, named NAS roots, creds
-  (→ OS keyring, §13), the list of Kitsu project templates, and
-  `project_defaults` — a whole `ProjectConfig` minus the per-show values.
-- `project.py` — `ProjectConfig`, one per project on the NAS
-  (`_pipeline/project_config.json`): resolved path templates, folder skeleton,
-  ingest media-type paths, client presets, colorspace. Written by
-  `projects.create` (`project_defaults` + `ProjectSpec` overrides). Tools read
-  it **live**, never snapshot it. `load()` runs `PathResolver.validate()` and
-  refuses a broken config.
-- `loader.py` — resolution order, env overrides, schema guard.
+Schemas: [`config_and_paths.md`](config_and_paths.md) §4–§5;
+key registry + editor: [`config_schema.md`](config_schema.md).
+- `pipeline.py` *(built)* — `PipelineConfig`, per install: Kitsu host, named NAS
+  roots, Kitsu project-template list, and `project_defaults` — a whole
+  `ProjectConfig` minus the per-show values.
+- `project.py` *(built)* — `ProjectConfig`, one per project on the NAS
+  (`_pipeline/project_config.json`): `roots`, the `media_types` registry,
+  `delivery_presets`, folder-structure lists, colorspace, `tools.*` settings.
+  Written by `projects.create`. Tools read it **live**, never snapshot it.
+- `schema.py` *(Phase B)* — the `ConfigKey` registry; `register()` for tools;
+  `get()` resolution (project → studio default → built-in); `check()` extends
+  `PathResolver.validate()` with type / required / unknown-key checks. The
+  admin **config editor** (tool) is the only writer.
+- `conventions.py` *(built)* — the default shot folder-structure list.
 
-### `square_core/hashing.py` *(exists)* — unchanged, already shared-quality.
+`ProjectConfig.load()` runs `check()` and refuses a broken config.
+
+### `square_core/hashing.py` *(built)* — hash-once cache, shared by transfer / verify.
 
 ---
 
@@ -548,8 +553,9 @@ tests/
 
 | # | Tool | Lifecycle stage | Core services it drives | Priority |
 |---|---|---|---|---|
-| 1 | **Ingest tool** *(built)* | client material → shots | `ingest`, `breakdown.create_shot`, `storage.transfer` | refactor onto core API |
-| 2 | **Project setup / admin** | project created · breakdown · roadmap | `projects.create/archive`, `breakdown.*`, `config` | **next** — smallest tool that exercises the spine |
+| 1 | **Ingest tool** *(built)* | client material → shots | `media.publish`, `breakdown`, `storage.transfer` | refactor onto core API |
+| 2 | **Project setup / admin** | project created · breakdown · roadmap | `projects.create/archive`, `breakdown.*` | **next** — smallest tool that exercises the spine |
+| 2b | **Config editor** (admin-only) | studio + project config | `config.schema` / `check` — the **only** writer of config | with #2; kills ingest's Settings dialog (`config_schema.md`) |
 | 3 | **DCC integration** (Nuke first: `SquareRead`/`SquareWrite` + publish panel) | workfile · output · task preview | `work.*`, `review.submit`, `media.proxy` | high |
 | 4 | **Workfile / version manager** (DCC-agnostic core, Maya/Houdini hooks) | task started · save · publish | `work.save_workfile`, `work.next_version`, `work.publish_output` | high (shares core with #3) |
 | 5 | **Review player** (desktop) | supervisor review · annotate · approve | `review.*` (annotations + status) | high |
@@ -582,18 +588,19 @@ branch — the restructure and the spine touch the same files.
    `ProjectConfig`; `projects.create` copies the relevant defaults in, applies
    a Kitsu project template, sets a minimal file_tree, writes
    `project_config.json`.
-4. `paths/resolver.py` — all path kinds (workfile / output / render / ingest /
-   delivery / skeleton) from `ProjectConfig`.
-5. `storage/transfer.py` + `storage/layout.py`.
+4. `paths/resolver.py` — the `media_types` registry + `media_path()` for every
+   path kind, from `ProjectConfig` (`config_and_paths.md` v2).
+5. `storage/transfer.py` + `storage/layout.py`; `services/media.publish`.
 6. Port the ingest tool onto `PipelineContext` + `square_core.kitsu`. This is
    the acceptance test — if ingest gets awkward, the API is wrong. The ingest
    ledger stays where it is; don't migrate it in this phase. Drop the session's
    `config_snapshot` — the tool reads live `ProjectConfig` on resume.
 
-**Phase B — project setup tool (#2)**
-`services/projects` + `services/breakdown` + task templates. A tiny Qt (or CLI)
-tool that spins up a real show end to end: DB + storage + config + shot list +
-task grid. Now we can create test projects without the ingest tool.
+**Phase B — project setup tool (#2) + config editor (#2b)**
+`services/projects` + `services/breakdown` + task templates + `config/schema.py`
+(the `ConfigKey` registry, `check()`, `get()` resolution). A tiny tool that
+spins up a real show end to end, and the admin config editor
+(`config_schema.md`) that becomes the only writer of studio / project config.
 
 **Phase C — work / publish + DCC tool (#3/#4)**
 `services/work`, path resolution in anger, first managed workfile + first
@@ -653,16 +660,29 @@ then the thinnest tool that proves them, then a live pass against a throwaway
 - **`square_core.model` / `.services` stay importable on Python 3.9–3.11** with
   no hard OIIO/ffmpeg/gazu import on that path (those are `kitsu`/`media` only).
 
+- **One media-type registry (2026-09-04).** Ingest and render-output are the
+  same operation — a versioned set of files of a configured type on an entity.
+  `config_and_paths.md` v2: one `media_types` table (studio-named, project-
+  overridable), one `PathResolver.media_path(media_type, ctx)`, one
+  `services.media.publish(...)` that ingest and Nuke both call. `media_type` →
+  Kitsu `output_type` (or `working_file` per `kitsu_kind`). "A version with
+  multiple files" = Kitsu's `(entity, output_type, name, revision)` grouping +
+  `representation`; dependencies via `source_file_id` + `data["square"]["inputs"]`.
+  Delivery stays separate.
+- **Config is schema-described and admin-edited only (`config_schema.md`).** A
+  `ConfigKey` registry (not JSON Schema); tools `register()` their `tools.<t>.*`
+  keys; one admin **config editor** is the only writer; every other tool is
+  read-only.
+
 ### Still open
 
 1. **Annotation read shape** — deferred to the review player (Phase D). Write is
-   confirmed (`update_preview_annotations`); when Phase D starts, spike the
-   `preview_file` `annotations` JSON + drawing-object schema the player emits.
+   confirmed (`update_preview_annotations`); spike the drawing-object schema then.
+2. **Config schema details** (`config_schema.md` §7) — v1→v2 migration hook
+   location; whether a `working_file` path `PUT` works like `output_file`'s
+   (verified) against live Zou; the Kitsu admin-role gate for the editor.
 
-*(Resolved 2026-09-02: **`ProjectConfig` + `PathResolver`** — full spec settled
-in [`config_and_paths.md`](config_and_paths.md); `{token}` templates,
-case-preserving, `PathResolver` pure, Kitsu `data` key renamed to `"square"`.
-Path casing — `PathResolver` owns paths, Kitsu owns version numbers, we `PUT`
-our path onto the Kitsu file record; Zou's file_tree case limit is moot.
-`projects.create` sets a throwaway minimal file_tree. Multi-site `mountpoint`
-deferred.)*
+*(Resolved 2026-09-02: `ProjectConfig` + `PathResolver` — `{token}` templates,
+case-preserving, pure resolver, Kitsu `data` key `"square"`, we `PUT` our path
+onto the Kitsu file record. `projects.create` sets a throwaway minimal
+file_tree.)*

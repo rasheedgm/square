@@ -76,7 +76,8 @@ adds just those (existing values untouched, a backup written).
 ## Docs
 
 - [`docs/pipeline_architecture.md`](docs/pipeline_architecture.md) — layers, the single Kitsu access point, services, tool inventory, build order
-- [`docs/config_and_paths.md`](docs/config_and_paths.md) — `ProjectConfig` + `PathResolver` spec
+- [`docs/config_and_paths.md`](docs/config_and_paths.md) — `ProjectConfig` + `PathResolver`: the `media_types` registry, tokens, casing
+- [`docs/config_schema.md`](docs/config_schema.md) — config-key registry + the admin config editor
 - [`docs/decisions.md`](docs/decisions.md) — locked design calls, with reasons
 - [`docs/assumptions.md`](docs/assumptions.md) · [`docs/roadmap.md`](docs/roadmap.md) · [`docs/restructure_plan.md`](docs/restructure_plan.md)
 - [`docs/ingest_tool_design.md`](docs/ingest_tool_design.md) — the ingest tool (pilot; lives on the `ingest_tools` branch, ported onto this core next)

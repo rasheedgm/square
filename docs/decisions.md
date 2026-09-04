@@ -75,6 +75,26 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
   migration. Everything the pipeline stamps on a Kitsu record
   (`preview_file` / `working_file` / `output_file` / entity `data`) nests under
   `data["square"]`.
+- **One media-type registry (2026-09-04, `config_and_paths.md` v2).** Ingest and
+  render-output are the same operation: *a versioned set of files of a
+  configured type on an entity*. There is one `media_types` table (studio-named,
+  project-overridable, deep-merged), one `PathResolver.media_path(media_type,
+  ctx)`, and one `services.media.publish(...)` that ingest and Nuke both call.
+  `templates.output` / `templates.workfile` / `ingest.by_type` are gone.
+  `media_type` maps to Kitsu `output_type`, or `working_file` when the entry
+  says `kitsu_kind: "working"`. "A version containing multiple files"
+  (`CompOut_v001 → {nk, exr}`) is Kitsu's `(entity, output_type, name,
+  revision)` grouping + `representation` — no parallel storage. Dependency
+  tracking is optional: `output_file.source_file_id` + `data["square"]["inputs"]`.
+  Delivery stays its own thing (`delivery_presets`).
+- **Config is schema-described; only an admin editor writes it
+  (`config_schema.md`).** A closed `ConfigKey` registry (kind / scope / default
+  / choices / range) — deliberately **not** JSON Schema. Core registers its
+  keys; each tool `register()`s its own `tools.<tool>.*` keys at import. One
+  admin **config editor** tool is the only writer of `studio_config.json` /
+  `project_config.json`; every other tool (ingest included — its Settings dialog
+  goes away) is read-only. `check()` validates type / required / unknown-key on
+  top of the `PathResolver` template checks.
 - **Auth: per-user login; JWT + refresh cached** (keyring or
   `~/.square/session.json`, mode 600), shared by every tool + DCC on a
   workstation. `kitsu/auth.py` is **non-interactive** (`login(email, pw)` /

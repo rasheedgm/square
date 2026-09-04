@@ -16,10 +16,27 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .project import DEFAULT_PROJECT_CONFIG, ConfigError
+from .project import DEFAULT_PROJECT_CONFIG, ConfigError, _deep_merge
 
 _DEFAULT_HOST = os.getenv("KITSU_URL", "http://localhost/api")
 _DEFAULT_NAS = os.getenv("SQUARE_NAS_ROOT", "X:/projects")
+
+
+def default_template() -> dict:
+    """The full studio-config reference: every `PipelineConfig` key plus
+    `project_defaults` populated with the complete `DEFAULT_PROJECT_CONFIG` --
+    not a sparse example. This is the single source for
+    `studio_config.template.json` (both the repo copy and the one a deploy
+    refreshes on the NAS) so the reference can never drift from the code that
+    actually resolves it. Nothing here is required to be copied into a real
+    `studio_config.json` -- every key already falls back to this same default
+    if it's simply absent from the file."""
+    return {
+        "kitsu_host": "http://kitsu-host/api",
+        "nas_roots": {"default": "X:/projects"},
+        "kitsu_project_templates": [],
+        "project_defaults": json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)),
+    }
 
 
 @dataclass
@@ -75,10 +92,33 @@ class PipelineConfig:
             cfg.kitsu_project_templates = list(data.get("kitsu_project_templates") or [])
             pd = data.get("project_defaults")
             if isinstance(pd, dict) and pd:
-                merged = json.loads(json.dumps(DEFAULT_PROJECT_CONFIG))
-                merged.update(pd)
-                cfg.project_defaults = merged
+                # deep merge -- a studio that overrides only colorspace.working
+                # must keep the other colorspace keys
+                cfg.project_defaults = _deep_merge(DEFAULT_PROJECT_CONFIG, pd)
         return cfg
+
+    # ------------------------------------------------------------------
+
+    def as_dict(self) -> dict:
+        return {
+            "kitsu_host": self.kitsu_host,
+            "nas_roots": dict(self.nas_roots),
+            "kitsu_project_templates": list(self.kitsu_project_templates),
+            "project_defaults": self.project_defaults,
+        }
+
+    def check(self) -> None:
+        """Schema validation of the studio config. Raises `ConfigError`; logs a
+        warning per unknown key."""
+        import logging
+
+        from . import schema
+
+        errors, warnings = schema.validate(self.as_dict(), "studio")
+        for w in warnings:
+            logging.getLogger("square.config.pipeline").warning("studio config: %s", w)
+        if errors:
+            raise ConfigError("invalid studio config:\n  - " + "\n  - ".join(errors))
 
 
 def _clean_url(url: str) -> str:

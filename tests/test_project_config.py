@@ -32,13 +32,70 @@ class TestFromDefaults(unittest.TestCase):
                 "_default": {"base": "shot", "dir": "in/{media_type}/{name}",
                              "file": "{shot}_{media_type}.{ext}"}}})       # no version
 
-    def test_missing_root_rejected(self):
+    def test_partial_root_override_inherits_the_rest(self):
+        # a project overriding only 'project' still gets the built-in 'shot'/
+        # 'asset'/'delivery' roots -- omission is inheritance, not an error
         data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
-        data["roots"] = {"project": "{nas_root}/{project}"}      # no 'shot'
+        data["roots"] = {"project": "{nas_root}/{project}/CUSTOM"}
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.structural_errors(), [])
+        self.assertEqual(cfg.roots["shot"], DEFAULT_PROJECT_CONFIG["roots"]["shot"])
+        self.assertIn("CUSTOM", cfg.roots["project"])
+
+    def test_explicitly_blanked_root_rejected(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        data["roots"] = {"shot": ""}          # an explicit override, not an omission
         cfg = ProjectConfig(data=data)
         self.assertIn("roots.shot is required", cfg.structural_errors())
         with self.assertRaises(ConfigError):
             cfg.check()
+
+    def test_roots_key_entirely_absent_is_fine(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        del data["roots"]
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.structural_errors(), [])
+        self.assertEqual(cfg.roots, DEFAULT_PROJECT_CONFIG["roots"])
+
+    def test_media_types_key_entirely_absent_is_fine(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        del data["media_types"]
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.structural_errors(), [])
+        self.assertEqual(cfg.media_type_names(), [])          # no named entries configured
+        self.assertEqual(cfg.media_type("anything")["kitsu_kind"], "output")   # _default still resolves
+
+    def test_delivery_presets_key_entirely_absent_is_fine(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        del data["delivery_presets"]
+        cfg = ProjectConfig(data=data)
+        d = cfg.delivery_template()
+        self.assertEqual(d, DEFAULT_PROJECT_CONFIG["delivery_presets"]["_default"])
+
+    def test_scalar_and_list_fields_fall_back_when_absent(self):
+        data = {"roots": DEFAULT_PROJECT_CONFIG["roots"],
+               "media_types": DEFAULT_PROJECT_CONFIG["media_types"]}   # nothing else at all
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.fps, DEFAULT_PROJECT_CONFIG["fps"])
+        self.assertEqual(cfg.version_pad, DEFAULT_PROJECT_CONFIG["version_pad"])
+        self.assertEqual(cfg.frame_pad, DEFAULT_PROJECT_CONFIG["frame_pad"])
+        self.assertEqual(cfg.copy_workers, DEFAULT_PROJECT_CONFIG["copy_workers"])
+        self.assertEqual(cfg.colorspace, DEFAULT_PROJECT_CONFIG["colorspace"])
+        self.assertEqual(cfg.slugify, DEFAULT_PROJECT_CONFIG["slugify"])
+        # the real bug this locks in: project_folder_structure used to fall
+        # back to [] instead of the built-in 4-entry list
+        self.assertEqual(cfg.project_folder_structure,
+                         DEFAULT_PROJECT_CONFIG["project_folder_structure"])
+        self.assertEqual(cfg.asset_folder_structure,
+                         DEFAULT_PROJECT_CONFIG["asset_folder_structure"])
+
+    def test_partial_colorspace_inherits_siblings(self):
+        data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+        data["colorspace"] = {"working": "sRGB"}       # only one key set
+        cfg = ProjectConfig(data=data)
+        self.assertEqual(cfg.colorspace["working"], "sRGB")
+        self.assertEqual(cfg.colorspace["delivery"], DEFAULT_PROJECT_CONFIG["colorspace"]["delivery"])
+        self.assertEqual(cfg.colorspace["ocio"], DEFAULT_PROJECT_CONFIG["colorspace"]["ocio"])
 
 
 class TestMediaTypeLookup(unittest.TestCase):
@@ -66,6 +123,15 @@ class TestMediaTypeLookup(unittest.TestCase):
         self.assertIn("CompRender", names)
         self.assertNotIn("_default", names)
 
+    def test_media_type_names_filtered_by_source(self):
+        delivery = self.cfg.media_type_names(source="delivery")
+        self.assertIn("Plate", delivery)
+        self.assertIn("Ref", delivery)
+        self.assertNotIn("CompRender", delivery)      # source=publish (inherited)
+        self.assertNotIn("NukeScript", delivery)      # source=work
+        self.assertIn("CompRender", self.cfg.media_type_names(source="publish"))
+        self.assertIn("NukeScript", self.cfg.media_type_names(source="work"))
+
     def test_delivery_template_client_overrides_default(self):
         cfg = ProjectConfig.from_defaults(overrides={"delivery_presets": {
             "ACME": {"container": "dpx"}}})
@@ -73,9 +139,12 @@ class TestMediaTypeLookup(unittest.TestCase):
         self.assertEqual(d["container"], "dpx")
         self.assertEqual(d["colorspace"], "Rec.709")     # from _default
 
-    def test_tool_config(self):
-        self.assertEqual(self.cfg.tool("ingest")["copy_workers"], 4)
-        self.assertIn("Plate", self.cfg.tool("ingest")["media_types"])
+    def test_copy_workers_default(self):
+        self.assertEqual(self.cfg.copy_workers, 4)
+
+    def test_core_ships_no_tool_config(self):
+        self.assertEqual(self.cfg.tools, {})
+        self.assertEqual(self.cfg.tool("ingest"), {})    # a tool fills this in when installed
 
 
 class TestLoadSave(unittest.TestCase):
@@ -125,36 +194,31 @@ class TestLoadSave(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 ProjectConfig.load(td)
 
-    def test_v1_config_migrates_on_load(self):
+    def test_old_schema_version_rejected_not_migrated(self):
+        """No migration path before v1.0 (decisions.md): nothing has shipped,
+        so there is no old-shape data to accommodate. A schema_version that
+        doesn't match exactly is a clear error asking for a fresh config, not
+        a silent in-memory transform."""
         with tempfile.TemporaryDirectory() as td:
-            v1 = {
-                "schema_version": 1,
-                "roots": DEFAULT_PROJECT_CONFIG["roots"],
-                "templates": {
-                    "output": {"base": "shot", "dir": "output/{output_type}/v{version}",
-                               "file": "{shot}_{output_type}_v{version}.{frame}.{ext}"},
-                    "workfile": {"base": "shot", "dir": "work/{task}",
-                                 "file": "{shot}_{task}_v{version}.{ext}"},
-                },
-                "ingest": {
-                    "default": {"base": "shot", "dir": "in/{media_type}/{name}_v{version}",
-                                "file": "{shot}_{media_type}_{name}_v{version}.{frame}.{ext}"},
-                    "by_type": {"Plate": {"dir": "plates/{name}_v{version}"}},
-                },
-                "copy_workers": 8,
-            }
+            v1 = {"schema_version": 1, "roots": DEFAULT_PROJECT_CONFIG["roots"],
+                 "templates": {"output": {"dir": "x"}}}
             p = Path(td) / "_pipeline" / "project_config.json"
             p.parent.mkdir(parents=True)
             p.write_text(json.dumps(v1), encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                ProjectConfig.load(td)
 
-            cfg = ProjectConfig.load(td)
-            self.assertEqual(cfg.data["schema_version"], SCHEMA_VERSION)
-            self.assertNotIn("templates", cfg.data)
-            self.assertNotIn("ingest", cfg.data)
-            self.assertEqual(cfg.media_type("Plate")["dir"], "plates/{name}_v{version}")
-            self.assertEqual(cfg.media_type("Workfile")["kitsu_kind"], "working")
-            self.assertEqual(cfg.tool("ingest")["copy_workers"], 8)
-
+    def test_older_schema_version_still_rejected_even_when_structurally_valid(self):
+        # a schema_version behind current, but otherwise a well-formed v2-shaped
+        # file -- still rejected, on principle: version mismatch means recreate
+        with tempfile.TemporaryDirectory() as td:
+            data = copy.deepcopy(DEFAULT_PROJECT_CONFIG)
+            data["schema_version"] = SCHEMA_VERSION - 1
+            p = Path(td) / "_pipeline" / "project_config.json"
+            p.parent.mkdir(parents=True)
+            p.write_text(json.dumps(data), encoding="utf-8")
+            with self.assertRaises(ConfigError):
+                ProjectConfig.load(td)
 
 
 

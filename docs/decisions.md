@@ -3,6 +3,32 @@
 Locked calls, with the short reason. Change one only by adding a new dated
 entry that supersedes it — don't silently edit.
 
+## No migration before v1.0 (2026-09-04, standing policy)
+
+**Nothing in this repo has ever been in production. Nothing depends on
+backward compatibility with anything.** Every `schema_version`, format, or
+shape that has existed so far — including "v2" of `ProjectConfig` — was
+never a real deployed version; it's internal bookkeeping while the pipeline
+core and its concepts are still being settled.
+
+- **Do not write migration code speculatively.** No "fold the old shape into
+  the new one on load," no "backfill a key that moved," no silent in-memory
+  upgrade of anything, for data that has never existed for real. A
+  `schema_version` mismatch (in either direction) is a hard `ConfigError`
+  asking for a fresh config — not a transform. (Undone 2026-09-04: a
+  `_migrate_v1` fold + a `_backfill_v2_orphans` patch were both built and then
+  removed the same day for exactly this reason — see
+  `square_core/config/project.py`'s `load()`.)
+- This holds **until the pipeline reaches major version 1** and something is
+  actually running in production. After that, real migrations will be needed
+  and will be asked for explicitly — build them then, against real data, not
+  ahead of time against a hypothetical shape.
+- This is about **schema/data migration**, not about correctness fixes,
+  validation, or config *key aliasing* the current code already accepts
+  (e.g. `PipelineConfig.load()` reading either `kitsu_host` or the older
+  `kitsu_url` spelling in the one `studio_config.json` this repo actually
+  has) — those stay in scope as normal bug fixes.
+
 ## Pipeline architecture (2026-09-02)
 
 Full design in `pipeline_architecture.md`. The load-bearing calls:
@@ -82,19 +108,51 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
   ctx)`, and one `services.media.publish(...)` that ingest and Nuke both call.
   `templates.output` / `templates.workfile` / `ingest.by_type` are gone.
   `media_type` maps to Kitsu `output_type`, or `working_file` when the entry
-  says `kitsu_kind: "working"`. "A version containing multiple files"
+  says `kitsu_kind: "working"`. Each entry also carries `source` (`delivery` /
+  `publish` / `work`) so a tool filters the one registry for the types at its
+  stage — there is no per-tool media-type list. "A version containing multiple files"
   (`CompOut_v001 → {nk, exr}`) is Kitsu's `(entity, output_type, name,
   revision)` grouping + `representation` — no parallel storage. Dependency
   tracking is optional: `output_file.source_file_id` + `data["square"]["inputs"]`.
   Delivery stays its own thing (`delivery_presets`).
 - **Config is schema-described; only an admin editor writes it
-  (`config_schema.md`).** A closed `ConfigKey` registry (kind / scope / default
-  / choices / range) — deliberately **not** JSON Schema. Core registers its
-  keys; each tool `register()`s its own `tools.<tool>.*` keys at import. One
-  admin **config editor** tool is the only writer of `studio_config.json` /
-  `project_config.json`; every other tool (ingest included — its Settings dialog
-  goes away) is read-only. `check()` validates type / required / unknown-key on
-  top of the `PathResolver` template checks.
+  (`config_schema.md`).** BUILT 2026-09-04. A closed `ConfigKey` registry
+  (kind / scope / default / choices / range) in `square_core/config/schema.py`
+  — deliberately **not** JSON Schema. Core registers its keys; each tool
+  `register()`s its own `tools.<tool>.*` keys at import (idempotent for an
+  identical descriptor, raises on a conflict). `schema.validate()` →
+  `(errors, warnings)`: required / type / range are errors, unknown keys are
+  warnings; `ProjectConfig.check()` / `PipelineConfig.check()` call it on top of
+  the `PathResolver` template checks. The **config editor** tool
+  (`tools/config_editor/`, GUI + `--cli`) is the only writer of
+  `studio_config.json` / `project_config.json`; write access needs Kitsu role
+  `admin` / `manager`; every other tool (ingest included — its Settings dialog
+  goes away) is read-only. Studio-file save preserves unknown / legacy keys and
+  canonicalises the two aliases (`kitsu_url`→`kitsu_host`, `nas_root`→
+  `nas_roots`); every `scope="both"` key is written under `project_defaults`.
+  **`square_core` registers no `tools.*` key** — a tool registers its own when
+  installed. A tool picks *which* media types it offers by filtering the one
+  registry on `media_types.<Name>.source` (`delivery` / `publish` / `work`) —
+  no separate per-tool list. `copy_workers` is a core top-level key (transfer
+  perf), not tool config.
+- **A config key absent from a file is inheritance, not an error (2026-09-04,
+  user-reported).** Only `kitsu_host` / `nas_roots` stay `required=True` in the
+  schema; every other key -- including `roots` and `media_types`, previously
+  hard-required -- falls back to `DEFAULT_PROJECT_CONFIG`, merged **per
+  sub-key** (`ProjectConfig.roots`, `.colorspace`, `.slugify`, `.media_type()`,
+  `.delivery_template()`; `structural_errors()` checks the merged view, not raw
+  presence). `_default` in `media_types` / `delivery_presets` can never truly
+  go missing (built-in merges under it first) and is the one entry the editor
+  won't let you remove; every other named entry is exactly what the file
+  lists. `studio_config.template.json` is now **generated** from
+  `PipelineConfig.default_template()` (`tools/pipeline_deploy/
+  gen_studio_template.py`, drift-checked by `tests/test_studio_template.py`)
+  with `project_defaults` fully populated — the maximal reference, not a
+  starter meant to be copied verbatim. The config editor's Save flushes only
+  the fields actually edited (per-key "touched" tracking) — a field shown at
+  its resolved `builtin` value is never baked into the file just because Save
+  was pressed; opening a sparse config and saving without touching anything
+  leaves the file unchanged. `config_schema.md` §3.1.
 - **Auth: per-user login; JWT + refresh cached** (keyring or
   `~/.square/session.json`, mode 600), shared by every tool + DCC on a
   workstation. `kitsu/auth.py` is **non-interactive** (`login(email, pw)` /

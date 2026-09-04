@@ -98,7 +98,17 @@ set STUDIO_CONFIG_PATH=%PIPELINE_ROOT%\\config\\studio_config.json
 set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\Scripts\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=python.exe
-start "" "%PYTHON_EXE%" "{entry}" %*
+rem run in THIS console (not detached via `start`) so a crash before the
+rem tool's own crash handler is installed is still visible instead of just
+rem flashing the window shut
+"%PYTHON_EXE%" "{entry}" %*
+if errorlevel 1 (
+    echo.
+    echo [Square] {title} exited with an error.
+    echo A crash report, if the tool got that far, is under %USERPROFILE%\\.square\\logs\\crashes\\
+    echo.
+    pause
+)
 """
 
 _ROLLBACK_LAUNCHER = """@echo off
@@ -107,7 +117,11 @@ set PIPELINE_ROOT=%~dp0..
 set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\Scripts\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=python.exe
-"%PYTHON_EXE%" -m tools.pipeline_deploy.rollback_cli "%PIPELINE_ROOT%"
+rem run the script BY PATH, not `-m tools.pipeline_deploy...` -- `-m` needs
+rem `tools` importable from the cwd/PYTHONPATH, which a double-clicked .bat
+rem does not set up. rollback_cli.py is stdlib-only and self-contained, so
+rem running it directly works regardless of sys.path.
+"%PYTHON_EXE%" "%PIPELINE_ROOT%\\current\\tools\\pipeline_deploy\\rollback_cli.py" "%PIPELINE_ROOT%"
 pause
 """
 
@@ -138,23 +152,32 @@ def _reconcile_config(config_dir: Path, update: bool) -> None:
     """The deployed studio_config.json is authoritative and is NEVER
     overwritten -- it holds the studio's real Kitsu host / NAS roots / edits.
 
-    Deploy the template alongside it as a reference, then compare TOP-LEVEL
-    keys: report any the template has that the live config lacks (a setting
-    added in a newer release). With --update-config, add just those missing
-    keys (template values), back up the old file, and touch nothing else."""
-    tmpl_src = repo_root / "studio_config.template.json"
-    if not tmpl_src.exists():
-        return
-    template = json.loads(tmpl_src.read_text(encoding="utf-8"))
+    The reference template is generated from `PipelineConfig.default_template()`
+    -- the actual code default, including the full `DEFAULT_PROJECT_CONFIG`
+    under `project_defaults` -- not a hand-maintained JSON file, so it can
+    never drift out of sync. Deploy it alongside the live config, then compare
+    TOP-LEVEL keys: report any the template has that the live config lacks (a
+    setting added in a newer release). With --update-config, add just those
+    missing keys (template values), back up the old file, and touch nothing
+    else. None of this is required reading -- every key in the template
+    already falls back to the same default if it's simply absent from the
+    live file; the template exists purely as a complete reference."""
+    from square_core.config.pipeline import default_template
 
+    template = default_template()
     ref = config_dir / "studio_config.template.json"
-    shutil.copy2(tmpl_src, ref)                       # the reference copy IS refreshed
+    ref.write_text(json.dumps(template, indent=4) + "\n", encoding="utf-8")
 
     live = config_dir / "studio_config.json"
     if not live.exists():
-        shutil.copy2(tmpl_src, live)
+        # seed a MINIMAL live config -- the studio only needs to fill in
+        # kitsu_host + nas_roots; everything else already has a code default
+        seed = {"kitsu_host": template["kitsu_host"], "nas_roots": template["nas_roots"],
+                "kitsu_project_templates": [], "project_defaults": {}}
+        live.write_text(json.dumps(seed, indent=4) + "\n", encoding="utf-8")
         print(f"[deploy] seeded {live} -- fill in kitsu_host + nas_roots "
-              f"(credentials are per-user JWTs, not in this file)")
+              f"(credentials are per-user JWTs, not in this file). See "
+              f"{ref.name} for every key project_defaults supports.")
         return
 
     try:

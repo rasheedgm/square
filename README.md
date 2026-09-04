@@ -45,11 +45,37 @@ breakdown.build_task_grid(pctx, [shot], ["Ingest", "Comp"])
 
 ## Config
 
-Copy `studio_config.template.json` → `studio_config.json` (or point
-`STUDIO_CONFIG_PATH` at it) and fill in your Kitsu host + NAS root(s).
-Credentials are **not** in the file — each user logs in once
-(`square_core.kitsu.auth.login`) and the JWT caches to the OS keyring or
-`~/.square/`.
+`studio_config.template.json` is the **full reference** — every key
+`ProjectConfig` supports, generated from code
+(`python -m tools.pipeline_deploy.gen_studio_template`; re-run after touching
+`DEFAULT_PROJECT_CONFIG` and commit the file — `tests/test_studio_template.py`
+checks it hasn't drifted). It is *not* a starter meant to be copied in full: a
+real `studio_config.json` only needs `kitsu_host` + `nas_roots` (or point
+`STUDIO_CONFIG_PATH` at one) — every other key already has the same code
+default and resolves per sub-key when absent from the file (see
+`docs/config_schema.md` §3.1). Credentials are **not** in the file — each user
+logs in once (`square_core.kitsu.auth.login`) and the JWT caches to the OS
+keyring or `~/.square/`.
+
+Every config key is described by a `ConfigKey` in `square_core/config/schema.py`
+(kind / scope / default / range). The admin **config editor** is the only tool
+that writes config:
+
+```
+python -m tools.config_editor                       # Qt GUI
+python -m tools.config_editor --cli list --scope project --project ABC
+python -m tools.config_editor --cli set  --scope project --project ABC fps 25
+```
+
+It edits `studio_config.json` (resolved the same way as everything else:
+`$STUDIO_CONFIG_PATH`, else `<repo>/studio_config.json` — the deploy launcher
+sets `STUDIO_CONFIG_PATH` to `config/studio_config.json` on the NAS) and, once
+a project is picked, `{project_root}/_pipeline/project_config.json`. The GUI's
+status bar names the exact file the active tab writes. Every save keeps a
+timestamped backup **next to the file it just wrote**:
+`studio_config.json.bak-20260904-170203`.
+
+Write access needs a Kitsu role of `admin` or `manager`.
 
 ## Tests
 
@@ -72,6 +98,15 @@ atomically), builds a venv from `requirements.txt`, and writes one launcher
 overwritten** after that. Each deploy refreshes `studio_config.template.json`
 alongside it and reports any keys the template added since; `--update-config`
 adds just those (existing values untouched, a backup written).
+
+Each generated launcher runs the tool **in the same console** (not detached)
+and `pause`s if it exits with an error, so a startup failure is readable
+instead of the window flashing shut. Every tool also installs
+`tools.crash_handler.install_global_crash_handler(...)` as the first line of
+its `main.py`: an unhandled exception is always written to
+`~/.square/logs/crashes/` and, if a display is available, shown in a modal
+crash dialog — this covers a crash *before* the tool's own `QApplication`
+exists too (e.g. a bad config during startup).
 
 ## Docs
 

@@ -5,11 +5,14 @@ supersedes the narrow "ingest tool" framing of `ingest_tool_design.md` — the
 ingest tool is now tool #1 of a set, and `restructure_plan.md` folds into
 Phase A (§12) as its first commits.
 
-**Build status (2026-09-03):** Phase A is **built** — `square_core/` model,
-config, paths, kitsu, storage, media, context, services (projects / breakdown /
-work / review), 134 tests, live-verified against Zou 1.0.58. On `master`. The
-ingest tool port (§12 step 6) is the remaining Phase A work and happens on
-`ingest_tools`. Parts marked *(exists)* below predate this and were folded in.
+**Build status (2026-09-04):** Phase A is **built and merged to `master`**
+(PR #2) — `square_core/` model, config (v2 media-type registry), paths, kitsu,
+storage, media, context, services (projects / breakdown / media / work /
+review), live-verified against Zou 1.0.58. Phase B's **config schema +
+config-editor tool** (#2b) is built (`square_core/config/schema.py`,
+`tools/config_editor/`). ~178 tests. Remaining: project-setup tool (#2), then
+the ingest port (§12 step 6, on `ingest_tools`). Parts marked *(exists)* below
+predate the rework and were folded in.
 
 ---
 
@@ -434,10 +437,11 @@ key registry + editor: [`config_schema.md`](config_schema.md).
   (`_pipeline/project_config.json`): `roots`, the `media_types` registry,
   `delivery_presets`, folder-structure lists, colorspace, `tools.*` settings.
   Written by `projects.create`. Tools read it **live**, never snapshot it.
-- `schema.py` *(Phase B)* — the `ConfigKey` registry; `register()` for tools;
-  `get()` resolution (project → studio default → built-in); `check()` extends
-  `PathResolver.validate()` with type / required / unknown-key checks. The
-  admin **config editor** (tool) is the only writer.
+- `schema.py` *(built)* — the `ConfigKey` registry; `register()` for tools
+  (idempotent / conflict-checked); `resolve()` (project → studio default →
+  built-in); `validate()` → `(errors, warnings)`, called by
+  `ProjectConfig.check()` / `PipelineConfig.check()` on top of
+  `PathResolver.validate()`. The admin **config editor** tool is the only writer.
 - `conventions.py` *(built)* — the default shot folder-structure list.
 
 `ProjectConfig.load()` runs `check()` and refuses a broken config.
@@ -554,8 +558,8 @@ tests/
 | # | Tool | Lifecycle stage | Core services it drives | Priority |
 |---|---|---|---|---|
 | 1 | **Ingest tool** *(built)* | client material → shots | `media.publish`, `breakdown`, `storage.transfer` | refactor onto core API |
-| 2 | **Project setup / admin** | project created · breakdown · roadmap | `projects.create/archive`, `breakdown.*` | **next** — smallest tool that exercises the spine |
-| 2b | **Config editor** (admin-only) | studio + project config | `config.schema` / `check` — the **only** writer of config | with #2; kills ingest's Settings dialog (`config_schema.md`) |
+| 2 | **Project setup / admin** | project created · breakdown · roadmap | `projects.create/archive`, `breakdown.*` | smallest tool that exercises the spine |
+| 2b | **Config editor** (admin-only) *(built)* | studio + project config | `config.schema` / `ConfigStore` — the **only** writer of config | done 2026-09-04 (GUI + `--cli`, `config_schema.md`); kills ingest's Settings dialog |
 | 3 | **DCC integration** (Nuke first: `SquareRead`/`SquareWrite` + publish panel) | workfile · output · task preview | `work.*`, `review.submit`, `media.proxy` | high |
 | 4 | **Workfile / version manager** (DCC-agnostic core, Maya/Houdini hooks) | task started · save · publish | `work.save_workfile`, `work.next_version`, `work.publish_output` | high (shares core with #3) |
 | 5 | **Review player** (desktop) | supervisor review · annotate · approve | `review.*` (annotations + status) | high |
@@ -596,11 +600,13 @@ branch — the restructure and the spine touch the same files.
    ledger stays where it is; don't migrate it in this phase. Drop the session's
    `config_snapshot` — the tool reads live `ProjectConfig` on resume.
 
-**Phase B — project setup tool (#2) + config editor (#2b)**
-`services/projects` + `services/breakdown` + task templates + `config/schema.py`
-(the `ConfigKey` registry, `check()`, `get()` resolution). A tiny tool that
-spins up a real show end to end, and the admin config editor
-(`config_schema.md`) that becomes the only writer of studio / project config.
+**Phase B — config editor (#2b) *(done 2026-09-04)* + project setup tool (#2)**
+`config/schema.py` (the `ConfigKey` registry, `validate()`, `resolve()`) and the
+admin **config editor** (`tools/config_editor/`, GUI + `--cli`,
+`config_schema.md`) — the only writer of studio / project config — landed first.
+Still to do: the project-setup tool (#2) — a tiny GUI over `services/projects` +
+`services/breakdown` + task templates that spins up a real show end to end. Then
+the ingest port (Phase A step 6).
 
 **Phase C — work / publish + DCC tool (#3/#4)**
 `services/work`, path resolution in anger, first managed workfile + first
@@ -678,11 +684,14 @@ then the thinnest tool that proves them, then a live pass against a throwaway
 
 1. **Annotation read shape** — deferred to the review player (Phase D). Write is
    confirmed (`update_preview_annotations`); spike the drawing-object schema then.
-2. **Config schema details** (`config_schema.md` §7) — v1→v2 migration hook
-   location; whether a `working_file` path `PUT` works like `output_file`'s
-   (verified) against live Zou; the Kitsu admin-role gate for the editor.
 
 *(Resolved 2026-09-02: `ProjectConfig` + `PathResolver` — `{token}` templates,
 case-preserving, pure resolver, Kitsu `data` key `"square"`, we `PUT` our path
 onto the Kitsu file record. `projects.create` sets a throwaway minimal
 file_tree.)*
+
+*(Resolved 2026-09-04: `working_file` path `PUT` verified live, same as
+`output_file`'s; the config editor's Kitsu admin-role gate is built
+(`admin`/`manager`). The "v1→v2 migration hook" item is superseded, not
+resolved — see `decisions.md` "No migration before v1.0": there is no
+migration hook at all now, on purpose.)*

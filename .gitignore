@@ -75,3 +75,7 @@ test_data/
 
 # Local runtime studio config (has live credentials) — ship studio_config.template.json instead
 studio_config.json
+
+# Dev scratch
+scratch/
+.square/

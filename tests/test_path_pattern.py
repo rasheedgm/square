@@ -2,12 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from square_core.path_pattern import (
+from square_core.paths.path_pattern import (
     PathPattern, match_first, split_canonical_and_extra,
     seed_filename_segment, render_placeholder, is_frame_piece_text,
     explode_segment_template,
 )
-from square_core.plate_scanner import IngestSequenceItem
+from square_core.media.scanner import IngestSequenceItem
 
 
 class TestPathPatternMatching(unittest.TestCase):

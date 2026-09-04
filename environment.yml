@@ -7,12 +7,12 @@ dependencies:
   - openimageio
   - pip
   - pip:
-    - Qt.py
-    - PyQt6
     - gazu
     - requests
     - pillow
     - xxhash
     - imageio-ffmpeg
-    - ffmpeg-python
+    - keyring
     - pyyaml
+    - Qt.py
+    - PySide6

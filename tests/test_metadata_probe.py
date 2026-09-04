@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from square_core.metadata_extractor import MetadataExtractor, DEFAULT_METADATA
+from square_core.media.metadata import MetadataExtractor, DEFAULT_METADATA
 
 
 class TestProbe(unittest.TestCase):

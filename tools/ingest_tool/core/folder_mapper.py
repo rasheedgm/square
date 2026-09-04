@@ -24,7 +24,7 @@ import re
 import logging
 from pathlib import Path
 
-from square_core.path_pattern import PathPattern, match_first, split_canonical_and_extra
+from square_core.paths.path_pattern import PathPattern, match_first, split_canonical_and_extra
 
 logger = logging.getLogger("SquareFolderMapper")
 
@@ -119,7 +119,7 @@ class FolderMapper:
 
     def _representative_paths(self):
         if self._rep_paths_cache is None:
-            from square_core.plate_scanner import PlateScanner
+            from square_core.media.scanner import PlateScanner
             items = PlateScanner(self.root).scan()
             paths = []
             for item in items:
@@ -169,7 +169,7 @@ class FolderMapper:
     # ------------------------------------------------------------------
 
     def build_items(self, filter_paths=None):
-        from square_core.plate_scanner import PlateScanner
+        from square_core.media.scanner import PlateScanner
 
         items = PlateScanner(self.root).scan()
         patterns = self.get_path_patterns()

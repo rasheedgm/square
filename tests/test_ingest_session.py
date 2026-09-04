@@ -6,16 +6,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from square_core.ingest_item import IngestItem, Status, Action, IssueKind, Stage
-from square_core.ingest_controller import IngestController, ControllerConfig
-from square_core.ingest_ledger import IngestLedger
-from square_core.ingest_session import (
+from tools.ingest_tool.core.item import Status, Action, IssueKind
+from tools.ingest_tool.core.session import (
     IngestSession, SessionAutosaver, SESSION_SUFFIX,
     remember_session, recent_sessions, last_session,
 )
 
-# reuse the controller test's fakes
-from tests.test_ingest_controller import FakeNAS, FakeRecorder, FakeProxyGen, FakeExtractor, PROJECT
+# reuse the controller test's fakes/helpers
+from tests.test_ingest_controller import _pctx, _controller, _make_item, _load
 
 
 class SessionTestBase(unittest.TestCase):
@@ -24,39 +22,19 @@ class SessionTestBase(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.src = self.tmp / "deliver"
         self.src.mkdir()
-        self.nas = FakeNAS(self.tmp / "nas")
-        self.ledger = IngestLedger(self.tmp / "ledger.db")
-        self.cfg = ControllerConfig(
-            nas_root=str(self.tmp / "nas"), project_code="SHW",
-            filename_template="{shot}_{name}_v{version:03d}.{frame}{ext}",
-            preview_media_types=["Plate"], media_type_configs={"Plate": "p"},
-            task_types=["Ingest", "Comp"], ingested_by="me@studio.com",
-        )
-
-    def _ctrl(self):
-        return IngestController(self.cfg, PROJECT, nas=self.nas, ledger=self.ledger,
-                                recorder=FakeRecorder(), proxy_generator=FakeProxyGen(),
-                                extractor=FakeExtractor())
+        self.pctx = _pctx(str(self.tmp / "nas"))
+        self.ctrl = _controller(self.pctx, str(self.tmp))
 
     def _mkitem(self, name, **kw):
-        files = []
-        for i in range(2):
-            p = self.src / f"{name}.{1001+i}.exr"
-            p.write_bytes(b"x" + name.encode() + str(i).encode())
-            files.append(str(p))
-        base = dict(sequence_code="SQ010", shot_code="SH0100", media_type="Plate",
-                    media_name=name, version=1, start_frame=1001, end_frame=1002, frame_count=2)
-        base.update(kw)
-        return IngestItem(key=IngestItem.compute_key(files), source_files=files, ext=".exr",
-                          source_name=name, **base)
+        return _make_item(str(self.src), name=name, **kw)
 
 
 class TestRoundTrip(SessionTestBase):
     def test_capture_and_reload_preserves_items_and_state(self):
-        c = self._ctrl()
+        c = self.ctrl
         a = self._mkitem("a")
         b = self._mkitem("b", media_name="a")     # collides with a
-        c.load([a, b])
+        _load(c, [a, b])
         c.run_preflight()
         iss = next(i for i in a.issues if i.kind == IssueKind.DEST_COLLISION)
         c.resolve(a.key, iss.id, Action.SKIP)
@@ -71,15 +49,15 @@ class TestRoundTrip(SessionTestBase):
         self.assertTrue(path.endswith(SESSION_SUFFIX))
 
         loaded = IngestSession.load(path)
-        self.assertEqual(loaded.project["code"], "SHW")
+        self.assertEqual(loaded.project_code, "ABC")
         self.assertEqual(loaded.delivery_root, str(self.src))
         self.assertEqual(len(loaded.path_patterns), 1)
         self.assertEqual(loaded.manual_media_types, {r"/deliv/a.1001.exr": "BG Plate"})
         self.assertEqual(loaded.active_preset, "VFX Standard")
 
-        c2 = IngestController(loaded.build_config(), loaded.project, nas=self.nas,
-                              ledger=self.ledger, recorder=FakeRecorder(),
-                              proxy_generator=FakeProxyGen(), extractor=FakeExtractor())
+        # resume reads the LIVE ProjectConfig via the same pctx -- no
+        # config_snapshot to rebuild a controller from
+        c2 = _controller(self.pctx, str(self.tmp))
         loaded.restore_into(c2)
         self.assertEqual(len(c2.items), 2)
         ra = c2.get(a.key)
@@ -88,18 +66,9 @@ class TestRoundTrip(SessionTestBase):
         self.assertEqual(rb.status, Status.NEW)     # collision cleared by a's skip
         self.assertEqual(c2.batch_id, c.batch_id)
 
-    def test_config_snapshot_survives_even_if_studio_config_changes(self):
-        c = self._ctrl()
-        c.load([self._mkitem("a")])
-        path = IngestSession.capture(c).save(self.tmp / "s")
-        raw = json.loads(Path(path).read_text())
-        self.assertEqual(raw["config_snapshot"]["filename_template"],
-                         "{shot}_{name}_v{version:03d}.{frame}{ext}")
-        self.assertEqual(raw["config_snapshot"]["media_type_configs"], {"Plate": "p"})
-
     def test_completed_items_come_back_locked(self):
-        c = self._ctrl()
-        c.load([self._mkitem("a")])
+        c = self.ctrl
+        _load(c, [self._mkitem("a")])
         c.run_preflight()
         c.run_ingest()
         self.assertEqual(c.items[0].status, Status.COMPLETED)
@@ -107,38 +76,44 @@ class TestRoundTrip(SessionTestBase):
         sess = IngestSession.capture(c)
         path = sess.save(self.tmp / "s")
 
-        c2 = self._ctrl()
+        c2 = _controller(self.pctx, str(self.tmp))
         IngestSession.load(path).restore_into(c2)
         self.assertEqual(c2.items[0].status, Status.COMPLETED)
         # not offered for ingest again
         self.assertEqual(c2.ingestable_items(), [])
 
     def test_resume_does_not_rehash(self):
-        c = self._ctrl()
-        c.load([self._mkitem("a")])
+        c = self.ctrl
+        _load(c, [self._mkitem("a")])
         c.run_preflight()
         sess = IngestSession.capture(c)
         path = sess.save(self.tmp / "s")
 
-        c2 = self._ctrl()
+        c2 = _controller(self.pctx, str(self.tmp))
         IngestSession.load(path).restore_into(c2)
         self.assertIn(c2.items[0].key, c2._scanned)   # marked done -> preflight won't re-hash
 
     def test_atomic_save_leaves_no_tmp_files(self):
-        c = self._ctrl()
-        c.load([self._mkitem("a")])
+        c = self.ctrl
+        _load(c, [self._mkitem("a")])
         IngestSession.capture(c).save(self.tmp / "s")
         leftovers = [p for p in self.tmp.iterdir() if ".tmp-" in p.name]
         self.assertEqual(leftovers, [])
 
-    def test_rejects_newer_schema(self):
+    def test_rejects_mismatched_schema(self):
+        # No migration path (decisions.md "No migration before v1.0"): any
+        # version other than current is a hard rejection, not a transform.
         p = self.tmp / "future.sqingest.json"
         p.write_text(json.dumps({"schema_version": 999, "items": []}))
         with self.assertRaises(ValueError):
             IngestSession.load(p)
+        p2 = self.tmp / "old.sqingest.json"
+        p2.write_text(json.dumps({"schema_version": 1, "items": []}))
+        with self.assertRaises(ValueError):
+            IngestSession.load(p2)
 
     def test_suffix_normalization(self):
-        c = self._ctrl()
+        c = self.ctrl
         s = IngestSession.capture(c)
         self.assertTrue(s.save(self.tmp / "a").endswith(".sqingest.json"))
         self.assertTrue(s.save(self.tmp / "b.json").endswith(".sqingest.json"))

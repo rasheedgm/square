@@ -1,7 +1,7 @@
 import unittest
 
-from square_core.ingest_item import IngestItem, IssueKind, Severity, Action
-from square_core import preflight
+from tools.ingest_tool.core.item import IngestItem, IssueKind, Severity, Action
+from tools.ingest_tool.core import preflight
 
 
 def _item(key="k", **kw):

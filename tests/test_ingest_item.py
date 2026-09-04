@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from square_core.ingest_item import (
+from tools.ingest_tool.core.item import (
     IngestItem, Issue, IssueKind, Severity, Action, Status, Stage,
     INGESTABLE_STATUSES,
 )

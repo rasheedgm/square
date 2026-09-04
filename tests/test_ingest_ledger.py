@@ -4,7 +4,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from square_core.ingest_ledger import (
+from tools.ingest_tool.core.ledger import (
     IngestLedger, LedgerRecord, LEDGER_DIRNAME, LEDGER_FILENAME,
 )
 

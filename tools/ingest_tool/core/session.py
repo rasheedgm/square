@@ -2,10 +2,12 @@
 IngestSession -- the user-named, user-placed `*.sqingest.json` that lets an
 ingest be stopped and resumed (crash, close, or just "finish tomorrow").
 
-No hidden sidecars: everything needed to resume is in this one file --
-the config that was in effect (so a resume is reproducible even if studio
-config later changed), the project, the delivery root and its Path
-Patterns, and every row's full state including which ones already ingested.
+No hidden sidecars: everything needed to resume is in this one file -- the
+project CODE (not a config snapshot -- a resume reads the LIVE ProjectConfig
+through PipelineContext, same as every other tool; a snapshot is itself
+editable between opens, not real reproducibility), the delivery root and its
+Path Patterns, and every row's full state including which ones already
+ingested.
 
 Autosave writes to the path the user chose; there's a small debouncer here
 for that, framework-agnostic (the UI ticks it or lets its timer thread
@@ -22,11 +24,10 @@ import threading
 import datetime
 from dataclasses import dataclass, field, asdict
 
-from square_core.ingest_item import IngestItem
-from square_core.ingest_controller import ControllerConfig
+from .item import IngestItem
 
 SESSION_SUFFIX = ".sqingest.json"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # v2: project_code replaces config_snapshot + project
 
 try:
     from square_core import __version__ as _APP_VERSION
@@ -44,8 +45,7 @@ class IngestSession:
     saved_at: str = ""
     app_version: str = _APP_VERSION
 
-    config_snapshot: dict = field(default_factory=dict)
-    project: dict = field(default_factory=dict)
+    project_code: str = ""
     task_types: list = field(default_factory=list)
     dry_run: bool = False
 
@@ -67,9 +67,8 @@ class IngestSession:
                 manual_media_types=None, active_preset="", dry_run=False) -> "IngestSession":
         return cls(
             saved_at=_utcnow(),
-            config_snapshot=controller.config.to_snapshot(),
-            project=dict(controller.project or {}),
-            task_types=list(controller.config.task_types or []),
+            project_code=controller.pctx.code,
+            task_types=list(controller.task_types or []),
             dry_run=bool(dry_run),
             delivery_root=delivery_root or "",
             path_patterns=list(path_patterns or []),
@@ -79,9 +78,6 @@ class IngestSession:
             items=[it.to_dict() for it in controller.items],
             undo_stack=list(getattr(controller, "_undo", []) or []),
         )
-
-    def build_config(self) -> ControllerConfig:
-        return ControllerConfig.from_snapshot(self.config_snapshot)
 
     def restore_into(self, controller) -> None:
         """
@@ -135,12 +131,17 @@ class IngestSession:
 
     @classmethod
     def load(cls, path) -> "IngestSession":
+        # No migration path, deliberately -- nothing has shipped yet, so
+        # there's no old-shape session file to accommodate (decisions.md "No
+        # migration before v1.0"). A version mismatch means re-run the ingest
+        # from a fresh session, not a silently-patched-up old one.
         with open(path, "r", encoding="utf-8") as fh:
             data = json.load(fh)
-        if data.get("schema_version", 1) > SCHEMA_VERSION:
+        version = int(data.get("schema_version", 0))
+        if version != SCHEMA_VERSION:
             raise ValueError(
-                f"session file schema v{data['schema_version']} is newer than this tool "
-                f"supports (v{SCHEMA_VERSION})"
+                f"session file is schema v{version}, this build understands "
+                f"v{SCHEMA_VERSION} -- start a fresh session (no migration path before v1.0)"
             )
         return cls.from_dict(data)
 

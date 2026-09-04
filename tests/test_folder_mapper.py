@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from square_core.folder_mapper import FolderMapper
-from square_core.path_pattern import PathPattern
+from tools.ingest_tool.core.folder_mapper import FolderMapper
+from square_core.paths.path_pattern import PathPattern
 
 
 class TestFolderMapperPathPatterns(unittest.TestCase):

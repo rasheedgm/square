@@ -110,7 +110,11 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         # per-file progress for its UI.
         rs = transfer.transfer_sequence(pairs, mode=transfer_mode, workers=workers,
                                         pool=pool, progress=progress)
-        result.checksums = {r.dest: r.hash for r in rs if r.hash}
+        # keyed by the OS-normalized path on both sides: TransferResult.dest
+        # is str(Path(...)) (native separators), but dest_files[i] above was
+        # built with a literal "/" join -- a plain string-equality lookup
+        # would silently miss on Windows and leave checksum "" forever.
+        result.checksums = {str(Path(r.dest)): r.hash for r in rs if r.hash}
         result.copied = True
 
     prov = Provenance(
@@ -123,7 +127,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         task_type=_task_name(task), output_type=media_type, representation=rep,
         name=name, version=rev, recorded_at=_now(),
         recorded_by=getattr(pctx.pipeline.user, "email", ""),
-        checksum=result.checksums.get(dest_files[0], ""),
+        checksum=result.checksums.get(str(Path(dest_files[0])), ""),
         resolution=getattr(media_info, "resolution", "") if media_info else "",
         fps=getattr(media_info, "fps", None) if media_info else None,
         colorspace=(getattr(media_info, "colorspace", "") if media_info else "")

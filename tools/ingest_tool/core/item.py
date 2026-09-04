@@ -268,7 +268,7 @@ class IngestItem:
         (metadata_verified[field] = True) or is still unknown.
         """
         if extractor is None:
-            from square_core.metadata_extractor import MetadataExtractor
+            from square_core.media.metadata import MetadataExtractor
             extractor = MetadataExtractor
         found, backend = ({}, None)
         if self.source_files:

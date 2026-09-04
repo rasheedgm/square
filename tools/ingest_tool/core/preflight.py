@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from square_core.ingest_item import (
+from .item import (
     IngestItem, Issue, IssueKind, Severity,
     REQUIRED_FIELDS, REQUIRED_METADATA,
 )

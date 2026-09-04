@@ -51,6 +51,18 @@ Credentials are **not** in the file — each user logs in once
 (`square_core.kitsu.auth.login`) and the JWT caches to the OS keyring or
 `~/.square/`.
 
+Every config key is described by a `ConfigKey` in `square_core/config/schema.py`
+(kind / scope / default / range). The admin **config editor** is the only tool
+that writes config:
+
+```
+python -m tools.config_editor                       # Qt GUI (needs requirements-tools.txt)
+python -m tools.config_editor --cli list --scope project --project ABC
+python -m tools.config_editor --cli set  --scope project --project ABC fps 25
+```
+
+Write access needs a Kitsu role of `admin` or `manager`.
+
 ## Tests
 
 ```

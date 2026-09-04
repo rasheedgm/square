@@ -88,13 +88,18 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
   tracking is optional: `output_file.source_file_id` + `data["square"]["inputs"]`.
   Delivery stays its own thing (`delivery_presets`).
 - **Config is schema-described; only an admin editor writes it
-  (`config_schema.md`).** A closed `ConfigKey` registry (kind / scope / default
-  / choices / range) — deliberately **not** JSON Schema. Core registers its
-  keys; each tool `register()`s its own `tools.<tool>.*` keys at import. One
-  admin **config editor** tool is the only writer of `studio_config.json` /
-  `project_config.json`; every other tool (ingest included — its Settings dialog
-  goes away) is read-only. `check()` validates type / required / unknown-key on
-  top of the `PathResolver` template checks.
+  (`config_schema.md`).** BUILT 2026-09-04. A closed `ConfigKey` registry
+  (kind / scope / default / choices / range) in `square_core/config/schema.py`
+  — deliberately **not** JSON Schema. Core registers its keys; each tool
+  `register()`s its own `tools.<tool>.*` keys at import (idempotent for an
+  identical descriptor, raises on a conflict). `schema.validate()` →
+  `(errors, warnings)`: required / type / range are errors, unknown keys are
+  warnings; `ProjectConfig.check()` / `PipelineConfig.check()` call it on top of
+  the `PathResolver` template checks. The **config editor** tool
+  (`tools/config_editor/`, GUI + `--cli`) is the only writer of
+  `studio_config.json` / `project_config.json`; write access needs Kitsu role
+  `admin` / `manager`; every other tool (ingest included — its Settings dialog
+  goes away) is read-only. Studio-file save preserves unknown / legacy keys.
 - **Auth: per-user login; JWT + refresh cached** (keyring or
   `~/.square/session.json`, mode 600), shared by every tool + DCC on a
   workstation. `kitsu/auth.py` is **non-interactive** (`login(email, pw)` /

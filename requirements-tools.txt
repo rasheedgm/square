@@ -1,0 +1,6 @@
+# Desktop tools (config_editor, ingest_tool, review_player, ...) -- on top of
+# requirements.txt. The square_core library itself needs none of these.
+-r requirements.txt
+
+Qt.py>=1.3.0
+PySide6>=6.5.0

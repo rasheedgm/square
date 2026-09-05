@@ -14,7 +14,8 @@ from __future__ import annotations
 import os
 from Qt import QtCore, QtWidgets
 
-from square_core.ingest_item import Action, Severity, IssueKind
+from tools.ingest_tool.core.item import Action, Severity, IssueKind
+from tools.qt_compat import SIZE_EXPANDING
 
 _ACTION_LABEL = {
     Action.SKIP: "Skip",
@@ -93,7 +94,7 @@ class DetailPanel(QtWidgets.QScrollArea):
             self._render_single(items[0])
         else:
             self._render_batch(items)
-        self._lay.addStretch()
+            self._lay.addStretch()
 
     # ------------------------------------------------------------------
     # Single
@@ -123,10 +124,11 @@ class DetailPanel(QtWidgets.QScrollArea):
         self._h("Source files", size=10, colour="#64748B")
         box = QtWidgets.QPlainTextEdit()
         box.setReadOnly(True)
-        box.setMaximumHeight(70)
+        box.setMinimumHeight(70)
+        box.setSizePolicy(SIZE_EXPANDING, SIZE_EXPANDING)
         box.setPlainText("\n".join(os.path.basename(f) for f in files[:40])
                          + ("" if len(files) <= 40 else f"\n… {len(files) - 40} more"))
-        self._lay.addWidget(box)
+        self._lay.addWidget(box, 1)
 
     # ------------------------------------------------------------------
     # Batch

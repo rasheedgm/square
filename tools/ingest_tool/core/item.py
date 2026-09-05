@@ -60,6 +60,7 @@ class Stage(str, Enum):
     HASHING           = "Hashing"
     CHECKING          = "Checking conflicts"
     WAITING           = "Waiting"
+    CONVERTING        = "Converting to EXR"
     KITSU_SHOT        = "Creating shot/tasks"
     FOLDERS           = "Creating folders"
     COPYING           = "Copying"
@@ -106,7 +107,10 @@ ISSUE_ACTIONS: dict[IssueKind, tuple[Action, ...]] = {
     IssueKind.DEST_COLLISION:    (Action.SKIP, Action.VERSION_UP),
     IssueKind.ROLLBACK:          (Action.VERSION_UP, Action.OVERWRITE),
     IssueKind.ALREADY_IN_SLOT:   (Action.VERSION_UP, Action.OVERWRITE),
-    IssueKind.DUPLICATE_CONTENT: (Action.SKIP, Action.VERSION_UP, Action.OVERWRITE, Action.IGNORE),
+    # No OVERWRITE here: this content matched the ledger somewhere OTHER
+    # than this row's own (empty) target slot -- there's nothing local to
+    # overwrite. Ignore is the "yes, I know, proceed anyway" action.
+    IssueKind.DUPLICATE_CONTENT: (Action.SKIP, Action.VERSION_UP, Action.IGNORE),
     IssueKind.PARTIAL_OVERLAP:   (Action.SKIP, Action.VERSION_UP, Action.OVERWRITE),
     IssueKind.NEAR_DUP_BATCH:    (Action.IGNORE,),
     IssueKind.CASE_INCONSISTENT: (Action.IGNORE,),
@@ -177,6 +181,12 @@ class IngestItem:
     media_name: str = ""
     version: int = 1
     extra_tags: dict = field(default_factory=dict)
+    # snapshot of the renameable fields' values the moment this row first
+    # entered the controller (controller.load()) -- {original} in a rename
+    # template reads from here, {current} reads the live field instead, so
+    # the same template means "as loaded" vs "right now" regardless of which
+    # field it's applied to.
+    original_values: dict = field(default_factory=dict)
 
     # frame info (from the scanner)
     start_frame: int = 1001
@@ -203,6 +213,7 @@ class IngestItem:
     preview_default: bool = False         # what config says for this media type
     preview_user_set: bool = False        # user ticked/unticked it -> stop auto-following media_type
     skipped: bool = False
+    convert_to_exr: bool = False          # is_video only: decode to an EXR sequence before ingesting
 
     # check results
     preflight_done: bool = False
@@ -255,6 +266,17 @@ class IngestItem:
             missing_frames=list(getattr(scan_item, "missing_frames", []) or []),
             frame_count=getattr(scan_item, "frame_count", len(files)),
         )
+        # A Path Pattern's fps/resolution/colorspace default (for a delivery
+        # whose files never carry that metadata) counts as verified, exactly
+        # like a real extraction would -- probe_metadata() still overwrites
+        # it later if the file itself actually yields a real value.
+        for f in getattr(scan_item, "metadata_defaulted", ()) or ():
+            value = getattr(scan_item, f, None)
+            if f == "fps":
+                item.fps = value
+            else:
+                setattr(item, f, value)
+            item.metadata_verified[f] = True
         return item
 
     # ------------------------------------------------------------------

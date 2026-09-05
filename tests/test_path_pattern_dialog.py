@@ -6,10 +6,12 @@ from unittest.mock import patch
 
 from Qt import QtWidgets
 
-from square_core.folder_mapper import FolderMapper
-from square_core.path_pattern import PathPattern
-from square_core.plate_scanner import PlateScanner
-from tools.ingest_tool.widgets.path_pattern_dialog import ChipButton, SegmentRow, PathPatternBuilderDialog
+from tools.ingest_tool.core.folder_mapper import FolderMapper
+from square_core.paths.path_pattern import PathPattern
+from square_core.media.scanner import PlateScanner
+from tools.ingest_tool.widgets.path_pattern_dialog import (
+    ChipButton, SegmentRow, PathPatternBuilderDialog, PathPatternManagerDialog,
+)
 
 
 class TestChipButton(unittest.TestCase):
@@ -92,6 +94,100 @@ class TestSegmentRowDrillMergeCollapse(unittest.TestCase):
         row.all_chips()[0].setChecked(True)
         row.all_chips()[0].set_wildcard(True)
         self.assertEqual(row.rendered_template(), "*")
+
+    def test_split_chip_at_on_an_undrilled_segment_splits_with_no_separator(self):
+        # "GGG01080" has no delimiter at all between "GGG" and "01080" for
+        # Drill Into Piece to find -- splitting at an arbitrary position is
+        # the only way to separate them.
+        row = SegmentRow(0, "GGG01080")
+        row.split_chip_at(0, 3)
+        texts = [c.raw_text for c in row.all_chips()]
+        self.assertEqual(texts, ["GGG", "01080"])
+        # round-trips byte-for-byte: the inserted separator is empty
+        self.assertEqual(row.rendered_template(), "GGG01080")
+
+    def test_split_chip_at_on_an_already_drilled_sub_chip(self):
+        row = SegmentRow(0, "SQ010_SH010080")
+        row.drill()
+        row.split_chip_at(1, 4)   # "SH010080" -> "SH01", "0080"
+        texts = [c.raw_text for c in row.all_chips()]
+        self.assertEqual(texts, ["SQ010", "SH01", "0080"])
+        self.assertEqual(row.rendered_template(), "SQ010_SH010080")
+
+    def test_split_chip_at_ignores_an_out_of_range_position(self):
+        row = SegmentRow(0, "GGG01080")
+        row.split_chip_at(0, 0)      # position 0 -- nothing to the left
+        self.assertEqual(len(row.all_chips()), 1)
+        row.split_chip_at(0, len("GGG01080"))   # position at the very end -- nothing to the right
+        self.assertEqual(len(row.all_chips()), 1)
+
+    def test_split_pieces_can_still_be_tagged_independently(self):
+        row = SegmentRow(0, "GGG01080")
+        row.split_chip_at(0, 3)
+        chips = row.all_chips()
+        chips[0].set_role("sequence")
+        chips[1].set_role("shot")
+        self.assertEqual(row.rendered_template(), "<sequence><shot>")
+
+
+class TestSplitChipDialog(unittest.TestCase):
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_default_split_position_is_the_midpoint(self):
+        from tools.ingest_tool.widgets.path_pattern_dialog import SplitChipDialog
+        dlg = SplitChipDialog("GGG01080")
+        self.assertEqual(dlg.split_pos, 4)
+        self.assertEqual(dlg.preview.text(), "GGG0  |  1080")
+
+    def test_preview_updates_as_the_position_changes(self):
+        from tools.ingest_tool.widgets.path_pattern_dialog import SplitChipDialog
+        dlg = SplitChipDialog("GGG01080")
+        dlg.spin.setValue(3)
+        self.assertEqual(dlg.preview.text(), "GGG  |  01080")
+
+    def test_get_split_position_returns_none_for_a_single_character(self):
+        from tools.ingest_tool.widgets.path_pattern_dialog import SplitChipDialog
+        self.assertIsNone(SplitChipDialog.get_split_position("G"))
+
+    def test_get_split_position_returns_the_chosen_position_on_accept(self):
+        from tools.ingest_tool.widgets.path_pattern_dialog import SplitChipDialog
+        with patch("tools.ingest_tool.widgets.path_pattern_dialog.exec_dialog", return_value=True):
+            pos = SplitChipDialog.get_split_position("GGG01080")
+        self.assertIsInstance(pos, int)
+        self.assertTrue(0 < pos < len("GGG01080"))
+
+
+class TestPathPatternBuilderDialogSplitAction(unittest.TestCase):
+    """The dialog's own "Split at Position..." button end to end."""
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "GGG01080").mkdir(parents=True)
+        (self.tmp / "GGG01080" / "plate.1001.exr").write_text("x")
+        self.mapper = FolderMapper(self.tmp)
+        self.item = PlateScanner(self.tmp).scan()[0]
+
+    def test_split_at_button_splits_the_selected_chip_and_updates_the_template(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        folder_row = dlg._segment_rows[0]
+        folder_row.all_chips()[0].setChecked(True)
+
+        with patch("tools.ingest_tool.widgets.path_pattern_dialog.SplitChipDialog.get_split_position",
+                  return_value=3):
+            dlg._on_split()
+
+        texts = [c.raw_text for c in folder_row.all_chips()]
+        self.assertEqual(texts, ["GGG", "01080"])
+        self.assertIn("GGG01080", dlg._current_template())
+
+    def test_split_at_button_does_nothing_without_exactly_one_selected_chip(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        with patch("tools.ingest_tool.widgets.path_pattern_dialog.SplitChipDialog.get_split_position") as get_pos:
+            dlg._on_split()   # nothing selected
+            get_pos.assert_not_called()
 
 
 class TestPathPatternBuilderDialog(unittest.TestCase):
@@ -222,7 +318,7 @@ class TestPathPatternBuilderDialog(unittest.TestCase):
         self.assertEqual(template, "<sequence>/<shot>/ALPHA_SQ010_SH0100_<media_name>.####.<extension>")
 
         # It must match the very file it was built from.
-        from square_core.path_pattern import PathPattern
+        from square_core.paths.path_pattern import PathPattern
         pattern = PathPattern(template=template)
         rel = self.mapper._relative_posix(Path(self.item.files[0]))
         result = pattern.match(rel)
@@ -258,6 +354,159 @@ class TestPathPatternBuilderDialog(unittest.TestCase):
         self.assertIsNotNone(dlg.result_pattern)
         self.assertEqual(dlg.result_pattern.template, expected_template)
         self.assertEqual(dlg.result_pattern.name, expected_template)
+
+
+class TestDefaultsForUntaggedFields(unittest.TestCase):
+    """
+    Feature: media_type (or any canonical field) that never appears anywhere
+    in the delivery's own path can be given a fixed default instead, so the
+    saved pattern's matches all carry that value without needing a folder or
+    filename piece to tag.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        d = self.tmp / "SQ010" / "SH0100"
+        d.mkdir(parents=True)
+        for frame in range(1001, 1004):
+            (d / f"plate.{frame}.exr").write_text("x")
+        self.mapper = FolderMapper(self.tmp)
+        self.item = PlateScanner(self.tmp).scan()[0]
+
+    def _tag_sequence_and_shot(self, dlg):
+        dlg._segment_rows[0].all_chips()[0].setChecked(True)
+        dlg._tag_selected("sequence")
+        dlg._segment_rows[1].all_chips()[0].setChecked(True)
+        dlg._tag_selected("shot")
+
+    def test_default_is_ignored_until_typed(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self._tag_sequence_and_shot(dlg)
+        self.assertEqual(dlg._current_defaults(dlg._current_template()), {})
+
+    def test_typing_a_default_for_an_untagged_field_is_picked_up(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self._tag_sequence_and_shot(dlg)   # media_type is never tagged -- not part of this path at all
+        dlg._default_edits["media_type"].setText("Plate")
+        self.assertEqual(dlg._current_defaults(dlg._current_template()), {"media_type": "Plate"})
+
+    def test_default_field_is_disabled_once_that_field_is_tagged_in_the_path(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self.assertTrue(dlg._default_edits["sequence"].isEnabled())
+        self._tag_sequence_and_shot(dlg)
+        self.assertFalse(dlg._default_edits["sequence"].isEnabled())
+        self.assertFalse(dlg._default_edits["shot"].isEnabled())
+        self.assertTrue(dlg._default_edits["media_type"].isEnabled())
+
+    def test_saved_pattern_applies_the_default_on_match(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self._tag_sequence_and_shot(dlg)
+        dlg._default_edits["media_type"].setText("Plate")
+
+        with patch.object(PathPatternBuilderDialog, "_ask_save_mode", return_value="new"), \
+             patch.object(QtWidgets.QInputDialog, "getText", return_value=("Vendor", True)):
+            dlg._on_accept()
+
+        self.assertEqual(dlg.result_pattern.defaults, {"media_type": "Plate"})
+        rel = self.mapper._relative_posix(Path(self.item.files[0]))
+        result = dlg.result_pattern.match(rel)
+        self.assertEqual(result["sequence"], "SQ010")
+        self.assertEqual(result["media_type"], "Plate")
+
+        # and it round-trips through build_items() into the actual IngestItem
+        self.mapper.add_path_pattern(dlg.result_pattern)
+        items = self.mapper.build_items()
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].media_type, "Plate")
+
+    def test_metadata_default_fields_are_offered_and_never_disabled(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self.assertEqual(set(dlg._metadata_default_edits), {"fps", "resolution", "colorspace"})
+        self._tag_sequence_and_shot(dlg)   # tagging path fields must not disable these
+        for edit in dlg._metadata_default_edits.values():
+            self.assertTrue(edit.isEnabled())
+
+    def test_metadata_default_applies_unconditionally_alongside_path_defaults(self):
+        dlg = PathPatternBuilderDialog(self.mapper, self.item)
+        self._tag_sequence_and_shot(dlg)
+        dlg._default_edits["media_type"].setText("Plate")
+        dlg._metadata_default_edits["fps"].setText("24")
+        dlg._metadata_default_edits["colorspace"].setText("ACEScg")
+
+        defaults = dlg._current_defaults(dlg._current_template())
+        self.assertEqual(defaults, {"media_type": "Plate", "fps": "24", "colorspace": "ACEScg"})
+
+        with patch.object(PathPatternBuilderDialog, "_ask_save_mode", return_value="new"), \
+             patch.object(QtWidgets.QInputDialog, "getText", return_value=("Vendor", True)):
+            dlg._on_accept()
+
+        self.mapper.add_path_pattern(dlg.result_pattern)
+        item = self.mapper.build_items()[0]
+        self.assertEqual(item.fps, 24.0)
+        self.assertEqual(item.colorspace, "ACEScg")
+
+
+class TestPathPatternManagerDialog(unittest.TestCase):
+    """
+    Confirmed bug: every mutating action (Move Up/Down, Edit Text, Remove)
+    called `self.mapper.save()` -- a method FolderMapper doesn't have (it's
+    in-memory only; that sidecar-file era ended when the ingest session file
+    took over). Every one of those buttons raised AttributeError. Also,
+    "Edit Text..." rebuilt the pattern from scratch and dropped its Defaults
+    for Fields Not in the Path in the process.
+    """
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "SQ010" / "SH0100").mkdir(parents=True)
+        (self.tmp / "SQ010" / "SH0100" / "plate.1001.exr").write_text("x")
+        (self.tmp / "SQ020" / "SH0200").mkdir(parents=True)
+        (self.tmp / "SQ020" / "SH0200" / "plate.1001.exr").write_text("x")
+        self.mapper = FolderMapper(self.tmp)
+        self.mapper.add_path_pattern(PathPattern(
+            template="<sequence>/<shot>/plate.####.exr", name="A",
+            defaults={"media_type": "Plate"}))
+        self.mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/other.####.exr", name="B"))
+
+    def test_move_up_does_not_crash_and_marks_changed(self):
+        dlg = PathPatternManagerDialog(self.mapper)
+        dlg.table.selectRow(1)
+        dlg._on_move_up()   # used to raise AttributeError: 'FolderMapper' object has no attribute 'save'
+        self.assertTrue(dlg.changed)
+        self.assertEqual(self.mapper.get_path_patterns()[0].name, "B")
+
+    def test_move_down_does_not_crash_and_marks_changed(self):
+        dlg = PathPatternManagerDialog(self.mapper)
+        dlg.table.selectRow(0)
+        dlg._on_move_down()
+        self.assertTrue(dlg.changed)
+        self.assertEqual(self.mapper.get_path_patterns()[0].name, "B")
+
+    def test_remove_does_not_crash_and_marks_changed(self):
+        dlg = PathPatternManagerDialog(self.mapper)
+        dlg.table.selectRow(1)
+        dlg._on_remove()
+        self.assertTrue(dlg.changed)
+        self.assertEqual(len(self.mapper.get_path_patterns()), 1)
+
+    def test_edit_does_not_crash_and_preserves_defaults(self):
+        dlg = PathPatternManagerDialog(self.mapper)
+        dlg.table.selectRow(0)
+        with patch.object(QtWidgets.QInputDialog, "getText",
+                          return_value=("<sequence>/<shot>/renamed.####.exr", True)):
+            dlg._on_edit()
+        self.assertTrue(dlg.changed)
+        edited = self.mapper.get_path_patterns()[0]
+        self.assertEqual(edited.template, "<sequence>/<shot>/renamed.####.exr")
+        self.assertEqual(edited.defaults, {"media_type": "Plate"})   # not dropped
+
+    def test_closing_without_changes_leaves_changed_false(self):
+        dlg = PathPatternManagerDialog(self.mapper)
+        self.assertFalse(dlg.changed)
 
 
 if __name__ == "__main__":

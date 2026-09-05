@@ -4,57 +4,65 @@ Square VFX Ingest Tool -- main window.
 Thin shell: it wires the folder tree, the review table, and the bottom
 action bar to a single IngestController (through a ControllerBridge), and
 owns the session (save / open / autosave / resume). All the real work --
-pre-flight, conflict model, ingest, ledger, Kitsu -- lives in square_core.
+pre-flight, conflict model, ingest, ledger, Kitsu -- lives in
+tools.ingest_tool.core / square_core.
 """
 
 from __future__ import annotations
 
 import os
 import logging
-from pathlib import Path
 
 from Qt import QtCore, QtWidgets, QtGui
 
 from square_core import __version__
-from square_core.config import StudioConfig
-from square_core.plate_scanner import PlateScanner
-from square_core.nas_manager import NASManager
-from square_core.proxy_generator import ProxyGenerator
-from square_core.ingest_ledger import IngestLedger, NullLedger
-from square_core.ingest_controller import IngestController, ControllerConfig
-from square_core.kitsu_gateway import GazuKitsuGateway, NullKitsuGateway, KitsuConnectionError
-from square_core.kitsu_recorder import KitsuRecorder
-from square_core.ingest_session import (
+from square_core.context import PipelineContext
+from square_core.config import PipelineConfig
+from square_core.errors import NeedsLogin
+from square_core.services import projects as projects_service
+from square_core.services.projects import ProjectSpec
+from square_core.media.scanner import PlateScanner
+
+from tools.qt_compat import (FONT_BOLD, ORIENTATION_HORIZONTAL, DIALOG_ACCEPTED,
+                             exec_dialog, MSGBOX_YES)
+from tools.widgets.login_dialog import LoginDialog
+from tools.ingest_tool.controller_bridge import ControllerBridge
+from tools.ingest_tool.core.controller import IngestController
+from tools.ingest_tool.core.ledger import IngestLedger, NullLedger
+from tools.ingest_tool.core.session import (
     IngestSession, SessionAutosaver, SESSION_SUFFIX, remember_session, last_session,
 )
-
-from tools.ingest_tool.controller_bridge import ControllerBridge
 from tools.ingest_tool.widgets.folder_tree_widget import FolderTreeWidget
 from tools.ingest_tool.widgets.review_table import IngestReviewTable
 from tools.ingest_tool.widgets.detail_panel import DetailPanel
-from tools.ingest_tool.widgets.settings_dialog import SettingsDialog
 from tools.ingest_tool.widgets.task_selection_dialog import TaskSelectionDialog
 from tools.ingest_tool.widgets.results_dialog import DryRunResultsDialog
-from tools.qt_compat import FONT_BOLD, ORIENTATION_HORIZONTAL, DIALOG_ACCEPTED
 
 logger = logging.getLogger("IngestMainUI")
 
+_DEFAULT_TASK_TYPES = ["Ingest", "Prep", "Roto", "Matchmove", "Comp"]
+
 
 class CreateProjectDialog(QtWidgets.QDialog):
-    """Create a new project in Kitsu (kept from the previous UI; used by tests too)."""
+    """Create a new project -- one call, `services.projects.create`: the
+    Kitsu project, its file_tree, `project_config.json`, and the folder
+    skeleton, together."""
 
-    def __init__(self, gateway, parent=None):
+    def __init__(self, ctx: PipelineContext, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Create New Kitsu Project")
+        self.setWindowTitle("Create New Project")
         self.setMinimumWidth(380)
-        self._gateway = gateway
-        self.created_project = None
+        self._ctx = ctx
+        self.created_code: str | None = None
 
         form = QtWidgets.QFormLayout(self)
         self.name_edit = QtWidgets.QLineEdit()
         self.code_edit = QtWidgets.QLineEdit()
+        self.err = QtWidgets.QLabel()
+        self.err.setStyleSheet("color:#F87171;")
         form.addRow("Project Name:", self.name_edit)
         form.addRow("Project Code:", self.code_edit)
+        form.addRow("", self.err)
 
         btns = QtWidgets.QHBoxLayout()
         ok = QtWidgets.QPushButton("Create")
@@ -70,16 +78,11 @@ class CreateProjectDialog(QtWidgets.QDialog):
         if not (name and code):
             return
         try:
-            proj = self._gateway.gazu.project.new_project(name)
-            proj["code"] = code
-            try:
-                self._gateway.gazu.project.update_project(proj)
-            except Exception:
-                pass
-            self.created_project = proj
+            projects_service.create(self._ctx, ProjectSpec(code=code, name=name))
+            self.created_code = code
             self.accept()
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Create Project", f"Failed: {e}")
+            self.err.setText(f"Failed: {e}")
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -88,8 +91,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"Square VFX — Media Ingest  v{__version__}")
         self.resize(1360, 820)
 
-        self.config = StudioConfig()
-        self.project_data: dict | None = None
+        self.ctx: PipelineContext | None = None
+        self.pctx = None                       # ProjectContext, once a project is chosen
         self.controller: IngestController | None = None
         self.bridge: ControllerBridge | None = None
         self.session_path: str | None = None
@@ -97,9 +100,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._delivery_root = ""
         self._path_patterns: list = []
 
-        self._gateway = None
-        self.is_kitsu_live = self._connect_kitsu()
-
+        self.ctx = self._connect()
         self._build_ui()
         self._load_projects()
         self._resume_timer = QtCore.QTimer(self)
@@ -108,20 +109,43 @@ class MainWindow(QtWidgets.QMainWindow):
         self._resume_timer.start(200)
 
     # ------------------------------------------------------------------
-    # Kitsu
+    # Kitsu / auth
     # ------------------------------------------------------------------
 
-    def _connect_kitsu(self) -> bool:
+    def _connect(self) -> PipelineContext:
         try:
-            self._gateway = GazuKitsuGateway(
-                self.config.kitsu_url, self.config.kitsu_user, self.config.kitsu_password
-            ).connect()
-            return True
-        except KitsuConnectionError as e:
-            logger.warning("[IngestMainUI] Kitsu offline: %s", e)
-            self._gateway = None
-            self._kitsu_error = str(e)
-            return False
+            return PipelineContext.connect()
+        except NeedsLogin:
+            host = PipelineConfig.load().kitsu_host
+            dlg = LoginDialog(host, self)
+            if exec_dialog(dlg):
+                try:
+                    return PipelineContext.connect()
+                except Exception as e:
+                    logger.warning("[IngestMainUI] connect after login failed: %s", e)
+        except Exception as e:
+            logger.warning("[IngestMainUI] Kitsu connect failed, running offline: %s", e)
+        self._kitsu_error = "not signed in"
+        return PipelineContext.connect(offline=True)
+
+    @property
+    def is_kitsu_live(self) -> bool:
+        return not self.ctx.offline
+
+    def _logout(self):
+        if self._any_unsaved_work():
+            r = QtWidgets.QMessageBox.question(
+                self, "Log Out", "There are unsaved rows. Log out anyway?")
+            if r != MSGBOX_YES:
+                return
+        from square_core.kitsu import auth
+        auth.forget(self.ctx.config.kitsu_host)
+        self.ctx = self._connect()
+        self._refresh_user_badge()
+        self._load_projects()
+
+    def _any_unsaved_work(self) -> bool:
+        return bool(self.controller and self.controller.items and not self.session_path)
 
     # ------------------------------------------------------------------
     # UI
@@ -159,19 +183,21 @@ class MainWindow(QtWidgets.QMainWindow):
         tl.addWidget(refresh)
 
         tl.addStretch()
-        self.kitsu_lbl = QtWidgets.QLabel()
-        self._refresh_kitsu_label()
-        tl.addWidget(self.kitsu_lbl)
+
+        # who's signed in, gated write access is Kitsu-role driven elsewhere
+        # (the config editor); here it's just "who is this ingest attributed to"
+        self.user_lbl = QtWidgets.QLabel()
+        tl.addWidget(self.user_lbl)
+        self.logout_btn = QtWidgets.QPushButton("Log Out")
+        self.logout_btn.clicked.connect(self._logout)
+        tl.addWidget(self.logout_btn)
+        self._refresh_user_badge()
 
         self.session_btn = QtWidgets.QToolButton()
         self.session_btn.setText("Session ▾")
         self.session_btn.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
         self.session_btn.setMenu(self._session_menu())
         tl.addWidget(self.session_btn)
-
-        settings = QtWidgets.QPushButton("Settings")
-        settings.clicked.connect(self._on_settings)
-        tl.addWidget(settings)
         root.addWidget(top)
 
         # ---- splitter: tree | (table + detail) ----
@@ -236,6 +262,18 @@ class MainWindow(QtWidgets.QMainWindow):
             sc = QtGui.QShortcut(QtGui.QKeySequence(seq), self)
             sc.activated.connect(fn)
 
+    def _refresh_user_badge(self):
+        who = getattr(self.ctx.user, "email", "") or getattr(self.ctx.user, "name", "offline")
+        if self.is_kitsu_live:
+            self.user_lbl.setText(f"● {who}")
+            self.user_lbl.setStyleSheet("color:#10B981; font-weight:bold;")
+            self.user_lbl.setToolTip(self.ctx.config.kitsu_host)
+        else:
+            self.user_lbl.setText("● Offline")
+            self.user_lbl.setStyleSheet("color:#F59E0B; font-weight:bold;")
+            self.user_lbl.setToolTip(getattr(self, "_kitsu_error", "Kitsu unreachable"))
+        self.logout_btn.setEnabled(self.is_kitsu_live)
+
     def _recheck_all(self):
         if self.bridge and self.controller and self.controller.items:
             self.bridge.preflight()
@@ -258,12 +296,16 @@ class MainWindow(QtWidgets.QMainWindow):
             controller = _C()
 
             def resolve_many(self, *a): pass
+            def rename_batch(self, *a): return 0
+            def rename_cells(self, *a): return 0
+            def resolve_rename_template(self, key, template, attr=None): return template
             def skip(self, *a): pass
             def include(self, *a): pass
             def preflight(self, *a): pass
             def remove(self, *a): pass
             def set_field(self, *a): pass
             def set_preview(self, *a): pass
+            def set_convert_to_exr(self, *a): pass
         self._stub_bridge = _Stub()
         return self._stub_bridge
 
@@ -272,24 +314,19 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _rebuild_controller(self) -> None:
-        code = (self.project_data or {}).get("code", "")
-        cfg = ControllerConfig.from_studio_config(
-            self.config, project_code=code, ingested_by=self.config.kitsu_user
-        )
-        nas = NASManager(nas_root=cfg.nas_root, dry_run=False,
-                         transfer_mode=cfg.transfer_mode, workers=cfg.copy_workers)
-        ledger = (
-            IngestLedger.for_project(cfg.nas_root, code)
-            if (cfg.nas_root and code) else NullLedger()
-        )
-        gateway = self._gateway if self.is_kitsu_live else NullKitsuGateway()
-        recorder = KitsuRecorder(gateway, dry_run=False, ingested_by=cfg.ingested_by)
-        recorder.ingest_task_status = cfg.ingest_task_status
-        proxy = ProxyGenerator(dry_run=False)
-
+        if not self.pctx:
+            return
+        self.folder_tree.set_project(self.pctx)
+        root = self.pctx.project.root_path
+        ledger = IngestLedger.for_project(self.pctx.pipeline.nas_root, self.pctx.code) \
+            if root else NullLedger()
+        from tools.ingest_tool.core import config_keys
         self.controller = IngestController(
-            cfg, self.project_data or {}, nas=nas, ledger=ledger,
-            recorder=recorder, proxy_generator=proxy,
+            self.pctx, ledger=ledger,
+            task_types=config_keys.read(self.pctx, "task_types") or list(_DEFAULT_TASK_TYPES),
+            ingest_task_status=config_keys.read(self.pctx, "task_status"),
+            transfer_mode=config_keys.read(self.pctx, "transfer_mode"),
+            ingested_by=getattr(self.ctx.user, "email", ""),
         )
         self._attach_bridge()
 
@@ -314,29 +351,17 @@ class MainWindow(QtWidgets.QMainWindow):
     # Projects
     # ------------------------------------------------------------------
 
-    def _refresh_kitsu_label(self):
-        if self.is_kitsu_live:
-            self.kitsu_lbl.setText("● Kitsu")
-            self.kitsu_lbl.setStyleSheet("color:#10B981; font-weight:bold;")
-            self.kitsu_lbl.setToolTip(self.config.kitsu_url)
-        else:
-            self.kitsu_lbl.setText("● Offline")
-            self.kitsu_lbl.setStyleSheet("color:#F59E0B; font-weight:bold;")
-            self.kitsu_lbl.setToolTip(getattr(self, "_kitsu_error", "Kitsu unreachable"))
-
     def _load_projects(self):
         self.project_combo.blockSignals(True)
         self.project_combo.clear()
-        projects = []
+        plist = []
         if self.is_kitsu_live:
             try:
-                projects = self._gateway.gazu.project.all_open_projects() or []
+                plist = self.ctx.kitsu.projects()
             except Exception as e:
                 logger.error("[IngestMainUI] project list failed: %s", e)
-        for p in projects:
-            if not p.get("code"):
-                p["code"] = "".join(w[0] for w in p["name"].split()).upper()[:4]
-            self.project_combo.addItem(f"{p['name']} [{p['code']}]", p)
+        for p in sorted(plist, key=lambda p: p.code):
+            self.project_combo.addItem(f"{p.name} [{p.code}]", p.code)
         self.project_combo.blockSignals(False)
         if self.project_combo.count():
             self._on_project_changed(0)
@@ -344,7 +369,14 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_project_changed(self, idx):
         if idx < 0:
             return
-        self.project_data = self.project_combo.itemData(idx)
+        code = self.project_combo.itemData(idx)
+        if not code:
+            return
+        try:
+            self.pctx = self.ctx.project(code)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Project", f"Could not open {code}:\n{e}")
+            return
         self._rebuild_controller()
         self._update_summary()
 
@@ -352,25 +384,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.is_kitsu_live:
             QtWidgets.QMessageBox.information(self, "New Project", "Kitsu is offline.")
             return
-        dlg = CreateProjectDialog(self._gateway, self)
-        if (dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()) == DIALOG_ACCEPTED and dlg.created_project:
+        dlg = CreateProjectDialog(self.ctx, self)
+        if exec_dialog(dlg) == DIALOG_ACCEPTED and dlg.created_code:
             self._load_projects()
-
-    def _on_settings(self):
-        dlg = SettingsDialog(self)
-        if (dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()) == DIALOG_ACCEPTED:
-            self.config = StudioConfig()
-            self.is_kitsu_live = self._connect_kitsu()
-            self._refresh_kitsu_label()
-            self._load_projects()
-            if self.project_data and self.controller:
-                # config (NAS root, templates, preview types, tasks) changed --
-                # the live controller is stale. Rebuild, keeping the loaded rows.
-                old = list(self.controller.items)
-                self._rebuild_controller()
-                if old:
-                    self.controller.load(old, replace=True)
-                    self.bridge.preflight()
 
     # ------------------------------------------------------------------
     # Loading media
@@ -450,11 +466,18 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
-        task_types = self.controller.config.task_types
-        dlg = TaskSelectionDialog(task_types or list(self.config.tasks), kitsu_client=None, parent=self)
-        if (dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()) != DIALOG_ACCEPTED:
+        task_names = list(dict.fromkeys(self.controller.task_types))
+        if self.is_kitsu_live:
+            try:
+                for tt in self.pctx.kitsu.task_types(for_entity="Shot"):
+                    if tt.name not in task_names:
+                        task_names.append(tt.name)
+            except Exception:
+                pass
+        dlg = TaskSelectionDialog(task_names or _DEFAULT_TASK_TYPES, parent=self)
+        if exec_dialog(dlg) != DIALOG_ACCEPTED:
             return
-        self.controller.config.task_types = dlg.get_selected_tasks() or task_types
+        self.controller.task_types = dlg.get_selected_tasks() or task_names
 
         if self._autosaver:
             self._autosaver.flush()
@@ -475,13 +498,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 })
         summary = {
             "is_dry_run": any(i.ingest_result.get("dry_run") for i in self.controller.items),
-            "project_code": (self.project_data or {}).get("code", ""),
+            "project_code": self.pctx.code if self.pctx else "",
             "total_items": len(items), "total_files": sum(len(i.source_files) for i in self.controller.items),
-            "task_types": self.controller.config.task_types, "transfer_mode": self.controller.config.transfer_mode,
+            "task_types": self.controller.task_types, "transfer_mode": "copy",
             "items": items,
         }
         dlg = DryRunResultsDialog(summary, self)
-        dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
+        exec_dialog(dlg)
 
     # ------------------------------------------------------------------
     # Undo / summary / button state
@@ -580,21 +603,19 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Open Session", f"Could not load:\n{e}")
             return
-        self.project_data = sess.project or self.project_data
-        # rebuild a controller from the session's own config snapshot
-        cfg = sess.build_config()
-        code = cfg.project_code
-        nas = NASManager(nas_root=cfg.nas_root, dry_run=False,
-                         transfer_mode=cfg.transfer_mode, workers=cfg.copy_workers)
-        ledger = IngestLedger.for_project(cfg.nas_root, code) if (cfg.nas_root and code) else NullLedger()
-        gateway = self._gateway if self.is_kitsu_live else NullKitsuGateway()
-        rec = KitsuRecorder(gateway, dry_run=False, ingested_by=cfg.ingested_by)
-        rec.ingest_task_status = cfg.ingest_task_status
-        self.controller = IngestController(
-            cfg, self.project_data or {}, nas=nas, ledger=ledger,
-            recorder=rec, proxy_generator=ProxyGenerator(dry_run=False),
-        )
-        self._attach_bridge()
+        try:
+            self.pctx = self.ctx.project(sess.project_code)
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(
+                self, "Open Session", f"Could not reconnect to project {sess.project_code!r}:\n{e}")
+            return
+        idx = self.project_combo.findData(sess.project_code)
+        if idx >= 0:
+            self.project_combo.blockSignals(True)
+            self.project_combo.setCurrentIndex(idx)
+            self.project_combo.blockSignals(False)
+        self._rebuild_controller()
+        self.controller.task_types = list(sess.task_types) or self.controller.task_types
         sess.restore_into(self.controller)
         self._delivery_root = sess.delivery_root
         self._path_patterns = sess.path_patterns
@@ -609,8 +630,9 @@ class MainWindow(QtWidgets.QMainWindow):
         pending = [i.key for i in self.controller.items if not i.ingested]
         if pending:
             self.bridge.preflight(pending)
-        # finish any previews that were still in flight when the session was saved
-        self.controller.requeue_pending_previews()
+        # and re-attempt any review proxy that was still in flight when saved
+        if self.is_kitsu_live:
+            self.controller.run_pending_previews()
 
     # ------------------------------------------------------------------
 

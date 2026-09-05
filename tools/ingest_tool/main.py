@@ -1,22 +1,21 @@
 import sys
-import os
 from pathlib import Path
 
-# Ensure square_core is in sys.path
-root_dir = Path(__file__).parent.parent.parent
-if str(root_dir) not in sys.path:
-    sys.path.insert(0, str(root_dir))
+_root = Path(__file__).resolve().parent.parent.parent
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
 
-from Qt import QtWidgets, QtCore
-from tools.ingest_tool.ui_main import MainWindow
-from tools.ingest_tool.widgets.crash_dialog import install_global_crash_handler
+from tools.crash_handler import install_global_crash_handler
+install_global_crash_handler("Square Ingest Tool")
+
+from Qt import QtWidgets
+from tools.ingest_tool.ui_main import MainWindow   # if this import itself fails, the hook catches it
+
 
 def main():
-    install_global_crash_handler()
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Square VFX Ingest Tool")
 
-    # Load QSS Style
     qss_path = Path(__file__).parent / "style.qss"
     if qss_path.exists():
         res_dir = (Path(__file__).parent / "resources").as_posix()
@@ -26,12 +25,9 @@ def main():
 
     window = MainWindow()
     window.show()
-    
-    # Use exec() for Qt.py / PyQt6 / PySide6 compatibility
-    if hasattr(app, "exec"):
-        sys.exit(app.exec())
-    else:
-        sys.exit(app.exec_())
+
+    sys.exit(app.exec() if hasattr(app, "exec") else app.exec_())
+
 
 if __name__ == "__main__":
     main()

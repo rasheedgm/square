@@ -21,15 +21,19 @@ import re
 from pathlib import Path
 
 from Qt import QtWidgets, QtCore
-from square_core.path_pattern import (
+from square_core.paths.path_pattern import (
     PathPattern, CANONICAL_DISPLAY_NAMES, WILDCARD_TOKEN,
     render_placeholder, is_frame_piece_text, seed_filename_segment,
     explode_segment_template,
 )
-from square_core.token_parser import (
+from square_core.paths.token_parser import (
     DEFAULT_DELIMITER_CHARS, tokenize_with_separators, merge_token_indices,
 )
-from tools.qt_compat import HEADER_RESIZE_STRETCH, SELECT_ROWS, TEXT_SELECTABLE_BY_MOUSE, get_qt_enum
+from tools.ingest_tool.core.folder_mapper import METADATA_DEFAULT_FIELDS
+from tools.qt_compat import (
+    HEADER_RESIZE_STRETCH, SELECT_ROWS, TEXT_SELECTABLE_BY_MOUSE, get_qt_enum,
+    DIALOG_OK, DIALOG_CANCEL, exec_dialog,
+)
 
 # Canonical role -> (background, foreground, short badge label)
 _ROLE_COLORS = {
@@ -227,6 +231,29 @@ class SegmentRow(QtWidgets.QWidget):
         self._show_sub_row(new_texts, new_seps)
         self.changed.emit()
 
+    def split_chip_at(self, chip_index: int, position: int):
+        """Splits one chip's own text at a character `position` into two
+        chips joined by an EMPTY separator -- for a piece with no delimiter
+        at all between two conceptually different values (e.g. "GGG01080"
+        where the shot code starts right after the show code with nothing
+        for tokenize_with_separators/drill to find). Drills first if this
+        row wasn't already drilled, since a whole, undrilled segment has no
+        sub-chip to split."""
+        if not self._drilled:
+            self._show_sub_row([self.raw_text], [])
+            chip_index = 0
+        texts = [c.raw_text for c in self._sub_chips]
+        if not (0 <= chip_index < len(texts)):
+            return
+        text = texts[chip_index]
+        if not (0 < position < len(text)):
+            return
+        new_texts = texts[:chip_index] + [text[:position], text[position:]] + texts[chip_index + 1:]
+        new_seps = list(self._sub_seps)
+        new_seps.insert(chip_index, "")
+        self._show_sub_row(new_texts, new_seps)
+        self.changed.emit()
+
     def _on_collapse(self):
         self._show_whole()
         self.changed.emit()
@@ -250,6 +277,56 @@ class SegmentRow(QtWidgets.QWidget):
         return "".join(parts)
 
 
+class SplitChipDialog(QtWidgets.QDialog):
+    """Splits one chip at an arbitrary character position -- for a piece
+    with no delimiter at all between two conceptually different values
+    (e.g. "GGG01080", where the shot code starts right after the show code
+    with nothing tokenize_with_separators/Drill Into Piece can find)."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Split at Position")
+        self.setMinimumWidth(320)
+        self.text = text
+        self.split_pos = max(1, len(text) // 2)
+
+        self.spin = QtWidgets.QSpinBox()
+        self.spin.setRange(1, max(1, len(text) - 1))
+        self.spin.setValue(self.split_pos)
+        self.spin.valueChanged.connect(self._refresh)
+
+        self.preview = QtWidgets.QLabel()
+        self.preview.setStyleSheet("font-family: monospace; font-size:13px; color:#34D399;")
+        self.preview.setTextInteractionFlags(TEXT_SELECTABLE_BY_MOUSE)
+
+        buttons = QtWidgets.QDialogButtonBox(DIALOG_OK | DIALOG_CANCEL)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        form = QtWidgets.QFormLayout(self)
+        form.addRow(QtWidgets.QLabel(f"Splitting:  {text}"))
+        form.addRow("Split after character", self.spin)
+        form.addRow("Result", self.preview)
+        form.addRow(buttons)
+
+        self._refresh()
+
+    def _refresh(self):
+        self.split_pos = self.spin.value()
+        left, right = self.text[:self.split_pos], self.text[self.split_pos:]
+        self.preview.setText(f"{left}  |  {right}")
+
+    @staticmethod
+    def get_split_position(text: str, parent=None):
+        """The chosen split position, or None if cancelled / nothing to split."""
+        if len(text) < 2:
+            return None
+        dlg = SplitChipDialog(text, parent=parent)
+        if exec_dialog(dlg):
+            return dlg.split_pos
+        return None
+
+
 class PathPatternBuilderDialog(QtWidgets.QDialog):
     """Builds one Path Pattern by tagging a real example item's whole path."""
 
@@ -258,8 +335,11 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         self.setWindowTitle("Build Path Pattern")
         self.setMinimumSize(780, 460)
         # Restored tagging (drilled filename + several folder chips) is wide,
-        # so open with room for it rather than starting mid-scroll.
-        self.resize(1000, 560)
+        # and the tag/defaults/preview stack below it is tall (especially
+        # with the metadata-defaults fields) -- open with room for both
+        # rather than starting mid-scroll. The middle section scrolls on its
+        # own if a smaller screen still can't fit it all.
+        self.resize(1000, 700)
         self.mapper = mapper
         self.item = item
         self.result_pattern = None
@@ -424,16 +504,54 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         merge_btn.clicked.connect(self._on_merge)
         wildcard_btn = QtWidgets.QPushButton("Mark Wildcard (*)")
         wildcard_btn.clicked.connect(self._mark_wildcard)
+        split_btn = QtWidgets.QPushButton("Split at Position…")
+        split_btn.setToolTip(
+            "For a piece with no separator at all between two values, e.g. "
+            "\"GGG01080\" where the shot code starts right after the show "
+            "code with nothing to Drill Into Piece on. Pick one piece, then "
+            "choose where to cut it."
+        )
+        split_btn.clicked.connect(self._on_split)
         clear_btn = QtWidgets.QPushButton("Clear Tag")
         clear_btn.clicked.connect(self._clear_selected)
         tool_row.addWidget(drill_btn)
         tool_row.addWidget(merge_btn)
         tool_row.addWidget(wildcard_btn)
+        tool_row.addWidget(split_btn)
         tool_row.addWidget(clear_btn)
         tool_row.addStretch()
         act_v.addLayout(tool_row)
 
-        layout.addWidget(act_box)
+        self._default_edits = {}
+        self._metadata_default_edits = {}
+        defaults_box = QtWidgets.QGroupBox("Defaults for Fields Not in the Path")
+        defaults_v = QtWidgets.QVBoxLayout(defaults_box)
+        defaults_form = QtWidgets.QFormLayout()
+        existing_defaults = self._existing_pattern.defaults if self._existing_pattern else {}
+        for field in CANONICAL_DISPLAY_NAMES:
+            edit = QtWidgets.QLineEdit(str(existing_defaults.get(field, "")))
+            edit.setPlaceholderText(f"(not used unless {field!r} isn't tagged anywhere above)")
+            edit.textChanged.connect(self._update_preview)
+            self._default_edits[field] = edit
+            defaults_form.addRow(f"{field}:", edit)
+        defaults_v.addLayout(defaults_form)
+
+        meta_hint = QtWidgets.QLabel(
+            "Metadata fallback -- used only when the file's own fps/resolution/"
+            "colorspace can't be read (never a path token):"
+        )
+        meta_hint.setWordWrap(True)
+        meta_hint.setStyleSheet("color:#94A3B8; font-size:10px;")
+        defaults_v.addWidget(meta_hint)
+        meta_form = QtWidgets.QFormLayout()
+        for field in METADATA_DEFAULT_FIELDS:
+            edit = QtWidgets.QLineEdit(str(existing_defaults.get(field, "")))
+            edit.setPlaceholderText("e.g. 24" if field == "fps" else
+                                     "e.g. 1920x1080" if field == "resolution" else "e.g. ACEScg")
+            edit.textChanged.connect(self._update_preview)
+            self._metadata_default_edits[field] = edit
+            meta_form.addRow(f"{field}:", edit)
+        defaults_v.addLayout(meta_form)
 
         prev_box = QtWidgets.QGroupBox("Live Preview")
         prev_layout = QtWidgets.QVBoxLayout(prev_box)
@@ -446,7 +564,24 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         # heuristic could otherwise decide to parse as a tag and drop.
         self.preview_lbl.setTextFormat(get_qt_enum(QtCore.Qt, "TextFormat", "PlainText"))
         prev_layout.addWidget(self.preview_lbl)
-        layout.addWidget(prev_box)
+
+        # act_box + defaults_box + prev_box together can easily outgrow any
+        # fixed dialog height (confirmed: adding the metadata-defaults fields
+        # pushed the layout's real minimum past the dialog's own fixed
+        # min-size, silently clipping the bottom of the dialog with no way to
+        # reach it). One scroll area absorbs however tall this stack gets,
+        # now or as more fields are added later, without the dialog itself
+        # needing to keep growing.
+        middle = QtWidgets.QWidget()
+        middle_v = QtWidgets.QVBoxLayout(middle)
+        middle_v.setContentsMargins(0, 0, 0, 0)
+        middle_v.addWidget(act_box)
+        middle_v.addWidget(defaults_box)
+        middle_v.addWidget(prev_box)
+        middle_scroll = QtWidgets.QScrollArea()
+        middle_scroll.setWidgetResizable(True)
+        middle_scroll.setWidget(middle)
+        layout.addWidget(middle_scroll, 1)
 
         btn_row = QtWidgets.QHBoxLayout()
         save_btn = QtWidgets.QPushButton("Save Pattern" if self._existing_index is not None else "Add Pattern")
@@ -516,6 +651,22 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
             if len(row.selected_chips()) >= 2:
                 row.merge_selected()
 
+    def _on_split(self):
+        for row in self._segment_rows:
+            selected = [c for c in row.selected_chips() if not c.is_frame]
+            if len(selected) != 1:
+                continue
+            chip = selected[0]
+            if len(chip.raw_text) < 2:
+                QtWidgets.QMessageBox.information(
+                    self, "Split at Position", "This piece is too short to split.")
+                return
+            idx = row.all_chips().index(chip)
+            pos = SplitChipDialog.get_split_position(chip.raw_text, parent=self)
+            if pos is not None:
+                row.split_chip_at(idx, pos)
+            return
+
     # ------------------------------------------------------------------
     # Preview / accept
     # ------------------------------------------------------------------
@@ -523,10 +674,41 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
     def _current_template(self) -> str:
         return "/".join(row.rendered_template() for row in self._segment_rows)
 
+    def _current_defaults(self, template: str) -> dict:
+        """Only for a field the template never tags -- a default alongside
+        its own tag would just be a dead value nothing reads. The metadata
+        fields (fps/resolution/colorspace) are never path tags, so theirs
+        apply unconditionally whenever a value's been typed."""
+        out = {}
+        for field, edit in self._default_edits.items():
+            value = edit.text().strip()
+            if value and render_placeholder(field) not in template:
+                out[field] = value
+        for field, edit in self._metadata_default_edits.items():
+            value = edit.text().strip()
+            if value:
+                out[field] = value
+        return out
+
     def _update_preview(self):
         template = self._current_template()
-        count, total, samples = self.mapper.preview_pattern(template, limit=6)
+        defaults = self._current_defaults(template)
+        for field, edit in self._default_edits.items():
+            edit.setEnabled(render_placeholder(field) not in template)
+        # `count`/`total` reflect structural matching only, unaffected by
+        # defaults -- a default fills in an already-matched sample's missing
+        # values, it never turns a non-match into a match. Re-derive just the
+        # shown samples' extracted dicts through a defaults-aware pattern.
+        count, total, raw_samples = self.mapper.preview_pattern(template, limit=6)
+        if defaults:
+            preview_pattern = PathPattern(template=template, defaults=defaults)
+            samples = [(rel, preview_pattern.match(rel)) for rel, _ in raw_samples]
+        else:
+            samples = raw_samples
         lines = [f"Pattern:  {template}", "", f"{count} of {total} item(s) under this root match:"]
+        if defaults:
+            shown_defaults = ", ".join(f"{k}={v}" for k, v in defaults.items())
+            lines.append(f"Defaults applied where untagged: {shown_defaults}")
         for rel, extracted in samples:
             shown_path = rel if len(rel) <= 60 else "…" + rel[-57:]
             if extracted is None:
@@ -581,7 +763,10 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         if not ok:
             return
 
-        self.result_pattern = PathPattern(template=template, name=name.strip() or template)
+        self.result_pattern = PathPattern(
+            template=template, name=name.strip() or template,
+            defaults=self._current_defaults(template),
+        )
         self.result_replace_index = self._existing_index if mode == "overwrite" else None
         self.accept()
 
@@ -594,6 +779,10 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         self.setWindowTitle("Path Patterns")
         self.setMinimumSize(680, 380)
         self.mapper = mapper
+        # True once move/edit/remove actually changed something -- lets the
+        # caller (folder_tree_widget._on_manage_patterns) offer to sync an
+        # active Ingest Preset only when there's really something to sync.
+        self.changed = False
         self._build_ui()
         self._refresh_table()
 
@@ -650,7 +839,7 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         idx = self._selected_row()
         if idx is not None and idx > 0:
             self.mapper.move_path_pattern(idx, idx - 1)
-            self.mapper.save()
+            self.changed = True
             self._refresh_table()
             self.table.selectRow(idx - 1)
 
@@ -658,7 +847,7 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         idx = self._selected_row()
         if idx is not None and idx < self.table.rowCount() - 1:
             self.mapper.move_path_pattern(idx, idx + 1)
-            self.mapper.save()
+            self.changed = True
             self._refresh_table()
             self.table.selectRow(idx + 1)
 
@@ -669,13 +858,14 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         current = self.mapper.get_path_patterns()[idx]
         text, ok = QtWidgets.QInputDialog.getText(self, "Edit Pattern", "Template:", text=current.template)
         if ok and text.strip():
-            self.mapper.update_path_pattern(idx, PathPattern(template=text.strip(), name=current.name))
-            self.mapper.save()
+            self.mapper.update_path_pattern(
+                idx, PathPattern(template=text.strip(), name=current.name, defaults=current.defaults))
+            self.changed = True
             self._refresh_table()
 
     def _on_remove(self):
         idx = self._selected_row()
         if idx is not None:
             self.mapper.remove_path_pattern(idx)
-            self.mapper.save()
+            self.changed = True
             self._refresh_table()

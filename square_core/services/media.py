@@ -153,12 +153,11 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
 
     if entry.get("previewable") and make_review_proxy is not False:
         def _do_preview():
-            preview = _review_proxy(pctx, task, files, dest_dir, rev, name,
-                                    media_info, proxy_dry_run)
-            if preview:
-                pctx.kitsu.set_main_preview(preview)
-                pctx.kitsu.stamp_provenance(preview, prov, on="preview")
-            return preview
+            return make_review_proxy_for(
+                pctx, entity, media_type, task, files=files, name=name,
+                version=rev, media_info=media_info, dest_dir=dest_dir,
+                provenance=prov, dry_run=proxy_dry_run,
+            )
 
         if preview_pool is not None:
             # Encoding + upload can be slow; a caller ingesting many items at
@@ -198,3 +197,33 @@ def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run):
     is_video = len(files) == 1 and not any(c.isdigit() for c in Path(files[0]).stem[-6:])
     path = make_proxy(files, proxy, fps=float(fps), is_video=is_video, dry_run=dry_run)
     return pctx.kitsu.upload_preview(task, path, comment=f"Preview v{rev:03d}")
+
+
+def make_review_proxy_for(pctx, entity, media_type: str, task, *, files, name: str = "main",
+                          version: int, media_info=None, dest_dir: str = "",
+                          provenance=None, dry_run: bool = False):
+    """Encode + upload the review proxy for a media that is ALREADY published
+    -- the ingest tool resuming a session whose previews hadn't finished, a
+    tool re-rendering a broken proxy. The Kitsu version already exists; this
+    only produces the MP4, uploads it to `task`, sets it as `entity`'s main
+    preview, and (when `provenance` is given) stamps it. `publish()` runs the
+    exact same path for a fresh publish. Returns the preview record or None."""
+    entry = pctx.paths.media_entry(media_type)
+    if not entry.get("previewable"):
+        return None
+    files = [str(f) for f in files]
+    if not files:
+        return None
+    if not dest_dir:
+        coords = _entity_coords(entity)
+        ext = Path(files[0]).suffix.lstrip(".")
+        rep = entry.get("representation") or ext
+        ctx = pctx.ctx(**coords, task=_task_name(task), name=name, version=version,
+                       representation=rep, ext=ext)
+        dest_dir = pctx.paths.media_dir(media_type, ctx)
+    preview = _review_proxy(pctx, task, files, dest_dir, version, name, media_info, dry_run)
+    if preview:
+        pctx.kitsu.set_main_preview(preview)
+        if provenance is not None:
+            pctx.kitsu.stamp_provenance(preview, provenance, on="preview")
+    return preview

@@ -25,7 +25,10 @@ content-hash duplicate check still catches a re-delivery either way.
 from __future__ import annotations
 
 import os
+import re
 import uuid
+import shutil
+import tempfile
 import logging
 import datetime
 import threading
@@ -68,12 +71,17 @@ def _wants_preview(pctx, media_type: str) -> bool:
 
 class IngestController:
     def __init__(self, pctx, *, ledger, task_types, hasher: FileHasher | None = None,
-                 extractor=None, ingested_by: str = "", ingest_task_status: str = "Done"):
+                 extractor=None, converter=None, ingested_by: str = "",
+                 ingest_task_status: str = "Done", transfer_mode: str = "copy"):
         self.pctx = pctx
         self.ledger = ledger
         self.task_types = list(task_types or [])
+        self.transfer_mode = transfer_mode or "copy"
         self.hasher = hasher or FileHasher()
         self.extractor = extractor
+        if converter is None:
+            from square_core.media.convert import video_to_exr_sequence as converter
+        self.converter = converter
         self.ingested_by = ingested_by or getattr(pctx.pipeline.user, "email", "")
         self.ingest_task_status = ingest_task_status
 
@@ -133,6 +141,7 @@ class IngestController:
                 continue
             item.preview_default = _wants_preview(self.pctx, item.media_type)
             item.preview_wanted = item.preview_default
+            item.original_values = {a: getattr(item, a) for a in self.RENAMEABLE_ATTRS}
             self.items.append(item)
             self._by_key[item.key] = item
             added.append(item)
@@ -234,6 +243,7 @@ class IngestController:
             item.sample_dest_file = str(
                 Path(item.dest_dir) / os.path.basename(item.source_files[0])
             )
+            item.check_error = ""
         except Exception as e:
             item.dest_dir = ""
             item.sample_dest_file = ""
@@ -380,6 +390,12 @@ class IngestController:
         item.preview_user_set = True
         self._reassemble_all()
 
+    def set_convert_to_exr(self, key, wanted: bool) -> None:
+        item = self._by_key[key]
+        self._push_undo("toggle convert to EXR", [key])
+        item.convert_to_exr = bool(wanted)
+        self._reassemble_all()
+
     def skip(self, key) -> None:
         self._push_undo("skip", [key])
         self._by_key[key].skipped = True
@@ -399,10 +415,17 @@ class IngestController:
             item.version += 1
             while self._inspect_slot(item)[0] != preflight.SLOT_EMPTY:
                 item.version += 1
-            # the resolution we just recorded was for the OLD version's issue;
-            # drop it so it can't linger. Other resolutions (Ignore on a
-            # duplicate, etc.) stay.
-            item.unresolve(issue_id)
+            # A slot-scoped issue (dest-exists-diff / already-in-slot, both
+            # tagged column="version") was about the OLD version's slot --
+            # drop it so it can't linger once we're sitting on a fresh one.
+            # A ledger-scoped issue (duplicate-content, partial-overlap) is
+            # a fact about this content's HASH, not this slot -- it stays
+            # true at the new version too, so its own resolution must stay
+            # resolved or the exact same warning reappears unresolved right
+            # after "fixing" it (confirmed bug: Version Up left the row
+            # stuck on Warning forever for a ledger-duplicate).
+            if issue_id.endswith(":version"):
+                item.unresolve(issue_id)
             self._recheck_one(item)
         elif action == Action.OVERWRITE:
             self._recheck_one(item)
@@ -427,6 +450,133 @@ class IngestController:
             self.resolve(key, iid, action, _record_undo=False)
 
     # ------------------------------------------------------------------
+    # Batch rename
+    # ------------------------------------------------------------------
+
+    RENAME_FIELDS = {
+        "sequence": "sequence_code", "shot": "shot_code",
+        "media_type": "media_type", "media_name": "media_name",
+    }
+
+    # Every field a rename/set-value action can target, attribute name
+    # directly (matches review_table.py's _EDIT_FIELD column mapping).
+    RENAMEABLE_ATTRS = (
+        "sequence_code", "shot_code", "media_type", "media_name",
+        "fps", "resolution", "colorspace", "version",
+    )
+
+    RENAME_TOKENS = ("project", "sequence", "shot", "media_type", "media_name",
+                     "current", "original", "source", "version", "date")
+
+    # {token} or {token:modifier} -- e.g. {shot:upper}. An unrecognized
+    # modifier just falls back to the plain value rather than erroring, so a
+    # typo shows up as "not what I typed" in the live preview, not a crash.
+    _RENAME_TOKEN_RE = re.compile(r"\{(\w+)(?::(\w+))?\}")
+    _RENAME_CASE_MODIFIERS = {
+        "upper": str.upper, "lower": str.lower, "title": str.title,
+        "capitalize": str.capitalize,
+    }
+
+    @staticmethod
+    def _rename_str(value) -> str:
+        return "" if value is None else str(value)
+
+    def resolve_rename_template(self, item: IngestItem, template: str, attr: str = None) -> str:
+        """Substitute every {token} (optionally {token:upper|lower|title|
+        capitalize}) in `template` with this item's own values -- the same
+        resolution `rename_cells`/`rename_batch` apply, exposed for a live
+        preview to call without mutating anything.
+
+        `attr` is the specific field this resolution is FOR (e.g. "shot_code"
+        when renaming the Shot cell) -- it's what {current} and {original}
+        resolve against, so the same template means "whatever this cell's own
+        value is" no matter which column it's applied to. Left blank (no
+        `attr`) they resolve empty rather than erroring."""
+        today = datetime.date.today().strftime("%Y%m%d")
+        values = {
+            "project": self.pctx.code or "",
+            "sequence": item.sequence_code or "",
+            "shot": item.shot_code or "",
+            "media_type": item.media_type or "",
+            "media_name": item.media_name or "",
+            # the file/folder name the scanner grouped this item under at
+            # discovery, e.g. "plate" from "plate.1001.exr" -- fixed forever,
+            # independent of any field's own value or edits.
+            "source": item.source_name or "",
+            # this cell's value right now, and as it was the moment this row
+            # first entered the table -- e.g. renaming the Shot cell with
+            # "{original}_{current}" when it loaded as "Fgt10" and hasn't
+            # been touched since renders "Fgt10_Fgt10"; after an edit,
+            # {original} still says "Fgt10" while {current} follows the edit.
+            "current": self._rename_str(getattr(item, attr, "")) if attr else "",
+            "original": self._rename_str(item.original_values.get(attr, "")) if attr else "",
+            "version": f"v{item.version:03d}",
+            "date": today,
+        }
+
+        def _sub(m: re.Match) -> str:
+            name, modifier = m.group(1), m.group(2)
+            if name not in values:
+                return m.group(0)   # not a token we know -- leave it literal
+            value = values[name]
+            fn = self._RENAME_CASE_MODIFIERS.get(modifier)
+            return fn(value) if fn else value
+
+        return self._RENAME_TOKEN_RE.sub(_sub, template)
+
+    def rename_cells(self, cell_targets, template: str) -> int:
+        """Apply a token template to a set of specific (key, attr) cells --
+        one undo entry for the whole batch, not one per cell. `attr` is an
+        IngestItem attribute name (RENAMEABLE_ATTRS). fps/version are coerced
+        to their numeric type; a cell whose resolved value doesn't coerce is
+        left untouched rather than failing the whole batch. Returns the
+        number of cells actually changed."""
+        template = (template or "").strip()
+        pairs = [(self._by_key[k], attr) for k, attr in cell_targets
+                if k in self._by_key and attr in self.RENAMEABLE_ATTRS]
+        if not pairs or not template:
+            return 0
+
+        keys = list(dict.fromkeys(item.key for item, _ in pairs))
+        self._push_undo(f"rename {len(keys)} row(s)", keys)
+        changed = 0
+        for item, attr in pairs:
+            value = self.resolve_rename_template(item, template, attr)
+            if attr == "fps":
+                try:
+                    value = float(value)
+                except ValueError:
+                    continue
+            elif attr == "version":
+                try:
+                    value = int(value)
+                except ValueError:
+                    continue
+            setattr(item, attr, value)
+            if attr in ("fps", "resolution", "colorspace"):
+                item.metadata_verified[attr] = True
+            if attr == "media_type":
+                item.preview_default = _wants_preview(self.pctx, item.media_type)
+                if not item.preview_user_set:
+                    item.preview_wanted = item.preview_default
+            self._recheck_one(item)
+            changed += 1
+        self._reassemble_all()
+        return changed
+
+    def rename_batch(self, keys, field_name: str, template: str) -> int:
+        """Apply a token template to one field across every item in `keys`.
+        `field_name` is one of RENAME_FIELDS' keys (matching the Path
+        Pattern display names, so the same vocabulary the studio already
+        tags with also renames with). Tokens: {sequence} {shot} {media_type}
+        {media_name} {version} {original} {project} {date}. Returns the
+        number of rows renamed."""
+        attr = self.RENAME_FIELDS.get(field_name)
+        if attr is None:
+            raise ValueError(f"not a renameable field: {field_name}")
+        return self.rename_cells([(k, attr) for k in keys], template)
+
+    # ------------------------------------------------------------------
     # Ingest
     # ------------------------------------------------------------------
 
@@ -434,7 +584,8 @@ class IngestController:
         pool = self._resolve_targets(keys)
         return [i for i in pool if i.ingestable]
 
-    def run_ingest(self, keys=None, *, dry_run=False, transfer_mode: str = "copy") -> dict:
+    def run_ingest(self, keys=None, *, dry_run=False, transfer_mode: str = None) -> dict:
+        transfer_mode = transfer_mode or self.transfer_mode
         self._cancel.clear()
         targets = self.ingestable_items(keys)
         if not targets:
@@ -498,6 +649,63 @@ class IngestController:
                 pass
         self._emit("previews_finished", payload={})
 
+    def run_pending_previews(self) -> None:
+        """Resume: re-attempt the review proxy for rows that ingested last
+        run but whose proxy never landed -- the session was saved while it
+        was still pending/running, or it failed. The Kitsu version already
+        exists; this only re-encodes + re-uploads the MP4."""
+        self._cancel.clear()
+        # a stale per-preflight shot cache (or none at all on a bare resume)
+        # would make _find_shot miss a shot that really does exist now
+        self._shot_cache.clear()
+        pending = [
+            it for it in self.items
+            if it.ingested and it.preview_wanted
+            and it.preview_state in ("pending", "running", "failed")
+            and _wants_preview(self.pctx, it.media_type)
+        ]
+        if not pending:
+            return
+        futs = []
+        for it in pending:
+            it.preview_state = "pending"
+            self._emit("item_updated", item=it)
+            futs.append(self._preview_pool.submit(self._resume_one_preview, it.key))
+        threading.Thread(target=self._await_previews, args=(futs,), daemon=True,
+                        name="ingest-preview-resume").start()
+
+    def _resume_one_preview(self, key: str) -> None:
+        item = self._by_key.get(key)
+        if item is None or self._cancel.is_set():
+            return
+        item.preview_state = "running"
+        self._emit("item_updated", item=item)
+        try:
+            shot = self._find_shot(item.sequence_code, item.shot_code)
+            if shot is None:
+                raise RuntimeError(f"shot {item.shot_code!r} not found in Kitsu")
+            tasks = breakdown.build_task_grid(self.pctx, [shot], self.task_types)
+            ingest_task = self.pctx.kitsu.ingest_task(tasks) if tasks else None
+            if ingest_task is None:
+                raise RuntimeError("no ingest task to attach the preview to")
+            from square_core.model import MediaInfo
+            media_info = MediaInfo(fps=item.fps, resolution=item.resolution,
+                                   colorspace=item.colorspace)
+            files = item.source_files or item.ingest_result.get("files", [])
+            preview = media_service.make_review_proxy_for(
+                self.pctx, shot, item.media_type, ingest_task,
+                files=files, name=item.media_name or "main", version=item.version,
+                media_info=media_info, dest_dir=item.dest_dir,
+            )
+            item.preview_state = "done" if preview else "failed"
+            if preview:
+                item.ingest_result["preview_id"] = getattr(preview, "id", "")
+        except Exception as e:
+            logger.warning("[IngestController] resume preview failed for %s: %s", key, e)
+            item.preview_state = "failed"
+        finally:
+            self._emit("item_updated", item=item)
+
     def _set_stage(self, item: IngestItem, stage: Stage, pct: int) -> None:
         item.stage = stage
         item.stage_pct = pct
@@ -512,14 +720,19 @@ class IngestController:
             return None
 
         if dry_run:
+            converting = item.is_video and item.convert_to_exr
             entry = self.pctx.paths.media_entry(item.media_type)
-            ext = Path(item.source_files[0]).suffix.lstrip(".")
+            ext = "exr" if converting else Path(item.source_files[0]).suffix.lstrip(".")
             rep = entry.get("representation") or ext
             ctx = self.pctx.ctx(sequence=item.sequence_code, shot=item.shot_code,
                                 name=item.media_name or "main", version=item.version,
                                 representation=rep, ext=ext, frame=item.start_frame or None)
             dest_dir = self.pctx.paths.media_dir(item.media_type, ctx)
-            copied = [str(Path(dest_dir) / os.path.basename(f)) for f in item.source_files]
+            if converting:
+                stem = Path(item.source_files[0]).stem
+                copied = [str(Path(dest_dir) / f"{stem}.{item.start_frame or 1001:04d}.exr")]
+            else:
+                copied = [str(Path(dest_dir) / os.path.basename(f)) for f in item.source_files]
             checksum = item.hashes.get(item.source_files[0], "") if item.source_files else ""
             item.dest_dir = dest_dir
             item.ingest_result = {
@@ -530,6 +743,25 @@ class IngestController:
             self._set_stage(item, Stage.DONE, 100)
             self._emit("item_updated", item=item)
             return None
+
+        # 0. Video -> EXR sequence, if the user opted in. Runs before the
+        # shot even exists, so a bad delivery fails before touching Kitsu.
+        scratch_dir = None
+        files_to_publish = item.source_files
+        if item.is_video and item.convert_to_exr:
+            self._set_stage(item, Stage.CONVERTING, 2)
+            scratch_dir = tempfile.mkdtemp(prefix="ingest_exr_")
+            try:
+                converted = self.converter(
+                    item.source_files[0], scratch_dir, start_frame=item.start_frame or 1001,
+                )
+            except Exception:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                raise
+            if not converted:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                raise RuntimeError("video-to-EXR conversion produced no frames")
+            files_to_publish = converted
 
         # 1. Kitsu shot / tasks
         self._set_stage(item, Stage.KITSU_SHOT, 5)
@@ -554,7 +786,7 @@ class IngestController:
 
         result = media_service.publish(
             self.pctx, shot, item.media_type, ingest_task,
-            files=item.source_files, name=item.media_name or "main", version=item.version,
+            files=files_to_publish, name=item.media_name or "main", version=item.version,
             media_info=media_info, transfer_mode=transfer_mode,
             pool=copy_pool, progress=_cp,
             make_review_proxy=(item.preview_wanted if not self._cancel.is_set() else False),
@@ -563,10 +795,27 @@ class IngestController:
         )
         item.dest_dir = result.dir
 
+        if scratch_dir:
+            # The review proxy (if any) reads straight from `files_to_publish`
+            # on its own pool, off this call's critical path -- clean up the
+            # scratch frames once that job (if pending) is done with them,
+            # not before.
+            if result.preview_future is not None:
+                result.preview_future.add_done_callback(
+                    lambda _f, d=scratch_dir: shutil.rmtree(d, ignore_errors=True))
+            else:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+
         self._set_stage(item, Stage.METADATA, 90)
-        self.pctx.kitsu.set_status(ingest_task, self.ingest_task_status)
+        # ONE comment that both says what happened and moves the task -- was
+        # a set_status("Done") followed by a plain comment(), but that
+        # comment (and the async review-proxy comment) were built from the
+        # pre-"Done" task object and each flipped the task back to "Todo".
+        note = f"Ingested {item.media_type} '{item.media_name}'"
         if self.ingest_task_status:
-            self.pctx.kitsu.comment(ingest_task, f"Ingested {item.media_type} '{item.media_name}'")
+            self.pctx.kitsu.set_status(ingest_task, self.ingest_task_status, comment=note)
+        else:
+            self.pctx.kitsu.comment(ingest_task, note)
 
         checksum = next(iter(result.checksums.values()), "") if result.checksums else ""
         self._write_ledger(item, result.dir, result.files, checksum)
@@ -579,8 +828,24 @@ class IngestController:
         item.ingested = True
 
         preview_fut = result.preview_future
-        item.preview_state = "pending" if preview_fut is not None else (
-            "" if not item.preview_wanted else "skipped")
+        if preview_fut is not None:
+            item.preview_state = "pending"
+            # media.publish encodes + uploads the proxy on its own pool and
+            # hands back a Future -- but nothing downstream was consuming its
+            # result, so the row sat on "pending" forever even after the
+            # proxy landed in Kitsu. Fold the outcome back onto the item.
+            def _finish_preview(fut, it=item):
+                try:
+                    pv = fut.result()
+                except Exception:
+                    pv = None
+                it.preview_state = "done" if pv else "failed"
+                if pv:
+                    it.ingest_result["preview_id"] = getattr(pv, "id", "")
+                self._emit("item_updated", item=it)
+            preview_fut.add_done_callback(_finish_preview)
+        else:
+            item.preview_state = "" if not item.preview_wanted else "skipped"
 
         self._set_stage(item, Stage.DONE, 100)
         self._emit("item_updated", item=item)

@@ -22,8 +22,9 @@ from collections import defaultdict
 
 from Qt import QtWidgets, QtCore, QtGui
 
-from square_core.folder_mapper import FolderMapper
-from square_core.plate_scanner import SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS
+from tools.ingest_tool.core.folder_mapper import FolderMapper
+from tools.ingest_tool.core import presets as ingest_presets
+from square_core.media.scanner import SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS
 from tools.ingest_tool.widgets.path_pattern_dialog import PathPatternBuilderDialog, PathPatternManagerDialog
 from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED, PEN_STYLE_NO_PEN
 
@@ -145,8 +146,9 @@ class FolderTreeWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._root_path = None
         self._mapper    = None
-        from square_core.config import StudioConfig
-        self.config = StudioConfig()
+        self._pctx = None                       # set via set_project(); drives the
+                                                # media-type context menu (source="delivery")
+        self._presets = ingest_presets.load()
         self.setAcceptDrops(True)
         self.setMinimumWidth(340)
         self._build_ui()
@@ -363,8 +365,13 @@ class FolderTreeWidget(QtWidgets.QWidget):
         """Manual per-item media-type overrides {path: type} (for the session file)."""
         return self._mapper.get_media_types() if self._mapper else {}
 
+    def set_project(self, pctx) -> None:
+        """The current project's config -- drives the context menu's media-type
+        list (`cfg.media_type_names(source="delivery")`), not a hardcoded list."""
+        self._pctx = pctx
+
     def active_preset(self) -> str:
-        return getattr(self.config, "active_ingest_preset", "") or ""
+        return self._presets.get("active", "") or ""
 
     def restore(self, path: str, patterns=None, media_types=None, preset: str = "") -> None:
         """
@@ -381,7 +388,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
             if media_types:
                 self._mapper.set_media_types(media_types)
         if preset:
-            self.config.active_ingest_preset = preset
+            self._presets["active"] = preset
             self._refresh_preset_combo()
         self._refresh_item_colours()
 
@@ -498,7 +505,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         (with real file paths, not the tree's synthetic display path), by
         re-running PlateScanner on just that node's own folder.
         """
-        from square_core.plate_scanner import PlateScanner
+        from square_core.media.scanner import PlateScanner
         folder = path.parent
         if scan_cache is not None:
             key = str(folder)
@@ -520,6 +527,20 @@ class FolderTreeWidget(QtWidgets.QWidget):
                 return c
         return None
 
+    def _real_key_for(self, path: Path, kind: str, scan_cache=None) -> Path:
+        """A sequence tree node's own ROLE_PATH is a SYNTHETIC display path
+        (frame digits stripped, e.g. `plate.exr` for `plate.1001.exr`) -- it
+        never equals any real file, so tagging/looking-up by it directly is a
+        silent no-op once `FolderMapper.build_items()` re-scans for real
+        files. Resolve to the real first-frame file (same real item
+        `get_selected_file_paths` already resolves to) so the manual tag
+        actually reaches the row it was meant for. Falls back to `path`
+        unresolved for a plain image/video leaf, which already IS real."""
+        real_item = self._resolve_item_for_node(path, kind, scan_cache=scan_cache)
+        if real_item and real_item.files:
+            return Path(real_item.files[0])
+        return path
+
     def _refresh_item_colours(self):
         """Walk the tree and refresh each leaf item's badge after a tag/pattern change."""
         if not self._mapper:
@@ -531,15 +552,15 @@ class FolderTreeWidget(QtWidgets.QWidget):
             path_str = tree_item.data(0, ROLE_PATH)
             if path_str and kind in ("sequence", "video", "image"):
                 path = Path(path_str)
-                badge = self._mapper.get_media_type(path)
-                if not badge:
-                    real_item = self._resolve_item_for_node(path, kind, scan_cache=scan_cache)
-                    if real_item and real_item.files:
-                        _, extracted = self._mapper.match_relative_path(Path(real_item.files[0]))
-                        if extracted:
-                            from square_core.path_pattern import split_canonical_and_extra
-                            canonical, _extra = split_canonical_and_extra(extracted)
-                            badge = canonical.get("media_type") or canonical.get("media_name") or "MATCHED"
+                real_item = self._resolve_item_for_node(path, kind, scan_cache=scan_cache)
+                real_path = Path(real_item.files[0]) if (real_item and real_item.files) else path
+                badge = self._mapper.get_media_type(real_path)
+                if not badge and real_item and real_item.files:
+                    _, extracted = self._mapper.match_relative_path(Path(real_item.files[0]))
+                    if extracted:
+                        from square_core.paths.path_pattern import split_canonical_and_extra
+                        canonical, _extra = split_canonical_and_extra(extracted)
+                        badge = canonical.get("media_type") or canonical.get("media_name") or "MATCHED"
                 tree_item.setData(0, ROLE_MEDIA_TYPE, badge)
                 clr = "#FBBF24" if badge else ("#5B7BC4" if kind == "video" else "#4B6A8A")
                 tree_item.setForeground(0, QtGui.QColor(clr))
@@ -576,7 +597,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._preset_combo.blockSignals(True)
         self._preset_combo.clear()
         self._preset_combo.addItem("Presets ▼")
-        for name in self.config.ingest_presets.keys():
+        for name in self._presets.get("presets", {}).keys():
             self._preset_combo.addItem(f"  {name}")
         self._preset_combo.addItem("💾 Save Tagging as Preset…")
         self._preset_combo.blockSignals(False)
@@ -593,63 +614,74 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
     def _on_preset_selected(self, preset_name):
         """Applies a saved Ingest Preset (an ordered list of Path Patterns) to the tree."""
-        if not self._mapper or preset_name not in self.config.ingest_presets:
+        presets = self._presets.get("presets", {})
+        if not self._mapper or preset_name not in presets:
             return
 
-        data = self.config.ingest_presets[preset_name]
+        data = presets[preset_name]
         self._mapper.set_path_patterns(data.get("patterns", []))
-        self.config.active_ingest_preset = preset_name
-        self.config.save()
+        self._presets["active"] = preset_name
+        ingest_presets.save(self._presets)
 
         self._refresh_item_colours()
 
     def _on_save_ingest_preset(self):
-        """Saves the current tree's active Path Patterns as a new Ingest Preset."""
+        """Saves the current tree's active Path Patterns as a new (or existing) Ingest Preset."""
         if not self._mapper:
             QtWidgets.QMessageBox.information(self, "Save Preset", "Please load a folder tree first before saving a preset.")
             return
 
         text, ok = QtWidgets.QInputDialog.getText(self, "Save Ingest Preset", "Preset Name:")
         if ok and text.strip():
-            preset_name = text.strip()
-            preset_data = {
-                "name": preset_name,
-                "patterns": [p.template for p in self._mapper.get_path_patterns()],
-            }
-            self.config.ingest_presets[preset_name] = preset_data
-            self.config.active_ingest_preset = preset_name
-            self.config.save()
+            self._save_patterns_to_preset(text.strip())
 
-            self._refresh_preset_combo()
+    def _save_patterns_to_preset(self, preset_name: str) -> None:
+        """(Over)writes `preset_name` with the mapper's current, full Path
+        Pattern list -- as dicts, not bare template strings, or a pattern's
+        Defaults for Fields Not in the Path would silently vanish the next
+        time this preset is applied."""
+        preset_data = {
+            "name": preset_name,
+            "patterns": [p.to_dict() for p in self._mapper.get_path_patterns()],
+        }
+        self._presets.setdefault("presets", {})[preset_name] = preset_data
+        self._presets["active"] = preset_name
+        ingest_presets.save(self._presets)
+        self._refresh_preset_combo()
 
     def _show_media_context_menu(self, item, path: Path, gp):
-        """Context menu for sequence / video / image leaf items."""
+        """Context menu for sequence / video / image leaf items. Tags are
+        stored keyed by the item's REAL first-frame file (resolved once,
+        here) -- never the tree's synthetic display path, which never
+        matches anything FolderMapper.build_items() looks up later (see
+        `_real_key_for`)."""
         menu = QtWidgets.QMenu(self)
 
         hdr = menu.addAction(f"  {path.name}")
         hdr.setEnabled(False)
         menu.addSeparator()
 
-        current_type = self._mapper.get_media_type(path) if self._mapper else None
+        kind = item.data(0, ROLE_KIND)
+        real_path = self._real_key_for(path, kind) if self._mapper else path
+        current_type = self._mapper.get_media_type(real_path) if self._mapper else None
 
-        from square_core.config import StudioConfig
-        media_types = list(StudioConfig().media_type_configs.keys())
+        media_types = (self._pctx.config.media_type_names(source="delivery")
+                      if self._pctx else [])
 
         for mtype in media_types:
             act = menu.addAction(f"Tag as {mtype}")
             act.setCheckable(True)
             act.setChecked(current_type == mtype)
             act.triggered.connect(
-                lambda checked=False, t=mtype, i=item, p=path: self._set_media_type(i, p, t)
+                lambda checked=False, t=mtype, i=item, p=real_path: self._set_media_type(i, p, t)
             )
 
         custom_act = menu.addAction("Custom Media Type…")
         custom_act.triggered.connect(
-            lambda checked=False, i=item, p=path: self._set_media_type_custom(i, p)
+            lambda checked=False, i=item, p=real_path: self._set_media_type_custom(i, p)
         )
 
         menu.addSeparator()
-        kind = item.data(0, ROLE_KIND)
         build_act = menu.addAction("🏷️ Build Path Pattern…")
         build_act.triggered.connect(
             lambda checked=False, p=path, k=kind: self._open_path_pattern_builder(p, k)
@@ -659,7 +691,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
             menu.addSeparator()
             clr_act = menu.addAction("Clear Media Type Tag")
             clr_act.triggered.connect(
-                lambda checked=False, i=item, p=path: self._clear_item_tags(i, p)
+                lambda checked=False, i=item, p=real_path: self._clear_item_tags(i, p)
             )
 
         if hasattr(menu, "exec"):
@@ -668,7 +700,8 @@ class FolderTreeWidget(QtWidgets.QWidget):
             menu.exec_(gp)
 
     def _clear_item_tags(self, item, path: Path):
-        """Clears the manual media-type tag for this specific item."""
+        """Clears the manual media-type tag for this specific item. `path`
+        must already be the resolved real-file key (see `_real_key_for`)."""
         if self._mapper:
             self._mapper.set_media_type(path, None)
         self._refresh_item_colours()
@@ -689,6 +722,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
             else:
                 self._mapper.add_path_pattern(dlg.result_pattern)
             self._refresh_item_colours()
+            self._maybe_sync_active_preset()
 
     def _on_manage_patterns(self):
         """Open the full ordered list of active Path Patterns for this root."""
@@ -697,6 +731,24 @@ class FolderTreeWidget(QtWidgets.QWidget):
         dlg = PathPatternManagerDialog(self._mapper, parent=self)
         dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
         self._refresh_item_colours()
+        if dlg.changed:
+            self._maybe_sync_active_preset()
+
+    def _maybe_sync_active_preset(self):
+        """A pattern the studio tagged came from (or now feeds into) an
+        active Ingest Preset -- ask whether this change should be saved back
+        into it, rather than the preset silently drifting out of sync with
+        what's actually being applied to this root."""
+        active = self.active_preset()
+        if not active or not self._mapper:
+            return
+        r = QtWidgets.QMessageBox.question(
+            self, "Update Preset",
+            f'Update the "{active}" preset with this change?',
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if r == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._save_patterns_to_preset(active)
 
     def _set_media_type(self, item, path: Path, type_name):
         """Assign or clear a manual media type label on a media tree item."""

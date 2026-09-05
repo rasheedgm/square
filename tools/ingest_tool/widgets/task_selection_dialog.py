@@ -12,32 +12,28 @@ from tools.qt_compat import DIALOG_ACCEPTED
 
 
 class TaskSelectionDialog(QtWidgets.QDialog):
-    """Lets the user pick task types for this ingest batch before it runs."""
+    """Lets the user pick task types for this ingest batch before it runs.
 
-    def __init__(self, default_tasks, kitsu_client=None, parent=None):
+    `default_tasks` is already the union of the studio's configured defaults
+    and whatever task types live on the Kitsu server -- the caller builds
+    that list via `pctx.kitsu.task_types(...)` (ui_main.py::_start_ingest).
+    This dialog only renders it; it never talks to Kitsu itself."""
+
+    def __init__(self, default_tasks, parent=None):
         super(TaskSelectionDialog, self).__init__(parent)
         self.setWindowTitle("Select Tasks for This Ingest")
         self.setMinimumWidth(380)
         self._checkboxes = {}
-        self._build_ui(default_tasks, kitsu_client)
+        self._build_ui(default_tasks)
 
-    def _build_ui(self, default_tasks, kitsu_client):
+    def _build_ui(self, default_tasks):
         layout = QtWidgets.QVBoxLayout(self)
 
         hdr = QtWidgets.QLabel("Create these Kitsu task types for every shot in this batch:")
         hdr.setWordWrap(True)
         layout.addWidget(hdr)
 
-        # Union of the studio's configured defaults and any task types that already exist
-        # live on the Kitsu server, so studio-specific types beyond the defaults show up too.
         all_names = list(dict.fromkeys(default_tasks))
-        if kitsu_client and kitsu_client.gazu and kitsu_client.is_connected:
-            try:
-                for tt in kitsu_client.gazu.task.all_task_types() or []:
-                    if tt.get("for_entity", "Shot") == "Shot" and tt["name"] not in all_names:
-                        all_names.append(tt["name"])
-            except Exception:
-                pass
 
         box = QtWidgets.QGroupBox("Task Types")
         box_layout = QtWidgets.QVBoxLayout(box)

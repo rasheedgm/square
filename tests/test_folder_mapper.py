@@ -190,5 +190,49 @@ class TestFolderMapperPathPatterns(unittest.TestCase):
         self.assertEqual(matched_rels, {"SQ010/SH0100/plate.1001.exr"})
 
 
+class TestPatternMetadataDefaults(unittest.TestCase):
+    """
+    A Path Pattern's `defaults` can also cover fps/resolution/colorspace --
+    a fallback for a delivery whose files never carry that metadata, exactly
+    like a media_type default covers a field that's never part of the path.
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "SQ010" / "SH0100").mkdir(parents=True)
+        (self.tmp / "SQ010" / "SH0100" / "plate.1001.exr").write_text("x")
+
+    def test_metadata_defaults_land_on_the_scanned_item_not_extra_tags(self):
+        mapper = FolderMapper(self.tmp)
+        mapper.add_path_pattern(PathPattern(
+            template="<sequence>/<shot>/plate.####.exr",
+            defaults={"fps": "24", "colorspace": "ACEScg"},
+        ))
+        item = mapper.build_items()[0]
+        self.assertEqual(item.fps, 24.0)
+        self.assertEqual(item.colorspace, "ACEScg")
+        self.assertEqual(item.extra_tags, {})   # not lumped in as a custom tag
+        self.assertEqual(item.metadata_defaulted, {"fps", "colorspace"})
+
+    def test_resolution_default_sets_a_string_verbatim(self):
+        mapper = FolderMapper(self.tmp)
+        mapper.add_path_pattern(PathPattern(
+            template="<sequence>/<shot>/plate.####.exr",
+            defaults={"resolution": "2048x1152"},
+        ))
+        item = mapper.build_items()[0]
+        self.assertEqual(item.resolution, "2048x1152")
+
+    def test_an_unparseable_fps_default_is_dropped_not_crashed(self):
+        mapper = FolderMapper(self.tmp)
+        mapper.add_path_pattern(PathPattern(
+            template="<sequence>/<shot>/plate.####.exr",
+            defaults={"fps": "not-a-number"},
+        ))
+        item = mapper.build_items()[0]
+        self.assertNotIn("fps", item.metadata_defaulted)
+
+
 if __name__ == "__main__":
     unittest.main()

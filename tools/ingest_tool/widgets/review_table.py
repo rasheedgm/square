@@ -11,8 +11,9 @@ from __future__ import annotations
 
 from Qt import QtCore, QtWidgets, QtGui
 
-from square_core.ingest_item import Status, Action, Severity
-from tools.qt_compat import ALIGN_CENTER, EXTENDED_SELECTION, SELECT_ROWS
+from tools.ingest_tool.core.item import Status, Action, Severity
+from tools.ingest_tool.widgets.rename_dialog import RenameCellsDialog
+from tools.qt_compat import ALIGN_CENTER, EXTENDED_SELECTION, SELECT_ITEMS
 
 ROW_HEIGHT = 28
 
@@ -20,11 +21,11 @@ ROW_HEIGHT = 28
 COLS = [
     ("", 26), ("Source", 150), ("Seq", 80), ("Shot", 90), ("Type", 90),
     ("Media", 110), ("Extra", 90), ("Destination", 220), ("Frames", 130),
-    ("FPS", 55), ("Res", 90), ("CS", 80), ("Prev", 40), ("Ver", 46),
+    ("FPS", 55), ("Res", 90), ("CS", 80), ("Prev", 40), ("→EXR", 50), ("Ver", 46),
     ("Status", 130), ("Progress", 160),
 ]
 (C_SEL, C_SRC, C_SEQ, C_SHOT, C_TYPE, C_MEDIA, C_EXTRA, C_DEST, C_FRAMES,
- C_FPS, C_RES, C_CS, C_PREV, C_VER, C_STATUS, C_PROG) = range(len(COLS))
+ C_FPS, C_RES, C_CS, C_PREV, C_CONV, C_VER, C_STATUS, C_PROG) = range(len(COLS))
 
 _EDIT_FIELD = {
     C_SEQ: "sequence_code", C_SHOT: "shot_code", C_TYPE: "media_type",
@@ -74,7 +75,10 @@ class IngestReviewTable(QtWidgets.QWidget):
         self._table = QtWidgets.QTableWidget(0, len(COLS), self)
         self._table.setHorizontalHeaderLabels([c[0] for c in COLS])
         self._table.verticalHeader().setVisible(False)
-        self._table.setSelectionBehavior(SELECT_ROWS)
+        # Cell-level (not whole-row) selection: shift/ctrl-click can pick,
+        # say, just the Colorspace cells of a few rows, for the Rename /
+        # Set Value context-menu action below.
+        self._table.setSelectionBehavior(SELECT_ITEMS)
         self._table.setSelectionMode(EXTENDED_SELECTION)
         self._table.setAlternatingRowColors(True)
         self._table.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -138,6 +142,15 @@ class IngestReviewTable(QtWidgets.QWidget):
         h.addWidget(chk)
         self._table.setCellWidget(r, C_PREV, chk_holder)
 
+        conv_holder = QtWidgets.QWidget()
+        ch = QtWidgets.QHBoxLayout(conv_holder)
+        ch.setContentsMargins(0, 0, 0, 0)
+        ch.setAlignment(ALIGN_CENTER)
+        conv_chk = QtWidgets.QCheckBox()
+        conv_chk.stateChanged.connect(lambda _s, row=r: self._on_convert_toggle(row))
+        ch.addWidget(conv_chk)
+        self._table.setCellWidget(r, C_CONV, conv_holder)
+
         status = QtWidgets.QLabel()
         status.setAlignment(ALIGN_CENTER)
         status.setContentsMargins(6, 1, 6, 1)
@@ -197,6 +210,17 @@ class IngestReviewTable(QtWidgets.QWidget):
         chk.setToolTip("Preview differs from the media-type default"
                        if item.preview_wanted != item.preview_default else "Media-type default")
         chk.blockSignals(False)
+
+        conv_holder = self._table.cellWidget(r, C_CONV)
+        conv_chk = conv_holder.findChild(QtWidgets.QCheckBox)
+        conv_chk.blockSignals(True)
+        conv_chk.setChecked(item.convert_to_exr)
+        conv_chk.setEnabled(item.is_video and not locked)
+        conv_chk.setToolTip(
+            "Decode this video to an EXR frame sequence before ingesting"
+            if item.is_video else "Only for a single video file"
+        )
+        conv_chk.blockSignals(False)
 
         self._status_label(r, item)
         self._progress_bar(r, item)
@@ -287,6 +311,13 @@ class IngestReviewTable(QtWidgets.QWidget):
         chk = holder.findChild(QtWidgets.QCheckBox)
         self.bridge.set_preview(self._rows[row], chk.isChecked())
 
+    def _on_convert_toggle(self, row: int) -> None:
+        if self._loading or row >= len(self._rows):
+            return
+        holder = self._table.cellWidget(row, C_CONV)
+        chk = holder.findChild(QtWidgets.QCheckBox)
+        self.bridge.set_convert_to_exr(self._rows[row], chk.isChecked())
+
     # ------------------------------------------------------------------
     # Selection + context menu
     # ------------------------------------------------------------------
@@ -295,8 +326,24 @@ class IngestReviewTable(QtWidgets.QWidget):
         rows = {ix.row() for ix in self._table.selectedIndexes()}
         return [self._rows[r] for r in sorted(rows) if r < len(self._rows)]
 
+    def selected_cells(self) -> list:
+        """[(item_key, attr_name), ...] for whatever cells are selected --
+        row order preserved, non-renameable columns (status, checkboxes,
+        destination, ...) silently dropped. Feeds the Rename / Set Value
+        context-menu action: shift/ctrl-click can pick e.g. just the
+        Colorspace cells of a few rows, not the whole row."""
+        out = []
+        for ix in self._table.selectedIndexes():
+            field = _EDIT_FIELD.get(ix.column())
+            if field and ix.row() < len(self._rows):
+                out.append((self._rows[ix.row()], field))
+        return out
+
     def _on_selection(self) -> None:
         self.selection_changed.emit(self.selected_keys())
+
+    def _on_rename_selected(self, cells) -> None:
+        RenameCellsDialog.rename_selected(self.bridge, cells, parent=self)
 
     def _on_context_menu(self, pos) -> None:
         keys = self.selected_keys()
@@ -317,6 +364,12 @@ class IngestReviewTable(QtWidgets.QWidget):
             for (kind, act), n in sorted(kinds.items(), key=lambda x: x[0][0].value):
                 label = f"{act.value.replace('_', ' ').title()} — {kind.value} ({n})"
                 menu.addAction(label, lambda k=kind, a=act: self.bridge.resolve_many(keys, k, a))
+            menu.addSeparator()
+
+        cells = self.selected_cells()
+        if cells:
+            menu.addAction(f"Rename / Set Value… ({len(cells)} cell(s))",
+                           lambda: self._on_rename_selected(cells))
             menu.addSeparator()
 
         any_skipped = any(it.skipped for it in items)

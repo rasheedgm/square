@@ -28,6 +28,12 @@ from square_core.paths.path_pattern import PathPattern, match_first, split_canon
 
 logger = logging.getLogger("SquareFolderMapper")
 
+# Metadata fields a Path Pattern default can also cover -- these are never
+# path-tag placeholders (there's no "<fps>" token), just a fallback value for
+# when the file's own metadata can't be read, exactly like a media_type
+# default covers a field that's never part of the path at all.
+METADATA_DEFAULT_FIELDS = ("fps", "resolution", "colorspace")
+
 
 class FolderMapper:
     """
@@ -207,6 +213,20 @@ class FolderMapper:
             m_v = re.search(r"\d+", canonical["version"])
             if m_v:
                 item.version = int(m_v.group(0))
+
+        for f in METADATA_DEFAULT_FIELDS:
+            if f not in extra:
+                continue
+            value = extra.pop(f)
+            if f == "fps":
+                try:
+                    item.fps = float(value)
+                except (TypeError, ValueError):
+                    continue
+            else:
+                setattr(item, f, value)
+            item.metadata_defaulted.add(f)
+
         if extra:
             item.extra_tags.update(extra)
 

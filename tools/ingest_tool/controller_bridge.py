@@ -109,6 +109,9 @@ class ControllerBridge(QtCore.QObject):
     def set_preview(self, key, wanted):
         self.controller.set_preview(key, wanted)
 
+    def set_convert_to_exr(self, key, wanted):
+        self.controller.set_convert_to_exr(key, wanted)
+
     def skip(self, key):
         self.controller.skip(key)
 
@@ -120,6 +123,16 @@ class ControllerBridge(QtCore.QObject):
 
     def resolve_many(self, keys, issue_kind, action):
         self.controller.resolve_many(keys, issue_kind, action)
+
+    def rename_batch(self, keys, field_name, template):
+        return self.controller.rename_batch(keys, field_name, template)
+
+    def rename_cells(self, cell_targets, template):
+        return self.controller.rename_cells(cell_targets, template)
+
+    def resolve_rename_template(self, key, template, attr=None):
+        item = self.controller.get(key)
+        return self.controller.resolve_rename_template(item, template, attr) if item else template
 
     def remove(self, key):
         self.controller.remove(key)

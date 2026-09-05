@@ -1,10 +1,13 @@
 """square_core.kitsu.KitsuApi -- unit-tested with a fake backend (no gazu)."""
 
 import unittest
+from unittest.mock import patch
 
+from square_core.kitsu import api as kitsu_api
 from square_core.kitsu.api import KitsuApi
-from square_core.kitsu import OfflineApi
+from square_core.kitsu import OfflineApi, auth as kitsu_auth
 from square_core.model import Provenance
+from square_core.errors import NeedsLogin
 
 
 class FakeBackend:
@@ -113,10 +116,24 @@ class FakeBackend:
     def get_default_task_status(self):
         return self.statuses[0]
 
+    def _task_by_id(self, tid):
+        for grid in self.tasks.values():
+            for t in grid.values():
+                if t["id"] == tid:
+                    return t
+        return None
+
+    def get_task(self, ident):
+        return self._task_by_id(ident if isinstance(ident, str) else ident.get("id"))
+
     def add_comment(self, task, status, text):
         c = {"id": self._nid("cmt"), "task_id": task["id"], "text": text,
-             "task_status": status}
+             "task_status": status, "task_status_id": status.get("id")}
         self.comments.append(c)
+        # Kitsu: every comment carries a status and posting one moves the task
+        real = self._task_by_id(task["id"])
+        if real is not None:
+            real["task_status_id"] = status.get("id")
         return c
 
     def assign_task(self, task, person):
@@ -240,6 +257,22 @@ class TestStatusAndReview(unittest.TestCase):
         api.set_status(task, "done", comment="ingested")
         self.assertEqual(api._b.comments[-1]["task_status"]["id"], "st-done")
 
+    def test_a_later_comment_from_a_stale_task_object_does_not_revert_status(self):
+        # Confirmed bug: the ingest flow set "Done", then posted a follow-up
+        # comment (and later an async review-proxy comment) built from the
+        # task object it fetched BEFORE the status change -- each carried the
+        # stale "todo" status_id and flipped the task back. _task_current_status
+        # now re-reads the live task instead of trusting the snapshot.
+        api = _api()
+        proj = api.create_project(code="ABC")
+        shot = api.ensure_shot(proj, api.ensure_sequence(proj, "S"), "SH")
+        [task] = api.ensure_tasks(shot, ["Ingest"])          # snapshot: status todo
+
+        api.set_status(task, "done", comment="Ingested Plate 'bg'")
+        api.comment(task, "Preview v001")                    # same stale `task` object
+
+        self.assertEqual(api._b.get_task(task.id)["task_status_id"], "st-done")
+
     def test_upload_preview_and_stamp_provenance(self):
         api = _api()
         proj = api.create_project(code="ABC")
@@ -313,6 +346,80 @@ class TestOffline(unittest.TestCase):
         out = api.record_output_file(shot, "Plate", tasks[0], revision=1, path="X:/nas/p.exr")
         self.assertEqual(out.path, "X:/nas/p.exr")
         api.set_status(tasks[0], "Done")  # no-op, no raise
+
+
+class TestConnect(unittest.TestCase):
+    """
+    Confirmed bug: a cached session that gazu's server rejects (expired past
+    refresh, revoked, or just malformed) surfaced as a raw gazu exception
+    (e.g. NotAuthenticatedException, or even ParameterException for a
+    malformed-token 400) instead of NeedsLogin -- so a tool's `except
+    NeedsLogin: show the login dialog` never triggered, and the failure was
+    either an unhandled crash or (ingest_tool) a silent fall-through to
+    offline mode with no way to re-authenticate. connect() now verifies the
+    cached token by calling current_user() and treats any gazu-side failure
+    there the same as no token at all.
+    """
+
+    def test_raises_needs_login_when_there_is_no_cached_session(self):
+        with patch.object(kitsu_auth, "cached_session", return_value=None):
+            with self.assertRaises(NeedsLogin):
+                kitsu_api.connect("http://example.test")
+
+    def test_raises_needs_login_when_the_cached_token_is_rejected_by_the_server(self):
+        import gazu.exception
+
+        class _RejectingBackend:
+            def __init__(self, host):
+                pass
+
+            def attach(self, session, on_refresh=None):
+                return self
+
+            def current_user(self):
+                raise gazu.exception.NotAuthenticatedException("auth/authenticated")
+
+        with patch.object(kitsu_auth, "cached_session", return_value={"access_token": "stale"}), \
+             patch("square_core.kitsu._gazu.GazuBackend", _RejectingBackend):
+            with self.assertRaises(NeedsLogin):
+                kitsu_api.connect("http://example.test")
+
+    def test_a_malformed_400_response_is_also_treated_as_needs_login(self):
+        # The real-world case that slipped through: a bad/garbage token can
+        # get a 400 (ParameterException) from Zou instead of a clean 401.
+        import gazu.exception
+
+        class _MalformedTokenBackend:
+            def __init__(self, host):
+                pass
+
+            def attach(self, session, on_refresh=None):
+                return self
+
+            def current_user(self):
+                raise gazu.exception.ParameterException(
+                    "auth/authenticated", "No additional information")
+
+        with patch.object(kitsu_auth, "cached_session", return_value={"access_token": "garbage"}), \
+             patch("square_core.kitsu._gazu.GazuBackend", _MalformedTokenBackend):
+            with self.assertRaises(NeedsLogin):
+                kitsu_api.connect("http://example.test")
+
+    def test_returns_an_api_when_the_cached_token_is_valid(self):
+        class _WorkingBackend:
+            def __init__(self, host):
+                pass
+
+            def attach(self, session, on_refresh=None):
+                return self
+
+            def current_user(self):
+                return {"id": "u1", "email": "a@b.com", "full_name": "A B"}
+
+        with patch.object(kitsu_auth, "cached_session", return_value={"access_token": "good"}), \
+             patch("square_core.kitsu._gazu.GazuBackend", _WorkingBackend):
+            result = kitsu_api.connect("http://example.test")
+        self.assertIsInstance(result, KitsuApi)
 
 
 if __name__ == "__main__":

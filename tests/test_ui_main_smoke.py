@@ -1,7 +1,8 @@
 """
 Headless smoke test for the rebuilt MainWindow: it constructs, loads a
 delivery through the folder-tree signal path, pre-flights, and ingests --
-with Kitsu and the NAS faked out. Guards the wiring, not the pixels.
+against a PipelineContext backed by the in-memory tracking Kitsu fake and a
+real (tmp) NAS root. Guards the wiring, not the pixels.
 """
 
 import shutil
@@ -12,8 +13,24 @@ from unittest.mock import patch
 
 from Qt import QtCore, QtWidgets
 
-from square_core.ingest_item import Status
-from tests.test_ingest_controller import FakeNAS, FakeRecorder, FakeProxyGen, FakeExtractor
+from square_core.context import PipelineContext
+from square_core.config.pipeline import PipelineConfig
+from square_core.services import projects as projects_service
+from square_core.services.projects import ProjectSpec
+
+from tools.ingest_tool.core.item import Status
+from tests.test_ingest_controller import _TrackingKitsu
+
+
+class _FakeExtractor:
+    """Stands in for square_core.media.metadata.MetadataExtractor -- the
+    smoke test's frame files are junk bytes, not real .exr data, so the
+    real extractor would find nothing and leave every item Needs Info."""
+
+    @staticmethod
+    def probe(path):
+        return ({"resolution": "1920x1080", "fps": 24.0, "colorspace": "ACEScg",
+                 "width": 1920, "height": 1080}, "fake")
 
 
 def _make_delivery(root: Path):
@@ -27,6 +44,14 @@ def _make_delivery(root: Path):
     return files
 
 
+def _build_ctx(nas_root: str, code="SHW") -> PipelineContext:
+    cfg = PipelineConfig(nas_roots={"default": nas_root})
+    api = _TrackingKitsu()
+    ctx = PipelineContext(config=cfg, kitsu=api, user=api.current_user())
+    projects_service.create(ctx, ProjectSpec(code=code, fps=24.0))
+    return ctx
+
+
 class MainWindowSmoke(unittest.TestCase):
     def setUp(self):
         self.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
@@ -35,10 +60,12 @@ class MainWindowSmoke(unittest.TestCase):
         self.delivery = self.tmp / "deliver"
         self.delivery.mkdir()
         _make_delivery(self.delivery)
+        self.nas = self.tmp / "nas"
 
-        # no Kitsu, and never pop the "resume last session?" dialog (it's modal
-        # and would deadlock a headless run -- the real MainWindow keeps it)
-        self.p_conn = patch("tools.ingest_tool.ui_main.MainWindow._connect_kitsu", return_value=False)
+        # a fresh PipelineContext per window, and never pop the "resume last
+        # session?" dialog (it's modal and would deadlock a headless run)
+        self.p_conn = patch("tools.ingest_tool.ui_main.MainWindow._connect",
+                             side_effect=lambda: _build_ctx(str(self.nas)))
         self.p_resume = patch("tools.ingest_tool.ui_main.MainWindow._offer_resume")
         self.p_conn.start(); self.p_resume.start()
         self.addCleanup(self.p_conn.stop); self.addCleanup(self.p_resume.stop)
@@ -46,18 +73,9 @@ class MainWindowSmoke(unittest.TestCase):
         from tools.ingest_tool.ui_main import MainWindow
         self.win = MainWindow()
         self.addCleanup(self.win.close)
-        # keep everything inside tmp -- no writes to the real configured NAS
-        self.win.config.nas_root = str(self.tmp / "nas")
-        self.win.project_data = {"id": "p1", "name": "Show", "code": "SHW"}
+        self.win.pctx = self.win.ctx.project("SHW")
         self.win._rebuild_controller()
-        self._swap_fakes()
-
-    def _swap_fakes(self):
-        c = self.win.controller
-        c.nas = FakeNAS(self.tmp / "nas")
-        c.recorder = FakeRecorder()
-        c.proxy_generator = FakeProxyGen()
-        c.extractor = FakeExtractor()
+        self.win.controller.extractor = _FakeExtractor()
 
     def _wait_job(self, timeout=5000):
         loop = QtCore.QEventLoop()
@@ -67,7 +85,7 @@ class MainWindowSmoke(unittest.TestCase):
 
     def test_window_builds_offline(self):
         self.assertFalse(self.win.is_kitsu_live)
-        self.assertIn("Offline", self.win.kitsu_lbl.text())
+        self.assertIn("Offline", self.win.user_lbl.text())
 
     def test_load_then_preflight_populates_table(self):
         self.win._on_load_requested(str(self.delivery), None, None, False)
@@ -111,24 +129,20 @@ class MainWindowSmoke(unittest.TestCase):
         self.win._write_session()
         self.assertTrue(Path(sess_path).exists())
 
-        # fresh window, resume
-        from tools.ingest_tool.ui_main import MainWindow
-        win2 = MainWindow()
-        win2.config.nas_root = str(self.tmp / "nas")
+        # fresh window, resume -- same PipelineContext backing (same nas/kitsu)
+        # so the resumed session's project code can reconnect
+        with patch("tools.ingest_tool.ui_main.MainWindow._connect",
+                   side_effect=lambda: _build_ctx(str(self.nas))), \
+             patch("tools.ingest_tool.ui_main.MainWindow._offer_resume"):
+            from tools.ingest_tool.ui_main import MainWindow
+            win2 = MainWindow()
         self.addCleanup(win2.close)
         win2._resume(sess_path)
-        self._swap_on(win2)
         self._wait_job_on(win2)
 
         self.assertEqual(win2.folder_tree.root_path, str(self.delivery))
         self.assertGreater(win2.folder_tree._tree.topLevelItemCount(), 0)
         self.assertEqual(win2.table._table.rowCount(), n_rows)
-
-    def _swap_on(self, w):
-        w.controller.nas = FakeNAS(self.tmp / "nas")
-        w.controller.recorder = FakeRecorder()
-        w.controller.proxy_generator = FakeProxyGen()
-        w.controller.extractor = FakeExtractor()
 
     def _wait_job_on(self, w):
         loop = QtCore.QEventLoop()

@@ -50,6 +50,22 @@ class TestIdentity(unittest.TestCase):
         self.assertEqual(it.extra_tags, {"camera": "A"})
         self.assertEqual(it.key, IngestItem.compute_key(["/d/a.1001.exr"]))
 
+    def test_from_scan_item_copies_pattern_defaulted_metadata_as_verified(self):
+        class Scan:
+            name = "a"; files = ["/d/a.1001.exr"]; ext = ".exr"; is_video = False
+            sequence_code = "SQ010"; shot_code = "SH0100"
+            media_type = "Plate"; media_name = "bg"; version = 1
+            extra_tags = {}
+            start_frame = 1001; end_frame = 1001; missing_frames = []; frame_count = 1
+            fps = 24.0; colorspace = "ACEScg"
+            metadata_defaulted = {"fps", "colorspace"}
+        it = IngestItem.from_scan_item(Scan())
+        self.assertEqual(it.fps, 24.0)
+        self.assertEqual(it.colorspace, "ACEScg")
+        self.assertTrue(it.metadata_verified["fps"])
+        self.assertTrue(it.metadata_verified["colorspace"])
+        self.assertNotIn("resolution", it.metadata_verified)   # not defaulted, untouched
+
 
 class TestProbeMetadata(unittest.TestCase):
     class _FakeExtractor:
@@ -83,6 +99,25 @@ class TestProbeMetadata(unittest.TestCase):
         it.probe_metadata(self._FakeExtractor({}, backend=None))
         self.assertFalse(any(it.metadata_verified.values()))
         self.assertEqual(it.metadata_backend, "")
+
+    def test_a_pattern_default_survives_a_failed_real_extraction(self):
+        # Priority: real extraction > Path Pattern default > blank/needs-info.
+        # A default pre-fills metadata_verified=True; probe_metadata's own
+        # "not found" branch uses setdefault, so it must not clobber that.
+        it = _item(preflight_done=False)
+        it.fps = 24.0
+        it.metadata_verified = {"fps": True}
+        it.probe_metadata(self._FakeExtractor({"resolution": "1920x1080"}))
+        self.assertEqual(it.fps, 24.0)
+        self.assertTrue(it.metadata_verified["fps"])
+
+    def test_a_real_extraction_still_overrides_a_pattern_default(self):
+        it = _item(preflight_done=False)
+        it.fps = 24.0
+        it.metadata_verified = {"fps": True}
+        it.probe_metadata(self._FakeExtractor({"fps": 23.976}))
+        self.assertEqual(it.fps, 23.976)
+        self.assertTrue(it.metadata_verified["fps"])
 
 
 class TestStatusDerivation(unittest.TestCase):

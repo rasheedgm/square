@@ -69,7 +69,8 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
             version: int | None = None, media_info=None, inputs=(),
             transfer_mode: str = "copy", make_review_proxy: bool | None = None,
             proxy_dry_run: bool = False, comment: str = "",
-            source_workfile_id: str = "", dry_run: bool = False) -> MediaResult:
+            source_workfile_id: str = "", dry_run: bool = False,
+            pool=None, progress=None, preview_pool=None) -> MediaResult:
     files = [str(f) for f in files]
     if not files:
         raise ValueError("media.publish: no files")
@@ -102,8 +103,18 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
              if Path(s).resolve() != Path(d).resolve()]
     if pairs:
         workers = pctx.config.copy_workers
-        rs = transfer.transfer_sequence(pairs, mode=transfer_mode, workers=workers)
-        result.checksums = {r.dest: r.hash for r in rs if r.hash}
+        # `pool`/`progress` let a caller doing many concurrent publishes (the
+        # ingest tool ingesting a whole batch) share ONE pool across every
+        # item's transfer -- cap total concurrent file copies at `workers`
+        # instead of each publish() call spinning up its own -- and get
+        # per-file progress for its UI.
+        rs = transfer.transfer_sequence(pairs, mode=transfer_mode, workers=workers,
+                                        pool=pool, progress=progress)
+        # keyed by the OS-normalized path on both sides: TransferResult.dest
+        # is str(Path(...)) (native separators), but dest_files[i] above was
+        # built with a literal "/" join -- a plain string-equality lookup
+        # would silently miss on Windows and leave checksum "" forever.
+        result.checksums = {str(Path(r.dest)): r.hash for r in rs if r.hash}
         result.copied = True
 
     prov = Provenance(
@@ -116,7 +127,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         task_type=_task_name(task), output_type=media_type, representation=rep,
         name=name, version=rev, recorded_at=_now(),
         recorded_by=getattr(pctx.pipeline.user, "email", ""),
-        checksum=result.checksums.get(dest_files[0], ""),
+        checksum=result.checksums.get(str(Path(dest_files[0])), ""),
         resolution=getattr(media_info, "resolution", "") if media_info else "",
         fps=getattr(media_info, "fps", None) if media_info else None,
         colorspace=(getattr(media_info, "colorspace", "") if media_info else "")
@@ -141,15 +152,33 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
     result.record = rec
 
     if entry.get("previewable") and make_review_proxy is not False:
-        try:
-            result.preview = _review_proxy(pctx, task, files, dest_dir, rev, name,
-                                           media_info, proxy_dry_run)
-            if result.preview:
-                pctx.kitsu.set_main_preview(result.preview)
-                pctx.kitsu.stamp_provenance(result.preview, prov, on="preview")
-        except Exception as e:
-            logger.warning("review proxy for %s %s v%03d failed: %s",
-                           media_type, name, rev, e)
+        def _do_preview():
+            return make_review_proxy_for(
+                pctx, entity, media_type, task, files=files, name=name,
+                version=rev, media_info=media_info, dest_dir=dest_dir,
+                provenance=prov, dry_run=proxy_dry_run,
+            )
+
+        if preview_pool is not None:
+            # Encoding + upload can be slow; a caller ingesting many items at
+            # once (the ingest tool) wants the row done the moment files are
+            # verified + Kitsu has the version, with the preview trickling in
+            # behind on its own pool -- same as the review proxy never being
+            # on this function's own critical path otherwise.
+            def _job():
+                try:
+                    return _do_preview()
+                except Exception as e:
+                    logger.warning("review proxy for %s %s v%03d failed: %s",
+                                   media_type, name, rev, e)
+                    return None
+            result.preview_future = preview_pool.submit(_job)
+        else:
+            try:
+                result.preview = _do_preview()
+            except Exception as e:
+                logger.warning("review proxy for %s %s v%03d failed: %s",
+                               media_type, name, rev, e)
 
     return result
 
@@ -168,3 +197,33 @@ def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run):
     is_video = len(files) == 1 and not any(c.isdigit() for c in Path(files[0]).stem[-6:])
     path = make_proxy(files, proxy, fps=float(fps), is_video=is_video, dry_run=dry_run)
     return pctx.kitsu.upload_preview(task, path, comment=f"Preview v{rev:03d}")
+
+
+def make_review_proxy_for(pctx, entity, media_type: str, task, *, files, name: str = "main",
+                          version: int, media_info=None, dest_dir: str = "",
+                          provenance=None, dry_run: bool = False):
+    """Encode + upload the review proxy for a media that is ALREADY published
+    -- the ingest tool resuming a session whose previews hadn't finished, a
+    tool re-rendering a broken proxy. The Kitsu version already exists; this
+    only produces the MP4, uploads it to `task`, sets it as `entity`'s main
+    preview, and (when `provenance` is given) stamps it. `publish()` runs the
+    exact same path for a fresh publish. Returns the preview record or None."""
+    entry = pctx.paths.media_entry(media_type)
+    if not entry.get("previewable"):
+        return None
+    files = [str(f) for f in files]
+    if not files:
+        return None
+    if not dest_dir:
+        coords = _entity_coords(entity)
+        ext = Path(files[0]).suffix.lstrip(".")
+        rep = entry.get("representation") or ext
+        ctx = pctx.ctx(**coords, task=_task_name(task), name=name, version=version,
+                       representation=rep, ext=ext)
+        dest_dir = pctx.paths.media_dir(media_type, ctx)
+    preview = _review_proxy(pctx, task, files, dest_dir, version, name, media_info, dry_run)
+    if preview:
+        pctx.kitsu.set_main_preview(preview)
+        if provenance is not None:
+            pctx.kitsu.stamp_provenance(preview, provenance, on="preview")
+    return preview

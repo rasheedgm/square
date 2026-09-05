@@ -73,21 +73,23 @@ schema.register("media_types", "media_type_registry", scope="both", default={})
 schema.register("colorspace.working", "str", scope="project", default="ACEScg")
 ```
 
-A **tool** registers its own keys at import, namespaced `tools.<tool>.<key>`:
+A **tool** registers its own keys at import, namespaced `tools.<tool>.<key>`.
+The ingest tool's live set (`tools/ingest_tool/core/config_keys.py`, imported
+from `core/__init__.py` and re-imported by the config editor so the admin
+sees them regardless of which tool is running):
 
 ```python
-# tools/ingest_tool/core/__init__.py
-schema.register("tools.ingest.copy_workers", "int", scope="project", default=4,
-                minimum=1, maximum=32, description="parallel file copies")
-schema.register("tools.ingest.transfer_mode", "enum", scope="project",
+schema.register("tools.ingest.task_types", "list", item_kind="str", scope="both",
+                default=["Ingest", "Prep", "Roto", "Matchmove", "Comp"])
+schema.register("tools.ingest.task_status", "str", scope="both", default="Done")
+schema.register("tools.ingest.transfer_mode", "enum", scope="both",
                 default="copy", choices=("copy", "hardlink", "symlink"))
 ```
 
-`copy_workers` here is illustrative only — the real one is a **core** key
-(`square_core/config/schema.py`, top-level `copy_workers`) because
-`services.media.publish` uses it for every transfer, not just ingest's. A
-tool never registers its own "which media types do I offer" list either — see
-§3.1.
+`copy_workers` is **not** an ingest key — it's a **core** top-level key
+(`square_core/config/schema.py`) because `services.media.publish` uses it for
+every transfer, not just ingest's. A tool never registers its own "which
+media types do I offer" list either — see §3.1.
 
 ### 3.1 Absence means "use the code default," not "invalid"
 

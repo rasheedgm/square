@@ -132,13 +132,20 @@ def _compile_segment(segment_template: str):
 class PathPattern:
     """One saved full-path template, compiled lazily on first match."""
 
-    def __init__(self, template="", name=""):
+    def __init__(self, template="", name="", defaults=None):
         self.template = template or ""
         self.name = name or self.template
+        # value to use for a token this pattern doesn't capture at all for a
+        # given path -- e.g. every delivery under this root is "Plate" even
+        # though the folder structure never spells out a media-type segment
+        self.defaults = dict(defaults or {})
         self._compiled = None
 
     def to_dict(self):
-        return {"name": self.name, "template": self.template}
+        d = {"name": self.name, "template": self.template}
+        if self.defaults:
+            d["defaults"] = dict(self.defaults)
+        return d
 
     @classmethod
     def from_dict(cls, data):
@@ -146,7 +153,8 @@ class PathPattern:
             return cls(template=data)
         if not data:
             return cls(template="")
-        return cls(template=data.get("template", ""), name=data.get("name", ""))
+        return cls(template=data.get("template", ""), name=data.get("name", ""),
+                   defaults=data.get("defaults") or {})
 
     def _compile(self):
         if self._compiled is None:
@@ -178,6 +186,8 @@ class PathPattern:
                 return None
             for group_name, display_name in names:
                 extracted[display_name] = m.group(group_name)
+        for token, value in self.defaults.items():
+            extracted.setdefault(token, value)
         return extracted
 
 

@@ -1,9 +1,8 @@
 """Provenance -- the self-describing "where did this come from / where did it
 land" record stamped onto a Kitsu record whenever the pipeline writes media.
 
-Generalises the ingest tool's `PreviewMetadata`: ingest, publish, and delivery
-all stamp one of these so a later tool can fetch a file / preview and get back,
-in the same object, the full trail.
+Ingest, publish, and delivery all stamp one of these so a later tool can fetch
+a file / preview and get back, in the same object, the full trail.
 
 Zou's file / preview / entity models have no columns for any of this and drop
 unknown top-level keys on update -- the only writable free-form field is

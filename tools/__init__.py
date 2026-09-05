@@ -1,3 +1,0 @@
-"""
-Square Tools Package
-"""

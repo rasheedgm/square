@@ -104,7 +104,7 @@ ingest domain (`ingest_item`, `ingest_controller`, `preflight`, `folder_mapper`,
 slice is promoted to `square_core/services/ingest.py` **when vendor-QC (tool #8)
 actually needs it**.
 
-This is the same discipline `decisions.md` already states for `PreviewMetadata`
+This is the same discipline `decisions.md` already states for `Provenance`
 and the ledger: build for one, promote on the second.
 
 ---
@@ -142,7 +142,7 @@ mandatory abstraction — don't build one where a dict is clearer.
 | `EntityRef(type, id, code?)` | lightweight handle passed around instead of full entities |
 | `Version(number, minor=0)` | `v003`, `v003.02`; formatting + compare live here |
 | `MediaInfo` | resolution, fps, colorspace, frame_range, missing_frames, timecode — *(exists as metadata_extractor output)* |
-| `Provenance` | source path/file, dest path/file, checksum(+algo), transfer_mode, who, when, batch_id — generalization of today's `PreviewMetadata` |
+| `Provenance` | source path/file, dest path/file, checksum(+algo), transfer_mode, who, when, batch_id — one record for ingest / publish / delivery |
 | `PathContext` | the field bag every path template consumes (project code, seq, shot, task, type, name, version, ext, frame, resolution, site) |
 
 Operation results are their own small dataclasses (`ProjectCreated`,

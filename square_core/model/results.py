@@ -31,6 +31,8 @@ class MediaResult:
     preview: PreviewMedia | None = None
     checksums: dict = field(default_factory=dict)     # dest file -> hash
     copied: bool = False                              # False = files were already in place
+    preview_future: object = None                     # set instead of `preview` when
+                                                       # publish(preview_pool=...) deferred it
 
 
 # kept as an alias so existing `work.publish_output` callers don't break

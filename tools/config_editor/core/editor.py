@@ -24,6 +24,11 @@ from typing import Any
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError, schema
 from square_core.config.project import DEFAULT_PROJECT_CONFIG, _deep_merge
 
+# Each installed tool registers its own `tools.<tool>.*` keys at import; the
+# editor is the one place that needs them ALL present, whether or not that
+# tool is the one running. Add a line here when a new tool ships config keys.
+import tools.ingest_tool.core.config_keys  # noqa: F401,E402
+
 ADMIN_ROLES = {"admin", "manager"}
 
 _MISSING = object()

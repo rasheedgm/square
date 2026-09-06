@@ -31,16 +31,30 @@ def connect(host: str, *, session: dict | None = None) -> "KitsuApi":
     """Attach to Kitsu using `session` or a cached one. Raises `NeedsLogin`
     if there is nothing usable -- the tool prompts and calls `auth.login`.
     gazu auto-refreshes an expired access token on the fly; the rotated token
-    is written back to the cache."""
+    is written back to the cache.
+
+    A *present* cached token is not necessarily a *valid* one (expired past
+    refresh, revoked server-side, or just malformed) -- gazu then raises its
+    own exception (e.g. NotAuthenticatedException, or even ParameterException
+    for a malformed-token 400) straight out of the attach/verify call. Any
+    such failure is a login problem exactly like a missing token, so it's
+    raised as NeedsLogin too -- callers only ever need to catch the one
+    exception to know when to prompt."""
     session = session or _auth.cached_session(host)
     if not session or not session.get("access_token"):
         raise NeedsLogin(host)
     from ._gazu import GazuBackend
+    import gazu.exception
 
     backend = GazuBackend(host).attach(
         session, on_refresh=lambda t: _auth.store_session(host, t)
     )
-    return KitsuApi(backend, host=host)
+    api = KitsuApi(backend, host=host)
+    try:
+        api.current_user()   # verifies the cached token actually still works
+    except gazu.exception.GazuException as e:
+        raise NeedsLogin(host) from e
+    return api
 
 
 class KitsuApi:
@@ -301,8 +315,20 @@ class KitsuApi:
     # ---- internals ---------------------------------
 
     def _task_current_status(self, task):
-        raw = getattr(task, "raw", None) or (task if isinstance(task, dict) else {})
-        sid = raw.get("task_status_id")
+        # Re-read the task, not the caller's snapshot: every comment carries
+        # a status and posting one with a stale status_id silently reverts
+        # the task (the ingest flow set "Done", then its own follow-up
+        # comment + the async preview comment -- both built from the
+        # pre-"Done" task object -- flipped it back to "Todo").
+        sid = ""
+        try:
+            fresh = self._b.get_task(_id(task))
+            sid = (fresh or {}).get("task_status_id", "")
+        except Exception:
+            pass
+        if not sid:
+            raw = getattr(task, "raw", None) or (task if isinstance(task, dict) else {})
+            sid = raw.get("task_status_id")
         if not sid:
             return None
         for s in self._b.all_task_statuses():

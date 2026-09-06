@@ -14,3 +14,5 @@ dependencies:
     - imageio-ffmpeg
     - keyring
     - pyyaml
+    - Qt.py
+    - PySide6

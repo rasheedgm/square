@@ -203,5 +203,38 @@ class TestSeedFilenameSegment(unittest.TestCase):
         self.assertEqual(seed_filename_segment(item), "final_final2.mov")
 
 
+class TestPatternDefaults(unittest.TestCase):
+    """A pattern can declare a default for a token it never captures at all --
+    e.g. every delivery under this root is a Plate even though the folder
+    structure has no <media_type> segment to tag it from."""
+
+    def test_default_fills_a_token_the_template_never_captures(self):
+        pattern = PathPattern(template="<sequence>/<shot>/<media_name>.####.<extension>",
+                              defaults={"media_type": "Plate"})
+        extracted = pattern.match("SQ010/SH0100/comp.1001.exr")
+        self.assertEqual(extracted["media_type"], "Plate")
+        self.assertEqual(extracted["sequence"], "SQ010")
+
+    def test_default_does_not_override_a_captured_value(self):
+        pattern = PathPattern(
+            template="<sequence>/<shot>/<media_type>/<media_name>.####.<extension>",
+            defaults={"media_type": "Plate"})
+        extracted = pattern.match("SQ010/SH0100/Ref/comp.1001.exr")
+        self.assertEqual(extracted["media_type"], "Ref")
+
+    def test_defaults_round_trip_through_to_dict_from_dict(self):
+        pattern = PathPattern(template="<shot>/<media_name>.####.<extension>",
+                              defaults={"media_type": "Plate", "sequence": "SQ010"})
+        restored = PathPattern.from_dict(pattern.to_dict())
+        self.assertEqual(restored.defaults, {"media_type": "Plate", "sequence": "SQ010"})
+
+    def test_no_defaults_key_when_none_set(self):
+        self.assertNotIn("defaults", PathPattern(template="<shot>/x").to_dict())
+
+    def test_plain_string_or_dict_without_defaults_still_loads(self):
+        self.assertEqual(PathPattern.from_dict("<shot>/x").defaults, {})
+        self.assertEqual(PathPattern.from_dict({"template": "<shot>/x"}).defaults, {})
+
+
 if __name__ == "__main__":
     unittest.main()

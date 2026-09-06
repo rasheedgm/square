@@ -19,8 +19,6 @@ from square_core import __version__
 from square_core.context import PipelineContext
 from square_core.config import PipelineConfig
 from square_core.errors import NeedsLogin
-from square_core.services import projects as projects_service
-from square_core.services.projects import ProjectSpec
 from square_core.media.scanner import PlateScanner
 
 from tools.qt_compat import (FONT_BOLD, ORIENTATION_HORIZONTAL, DIALOG_ACCEPTED,
@@ -41,48 +39,6 @@ from tools.ingest_tool.widgets.results_dialog import DryRunResultsDialog
 logger = logging.getLogger("IngestMainUI")
 
 _DEFAULT_TASK_TYPES = ["Ingest", "Prep", "Roto", "Matchmove", "Comp"]
-
-
-class CreateProjectDialog(QtWidgets.QDialog):
-    """Create a new project -- one call, `services.projects.create`: the
-    Kitsu project, its file_tree, `project_config.json`, and the folder
-    skeleton, together."""
-
-    def __init__(self, ctx: PipelineContext, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Create New Project")
-        self.setMinimumWidth(380)
-        self._ctx = ctx
-        self.created_code: str | None = None
-
-        form = QtWidgets.QFormLayout(self)
-        self.name_edit = QtWidgets.QLineEdit()
-        self.code_edit = QtWidgets.QLineEdit()
-        self.err = QtWidgets.QLabel()
-        self.err.setStyleSheet("color:#F87171;")
-        form.addRow("Project Name:", self.name_edit)
-        form.addRow("Project Code:", self.code_edit)
-        form.addRow("", self.err)
-
-        btns = QtWidgets.QHBoxLayout()
-        ok = QtWidgets.QPushButton("Create")
-        ok.clicked.connect(self._create)
-        cancel = QtWidgets.QPushButton("Cancel")
-        cancel.clicked.connect(self.reject)
-        btns.addStretch(); btns.addWidget(cancel); btns.addWidget(ok)
-        form.addRow(btns)
-
-    def _create(self):
-        name = self.name_edit.text().strip()
-        code = self.code_edit.text().strip().upper()
-        if not (name and code):
-            return
-        try:
-            projects_service.create(self._ctx, ProjectSpec(code=code, name=name))
-            self.created_code = code
-            self.accept()
-        except Exception as e:
-            self.err.setText(f"Failed: {e}")
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -175,9 +131,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.project_combo.currentIndexChanged.connect(self._on_project_changed)
         tl.addWidget(self.project_combo)
 
-        self.new_proj_btn = QtWidgets.QPushButton("+ New")
-        self.new_proj_btn.clicked.connect(self._on_new_project)
-        tl.addWidget(self.new_proj_btn)
         refresh = QtWidgets.QPushButton("↻")
         refresh.clicked.connect(self._load_projects)
         tl.addWidget(refresh)
@@ -379,14 +332,6 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self._rebuild_controller()
         self._update_summary()
-
-    def _on_new_project(self):
-        if not self.is_kitsu_live:
-            QtWidgets.QMessageBox.information(self, "New Project", "Kitsu is offline.")
-            return
-        dlg = CreateProjectDialog(self.ctx, self)
-        if exec_dialog(dlg) == DIALOG_ACCEPTED and dlg.created_code:
-            self._load_projects()
 
     # ------------------------------------------------------------------
     # Loading media

@@ -201,6 +201,8 @@ class BreakdownPane(QtWidgets.QWidget):
         parse_btn.clicked.connect(self._parse)
         add_row_btn = QtWidgets.QPushButton("+ Row")
         add_row_btn.clicked.connect(lambda: self._append_row(BreakdownRow("", "")))
+        del_row_btn = QtWidgets.QPushButton("− Row")
+        del_row_btn.clicked.connect(self._remove_selected_rows)
         clear_btn = QtWidgets.QPushButton("Clear")
         clear_btn.clicked.connect(lambda: (self.table.setRowCount(0), self._revalidate()))
 
@@ -217,6 +219,7 @@ class BreakdownPane(QtWidgets.QWidget):
         tools_row = QtWidgets.QHBoxLayout()
         tools_row.addWidget(parse_btn)
         tools_row.addWidget(add_row_btn)
+        tools_row.addWidget(del_row_btn)
         tools_row.addWidget(clear_btn)
         tools_row.addStretch(1)
 
@@ -296,6 +299,16 @@ class BreakdownPane(QtWidgets.QWidget):
         status = QtWidgets.QTableWidgetItem("")
         status.setFlags(status.flags() & ~ITEM_IS_EDITABLE)
         self.table.setItem(row, 5, status)
+        self.table.blockSignals(False)
+        self._revalidate()
+
+    def _remove_selected_rows(self):
+        rows = sorted({ix.row() for ix in self.table.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        self.table.blockSignals(True)
+        for r in rows:
+            self.table.removeRow(r)
         self.table.blockSignals(False)
         self._revalidate()
 

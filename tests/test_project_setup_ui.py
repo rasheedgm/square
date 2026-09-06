@@ -76,8 +76,25 @@ class TestProjectSetupUI(unittest.TestCase):
             self.assertTrue(bp.apply_btn.isEnabled())
             self.assertIn("2 shot", bp.apply_btn.text())
             bp._apply()
-            self.assertEqual({s.code for s in win.admin.existing_shots("ABC")},
-                             {"SH0100", "SH0110"})
+            shots = win.admin.existing_shots("ABC")
+            self.assertEqual({s.code for s in shots}, {"SH0100", "SH0110"})
+            self.assertEqual({s.sequence_code for s in shots}, {"SQ010"})
+            # the existing-breakdown tree groups them under the sequence
+            self.assertEqual(bp.existing.topLevelItem(0).text(0), "SQ010")
+
+    def test_breakdown_remove_row(self):
+        from tools.project_setup.ui_main import MainWindow
+        with tempfile.TemporaryDirectory() as td:
+            win = MainWindow(self._admin(td))
+            win.project_combo.setCurrentIndex(1)
+            bp = win.breakdown_pane
+            bp.paste.setPlainText("SQ010 SH0100\nSQ010 SH0110\nSQ010 SH0120")
+            bp._parse()
+            bp.table.selectRow(1)
+            bp._remove_selected_rows()
+            self.assertEqual(bp.table.rowCount(), 2)
+            self.assertEqual({bp.table.item(r, 1).text() for r in range(2)},
+                             {"SH0100", "SH0120"})
 
     def test_roadmap_build(self):
         from tools.project_setup.ui_main import MainWindow

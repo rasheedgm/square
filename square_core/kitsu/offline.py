@@ -49,10 +49,16 @@ class OfflineApi:
     def sequences(self, project):
         return []
 
+    def episodes(self, project):
+        return []
+
     def shots(self, project):
         return []
 
     def merge_entity_data(self, entity, data):
+        pass
+
+    def merge_output_data(self, output, extra):
         pass
 
     # tasks

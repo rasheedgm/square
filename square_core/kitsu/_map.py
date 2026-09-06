@@ -7,9 +7,14 @@ objects for callers; writes take plain values, not model objects.
 from __future__ import annotations
 
 from square_core.model import (
-    User, Project, Sequence, Shot, Asset, TaskType, TaskStatus, Task,
+    User, Project, Episode, Sequence, Shot, Asset, TaskType, TaskStatus, Task,
     Workfile, Output, PreviewMedia, Comment,
 )
+
+
+def episode(d: dict) -> Episode:
+    return Episode(id=d.get("id", ""), code=d.get("name", ""),
+                   project_id=d.get("project_id", ""), raw=d)
 
 
 def user(d: dict) -> User:

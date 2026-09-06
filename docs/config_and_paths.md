@@ -62,7 +62,7 @@ never calls Kitsu, never touches disk. "Next version", "does this slot exist",
 | `{name}` | sub-identifier when an entity has **more than one** of the same type — plate `bg` / `fg`, comp `main` / `matte`. Kitsu's file `name`. Default `main`, always rendered. | `{media_name}` |
 | `{version}` | major version int, zero-padded (`version_pad`, default 3) | |
 | `{version_label}` | `v` + padded major, `+ .minor` if minor>0 (`v003`, `v003.02`) | |
-| `{minor}` | minor version, padded 2; empty if 0 | |
+| `{minor}` | minor version — empty if 0, or padded per a format spec: `{minor:03d}` → `001`. Workfile templates use `_v{version}.{minor:03d}` (minor is always ≥ 1 on a workfile; only majors reach Kitsu, minors are disk saves). | |
 | `{representation}` | `exr` `mov` `nk` `abc` — the file kind within a version | `{repr}` |
 | `{ext}` | file extension without dot | |
 | `{frame}` | frame number, padded (`frame_pad`, default 4); empty ⇒ `.{frame}`/`_{frame}` segment drops | |
@@ -139,6 +139,7 @@ every tool; never snapshotted. Every key is described in
       "kitsu_kind": "output",        // output | working
       "source": "publish",          // delivery | publish | work -- the stage the media comes from
       "previewable": false,
+      "renderable": false,          // a DCC can render this -- SquareWrite lists renderable types
       "colorspace": ""               // assumed for this type when a file doesn't declare one
     },
     "Plate":       { "source": "delivery", "dir": "plates/{name}_v{version}",    "previewable": true, "colorspace": "ACEScg" },
@@ -150,16 +151,16 @@ every tool; never snapshotted. Every key is described in
 
     "CompRender":  { "dir": "output/comp/v{version}/{representation}",
                      "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{frame}.{ext}",
-                     "previewable": true, "colorspace": "ACEScg" },
-    "Precomp":     { "dir": "output/precomp/v{version}/{representation}" },
+                     "previewable": true, "renderable": true, "colorspace": "ACEScg" },
+    "Precomp":     { "dir": "output/precomp/v{version}/{representation}", "renderable": true },
     "Cache":       { "dir": "output/cache/{name}/v{version}", "representation": "abc" },
 
     "NukeScript":  { "kitsu_kind": "working", "source": "work", "previewable": false,
                      "dir":  "work/comp/nuke",
-                     "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.nk" },
+                     "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{minor:03d}.nk" },
     "MayaScene":   { "kitsu_kind": "working", "source": "work",
                      "dir":  "work/{task}/maya",
-                     "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.ma" }
+                     "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.{minor:03d}.ma" }
   },
 
   // the folder trees `storage.layout` creates (Zou never makes folders)

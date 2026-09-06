@@ -60,6 +60,7 @@ class Provenance:
     representation: str = ""         # exr | mov | jpg ...
     name: str = "main"
     version: int = 1
+    minor: int = 0                   # workfile minor save; 0 for outputs
 
     # who / when
     recorded_at: str = ""            # ISO 8601, UTC

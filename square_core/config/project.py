@@ -76,6 +76,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
             "source": "publish",            # delivery | publish | work -- where the media comes from;
                                             #   a tool offers the types matching its stage
             "previewable": False,
+            "renderable": False,            # a DCC can render this (SquareWrite lists these)
             "colorspace": "",               # assumed for this type if a file doesn't declare one
         },
         "Plate":      {"source": "delivery", "dir": "plates/{name}_v{version}", "previewable": True, "colorspace": "ACEScg"},
@@ -88,18 +89,19 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
 
         "CompRender": {"dir": "output/comp/v{version}/{representation}",
                        "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{frame}.{ext}",
-                       "previewable": True, "colorspace": "ACEScg"},
+                       "previewable": True, "renderable": True, "colorspace": "ACEScg"},
         "Precomp":    {"dir": "output/precomp/v{version}/{representation}",
-                       "file": "{project}_{sequence}_{shot}_precomp_{name}_v{version}.{frame}.{ext}"},
+                       "file": "{project}_{sequence}_{shot}_precomp_{name}_v{version}.{frame}.{ext}",
+                       "renderable": True},
         "Cache":      {"dir": "output/cache/{name}/v{version}", "representation": "abc",
                        "file": "{project}_{sequence}_{shot}_{name}_v{version}.{frame}.{ext}"},
 
         "NukeScript": {"kitsu_kind": "working", "source": "work",
                        "dir": "work/comp/nuke",
-                       "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.nk"},
+                       "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{minor:03d}.nk"},
         "MayaScene":  {"kitsu_kind": "working", "source": "work",
                        "dir": "work/{task}/maya",
-                       "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.ma"},
+                       "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.{minor:03d}.ma"},
     },
 
     "shot_folder_structure": list(SHOT_FOLDER_STRUCTURE),

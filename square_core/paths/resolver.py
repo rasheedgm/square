@@ -116,6 +116,8 @@ def render_tokens(
             fmt = spec or f"0{version_pad}d"
             return format(int(ctx.version), fmt)
         if name == "minor":
+            if spec:
+                return format(int(ctx.minor or 0), spec)
             return f"{ctx.minor:02d}" if ctx.minor else ""
         if name == "version_label":
             lbl = f"v{ctx.version:0{version_pad}d}"

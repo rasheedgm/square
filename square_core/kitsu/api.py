@@ -143,6 +143,11 @@ class KitsuApi:
         get = getattr(self._b, "all_sequences_for_project", None)
         return [_map.sequence(s) for s in (get(_id(project)) if get else [])]
 
+    def episodes(self, project) -> list:
+        get = getattr(self._b, "all_episodes_for_project", None)
+        return [_map.episode(e) for e in (get(_id(project)) if get else [])] \
+            if get else []
+
     def shots(self, project) -> list:
         shots = [_map.shot(s) for s in self._b.all_shots_for_project(_id(project))]
         # the project-shots list route carries no sequence_name -- backfill it
@@ -349,6 +354,15 @@ class KitsuApi:
         of_id = (raw.get("file") or raw).get("id") if isinstance(raw.get("file"), dict) else raw["id"]
         updated = self._b.update_output_file(of_id, path, data)
         return _map.output(updated if isinstance(updated, dict) else {**raw, "path": path})
+
+    def merge_output_data(self, output, extra: dict) -> None:
+        """Merge `extra` into an output_file's `data['square']` blob (e.g. a
+        lock flag), keeping everything already there."""
+        data = _data_of(output)
+        sq = dict(data.get("square") or {})
+        sq.update(extra)
+        data["square"] = sq
+        self._b.update_output_file(_pid(output), _path_of(output), data)
 
     # ---- internals ---------------------------------
 

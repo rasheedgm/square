@@ -101,9 +101,10 @@ class TestMediaPath(unittest.TestCase):
             "X:/projects/ABC/shots/SQ010/SH0100/output/comp/v002")
 
     def test_workfile_media_type(self):
-        p = self.r.media_path("NukeScript", _ctx(name="main", version=3))
+        p = self.r.media_path("NukeScript", _ctx(name="main", version=3, minor=2))
         self.assertEqual(
-            p, "X:/projects/ABC/shots/SQ010/SH0100/work/comp/nuke/ABC_SQ010_SH0100_comp_main_v003.nk")
+            p, "X:/projects/ABC/shots/SQ010/SH0100/work/comp/nuke/"
+               "ABC_SQ010_SH0100_comp_main_v003.002.nk")
 
     def test_media_sequence(self):
         files = self.r.media_sequence("Plate", _ctx(name="bg", version=1, ext="exr"), [1001, 1002])

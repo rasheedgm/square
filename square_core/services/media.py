@@ -59,7 +59,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
             version: int | None = None, media_info=None, inputs=(),
             transfer_mode: str = "copy", make_review_proxy: bool | None = None,
             proxy_dry_run: bool = False, comment: str = "", software: str = "",
-            source_workfile_id: str = "", dry_run: bool = False,
+            minor: int = 0, source_workfile_id: str = "", dry_run: bool = False,
             pool=None, progress=None, preview_pool=None) -> MediaResult:
     files = [str(f) for f in files]
     if not files:
@@ -74,7 +74,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
     ext = Path(files[0]).suffix.lstrip(".")
 
     base_ctx = pctx.ctx(**coords, task=_task_name(task), name=name, version=rev,
-                        representation=rep, ext=ext, software=software)
+                        minor=minor, representation=rep, ext=ext, software=software)
 
     dest_dir = pctx.paths.media_dir(media_type, base_ctx)
     if is_seq:
@@ -115,7 +115,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         episode_code=coords.get("episode", ""), sequence_code=coords.get("sequence", ""),
         shot_code=coords.get("shot", ""), asset_code=coords.get("asset", ""),
         task_type=_task_name(task), output_type=media_type, representation=rep,
-        name=name, version=rev, recorded_at=_now(),
+        name=name, version=rev, minor=minor, recorded_at=_now(),
         recorded_by=getattr(pctx.pipeline.user, "email", ""),
         checksum=result.checksums.get(str(Path(dest_files[0])), ""),
         resolution=getattr(media_info, "resolution", "") if media_info else "",

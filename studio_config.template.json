@@ -37,6 +37,7 @@
                 "kitsu_kind": "output",
                 "source": "publish",
                 "previewable": false,
+                "renderable": false,
                 "colorspace": ""
             },
             "Plate": {
@@ -76,11 +77,13 @@
                 "dir": "output/comp/v{version}/{representation}",
                 "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{frame}.{ext}",
                 "previewable": true,
+                "renderable": true,
                 "colorspace": "ACEScg"
             },
             "Precomp": {
                 "dir": "output/precomp/v{version}/{representation}",
-                "file": "{project}_{sequence}_{shot}_precomp_{name}_v{version}.{frame}.{ext}"
+                "file": "{project}_{sequence}_{shot}_precomp_{name}_v{version}.{frame}.{ext}",
+                "renderable": true
             },
             "Cache": {
                 "dir": "output/cache/{name}/v{version}",
@@ -91,13 +94,13 @@
                 "kitsu_kind": "working",
                 "source": "work",
                 "dir": "work/comp/nuke",
-                "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.nk"
+                "file": "{project}_{sequence}_{shot}_comp_{name}_v{version}.{minor:03d}.nk"
             },
             "MayaScene": {
                 "kitsu_kind": "working",
                 "source": "work",
                 "dir": "work/{task}/maya",
-                "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.ma"
+                "file": "{project}_{sequence}_{shot}_{task}_{name}_v{version}.{minor:03d}.ma"
             }
         },
         "shot_folder_structure": [

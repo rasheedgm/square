@@ -32,8 +32,14 @@ def record_note(pctx, task, *, text: str, status: str = "", annotations=None,
     return comment
 
 
-def approve(pctx, task, *, comment: str = "Approved", status: str = "Done"):
-    return pctx.kitsu.set_status(task, status, comment=comment)
+def approve(pctx, task, *, comment: str = "Approved", status: str = "Done", output=None):
+    """Approve the task. If `output` (a published version) is given, lock it so a
+    DCC won't re-render over an approved result."""
+    res = pctx.kitsu.set_status(task, status, comment=comment)
+    if output is not None:
+        from . import work
+        work.lock_output(pctx, output, reason="approved")
+    return res
 
 
 def request_changes(pctx, task, *, comment: str = "Retake", status: str = "Retake"):

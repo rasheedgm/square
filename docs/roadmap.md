@@ -18,6 +18,7 @@ near-term task list.
   `paths/resolver` (owns all paths), `storage/transfer`+`layout`; port the
   ingest tool onto it (drop the session config snapshot)
 - **Phase B:** project-setup tool — `services/projects` + `services/breakdown`
+  *(done — `tools/project_setup/`, GUI: new project · shot breakdown · task grid)*
 - **Phase C:** work/publish core + Nuke integration
 - **Phase D:** review core + player (spike Zou annotation JSON here)
 - **Phase E:** delivery core + send-to-client

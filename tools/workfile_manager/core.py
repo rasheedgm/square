@@ -41,7 +41,7 @@ class TaskRow:
         return f"{self.sequence_code}/{self.shot_code}  ·  {self.task.task_type_name}"
 
 
-def _media_names(cfg, source: str) -> list[str]:
+def media_names(cfg, source: str) -> list[str]:
     """Configured media-type names of a given source, plus the built-ins of that
     source that a sparse project config doesn't list explicitly."""
     names = set(cfg.media_type_names())
@@ -84,10 +84,10 @@ class WorkfileHub:
     # ---- media types ----------------------------------------------
 
     def workfile_types(self, project_code: str) -> list[str]:
-        return _media_names(self._pctx(project_code).config, "work")
+        return media_names(self._pctx(project_code).config, "work")
 
     def output_types(self, project_code: str) -> list[str]:
-        return _media_names(self._pctx(project_code).config, "publish")
+        return media_names(self._pctx(project_code).config, "publish")
 
     def software_for(self, project_code: str, media_type: str) -> str:
         """A sensible default software name for a working media type."""

@@ -20,24 +20,14 @@ from pathlib import Path
 from square_core.model import MediaResult, Provenance
 from square_core.storage import transfer
 
+from ._common import entity_coords as _entity_coords
+from ._common import task_name as _task_name
+
 logger = logging.getLogger("square.services.media")
 
 
 def _now() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _entity_coords(entity) -> dict:
-    """seq/shot or asset coords from a model entity."""
-    kind = type(entity).__name__.lower()
-    if kind == "shot":
-        return {"sequence": getattr(entity, "sequence_code", "") or "",
-                "shot": getattr(entity, "code", "") or "",
-                "episode": getattr(entity, "episode_code", "") or ""}
-    if kind == "asset":
-        return {"asset": getattr(entity, "code", "") or "",
-                "asset_type": getattr(entity, "asset_type", "") or ""}
-    return {}
 
 
 def _normalize_inputs(inputs) -> list:
@@ -68,7 +58,7 @@ def list_versions(pctx, entity, media_type: str) -> list:
 def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
             version: int | None = None, media_info=None, inputs=(),
             transfer_mode: str = "copy", make_review_proxy: bool | None = None,
-            proxy_dry_run: bool = False, comment: str = "",
+            proxy_dry_run: bool = False, comment: str = "", software: str = "",
             source_workfile_id: str = "", dry_run: bool = False,
             pool=None, progress=None, preview_pool=None) -> MediaResult:
     files = [str(f) for f in files]
@@ -84,7 +74,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
     ext = Path(files[0]).suffix.lstrip(".")
 
     base_ctx = pctx.ctx(**coords, task=_task_name(task), name=name, version=rev,
-                        representation=rep, ext=ext)
+                        representation=rep, ext=ext, software=software)
 
     dest_dir = pctx.paths.media_dir(media_type, base_ctx)
     if is_seq:
@@ -140,7 +130,9 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
     if deps:
         data["square"]["inputs"] = deps
 
-    kitsu_path = dest_files[0] if is_seq else dest_dir  # a seq -> a real frame; single -> its folder
+    # a sequence -> a real frame; a single working file -> the scene file
+    # itself; a single output (a movie) -> its versioned folder
+    kitsu_path = dest_dir if (kind == "output" and not is_seq) else dest_files[0]
     if kind == "working":
         rec = pctx.kitsu.record_working_file(task, revision=rev, path=kitsu_path,
                                              name=name, software=base_ctx.software or None,
@@ -184,10 +176,6 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
 
 
 # --------------------------------------------------------------------------
-
-def _task_name(task) -> str:
-    return (getattr(task, "task_type_name", "") or "").lower() or "task"
-
 
 def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run):
     from square_core.media import make_proxy

@@ -31,9 +31,15 @@ class RecordingKitsu(OfflineApi):
 
     def record_working_file(self, task, *, revision, path, name="main", software=None, data=None):
         self.workfiles.append({"revision": revision, "path": path, "name": name,
-                               "data": data or {}})
+                               "software": software or "", "data": data or {}})
         from square_core.model import Workfile
-        return Workfile(revision=revision, path=path, name=name, data=data or {})
+        return Workfile(revision=revision, path=path, name=name,
+                        software=software or "", data=data or {})
+
+    def working_files(self, task):
+        from square_core.model import Workfile
+        return [Workfile(revision=w["revision"], path=w["path"], name=w["name"],
+                         software=w["software"], data=w["data"]) for w in self.workfiles]
 
     def record_output_file(self, entity, output_type_name, task, *, revision, path,
                            representation="", name="main", comment="", data=None):
@@ -186,6 +192,85 @@ class TestReview(unittest.TestCase):
             self.assertEqual(pctx.kitsu.previews[0]["comment"], "please review")
             self.assertIn(("fix the edge", "Retake"), pctx.kitsu.comments)
             self.assertEqual(pctx.kitsu.statuses[-1][0], "Done")
+
+
+class TestWorkfiles(unittest.TestCase):
+    def _task(self, td):
+        pctx = _pctx(td)
+        shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+        task = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+        return pctx, shot, task
+
+    def test_next_workfile_path_and_revision(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            path, rev = work.next_workfile_path(pctx, shot, task, media_type="NukeScript")
+            self.assertEqual(rev, 1)
+            self.assertTrue(path.endswith("_comp_main_v001.nk"))
+            self.assertIn("/work/comp/nuke/", path.replace("\\", "/"))
+
+    def test_new_workfile_reserves_slot_without_a_seed(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            slot = work.new_workfile(pctx, shot, task, media_type="NukeScript",
+                                     software="nuke", comment="start comp")
+            self.assertEqual(slot.revision, 1)
+            self.assertFalse(slot.seeded)
+            self.assertEqual(len(pctx.kitsu.workfiles), 1)
+            self.assertEqual(pctx.kitsu.workfiles[0]["path"], slot.path)
+            self.assertTrue(Path(slot.path).parent.is_dir())     # folder made
+            self.assertFalse(Path(slot.path).exists())           # file left to the DCC
+
+    def test_new_workfile_seeded_from_template(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            tmpl = Path(td) / "template.nk"
+            tmpl.write_text("# nuke template", encoding="utf-8")
+            slot = work.new_workfile(pctx, shot, task, media_type="NukeScript",
+                                     template=str(tmpl))
+            self.assertTrue(slot.seeded)
+            self.assertTrue(Path(slot.path).is_file())
+            self.assertEqual(Path(slot.path).read_text(encoding="utf-8"), "# nuke template")
+
+    def test_new_workfile_copies_up_from_current(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            tmpl = Path(td) / "t.nk"; tmpl.write_text("v1 content", encoding="utf-8")
+            work.new_workfile(pctx, shot, task, media_type="NukeScript", template=str(tmpl))
+            v2 = work.new_workfile(pctx, shot, task, media_type="NukeScript", from_current=True)
+            self.assertEqual(v2.revision, 2)
+            self.assertEqual(Path(v2.path).read_text(encoding="utf-8"), "v1 content")
+            self.assertNotEqual(v2.path, tmpl)
+
+    def test_versions_and_latest(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            tmpl = Path(td) / "t.nk"; tmpl.write_text("x", encoding="utf-8")
+            for _ in range(3):
+                work.new_workfile(pctx, shot, task, media_type="NukeScript", template=str(tmpl))
+            vs = work.versions(pctx, task)
+            self.assertEqual([w.revision for w in vs], [1, 2, 3])
+            self.assertEqual(work.latest(pctx, task).revision, 3)
+
+    def test_missing_seed_raises(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            with self.assertRaises(FileNotFoundError):
+                work.new_workfile(pctx, shot, task, media_type="NukeScript",
+                                  template=str(Path(td) / "nope.nk"))
+
+    def test_publish_output_records_source_workfile(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+
+            class _WF:
+                id = "wf-7"
+            exr = Path(td) / "c.1001.exr"; exr.write_bytes(b"x" * 40)
+            work.publish_output(pctx, shot, task, media_type="CompRender",
+                                frames=[str(exr)], source_workfile=_WF(),
+                                make_review_proxy=False)
+            deps = pctx.kitsu.outputs[0]["data"]["square"]["inputs"]
+            self.assertIn({"kind": "working", "id": "wf-7"}, deps)
 
 
 if __name__ == "__main__":

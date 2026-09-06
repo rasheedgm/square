@@ -100,8 +100,11 @@ class WorkfileHub:
 
     # ---- reads ---------------------------------------------------
 
-    def workfiles(self, project_code: str, task) -> list:
-        return work.versions(self._pctx(project_code), task)
+    def workfile_names(self, project_code: str, task) -> list[str]:
+        return work.workfile_names(self._pctx(project_code), task)
+
+    def workfiles(self, project_code: str, shot, task, *, name: str = "main") -> list:
+        return work.workfile_versions(self._pctx(project_code), shot, task, name=name)
 
     def outputs(self, project_code: str, shot, media_type: str) -> list:
         return work.outputs(self._pctx(project_code), shot, media_type)
@@ -133,10 +136,14 @@ class WorkfileHub:
     def launcher_for(self, project_code: str, software: str) -> str:
         return (config_keys.read(self._pctx(project_code), "launchers") or {}).get(software, "")
 
+    _EXT_SOFTWARE = {".nk": "nuke", ".ma": "maya", ".mb": "maya", ".hip": "houdini",
+                     ".hipnc": "houdini", ".blend": "blender"}
+
     def open_workfile(self, project_code: str, software: str, path: str) -> str:
         """Launch the DCC on `path` via the configured command, or fall back to
         revealing the containing folder. Returns a short description of what
         happened."""
+        software = software or self._EXT_SOFTWARE.get(Path(path).suffix.lower(), "")
         cmd = self.launcher_for(project_code, software)
         if cmd:
             parts = shlex.split(cmd, posix=(os.name != "nt"))

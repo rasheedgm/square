@@ -57,7 +57,9 @@ class TestWorkfileManagerUI(unittest.TestCase):
                 ui_main.exec_dialog = orig
             self.assertEqual(len(api.workfiles), 1)
             self.assertEqual(win.wf_table.rowCount(), 1)
+            # empty-seed: the major is reserved, no minor file on disk yet
             self.assertEqual(win.wf_table.item(0, 0).text(), "v001")
+            self.assertEqual(win.wf_table.item(0, 2).text(), "offline")
 
     def test_publish_output_flow(self):
         from tools.workfile_manager import ui_main

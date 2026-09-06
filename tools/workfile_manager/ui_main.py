@@ -261,7 +261,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _build_right_panel(self) -> QtWidgets.QWidget:
         self.task_header = _bold(QtWidgets.QLabel("Pick a task"))
 
-        self.wf_table = _ro_table(["v", "software", "comment", "file"])
+        self.wf_table = _ro_table(["version", "minors", "status", "comment"])
         self.new_btn = QtWidgets.QPushButton("New Version…")
         self.new_btn.clicked.connect(self._new_workfile)
         self.open_btn = QtWidgets.QPushButton("Open")
@@ -385,16 +385,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._task:
             return
         with _wait():
-            wfs = self.hub.workfiles(self._project, self._task)
-        for w in wfs:
+            wfs = self.hub.workfiles(self._project, self._shot, self._task)
+        for v in wfs:
             r = self.wf_table.rowCount()
             self.wf_table.insertRow(r)
-            self.wf_table.setItem(r, 0, _cell(f"v{w.revision:03d}"))
-            self.wf_table.setItem(r, 1, _cell(w.software or ""))
-            self.wf_table.setItem(r, 2, _cell(w.comment or ""))
-            item = _cell(Path(w.path).name or w.path)
-            item.setToolTip(w.path)
-            item.setData(USER_ROLE, w.path)
+            self.wf_table.setItem(r, 0, _cell(v.label()))
+            self.wf_table.setItem(r, 1, _cell(str(len(v.minors))))
+            self.wf_table.setItem(r, 2, _cell("online" if v.online else "offline"))
+            item = _cell(v.comment or "")
+            path = v.latest.path if v.latest else ""
+            item.setToolTip(path)
+            item.setData(USER_ROLE, path)
             self.wf_table.setItem(r, 3, item)
         if wfs:
             self.wf_table.selectRow(self.wf_table.rowCount() - 1)
@@ -407,7 +408,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _new_workfile(self):
         if not self._task:
             return
-        has_current = bool(self.hub.workfiles(self._project, self._task))
+        has_current = bool(self.hub.workfiles(self._project, self._shot, self._task))
         dlg = NewWorkfileDialog(self.hub, self._project, has_current, self)
         if exec_dialog(dlg) != DIALOG_ACCEPTED:
             return
@@ -428,10 +429,8 @@ class MainWindow(QtWidgets.QMainWindow):
         path = self._selected_workfile_path()
         if not path:
             return
-        r = self.wf_table.currentRow()
-        software = self.wf_table.item(r, 1).text() if r >= 0 else ""
         try:
-            note = self.hub.open_workfile(self._project, software, path)
+            note = self.hub.open_workfile(self._project, "", path)
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Open failed", f"{type(e).__name__}: {e}")
             return

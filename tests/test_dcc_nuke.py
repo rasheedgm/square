@@ -1,17 +1,15 @@
-"""The Nuke integration's pipeline glue (`ops`), context, and node builders.
-The panel/menu (which need a real Nuke) are not covered here."""
+"""The Nuke integration's pipeline glue (`ops`), context, and the Square-tab
+gizmos (driven with a fake `nuke`). The panels need a real Nuke and aren't
+covered here."""
 
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
-from square_core.model import Output
-
 from tests.test_workfile_manager import _hub
-from tools.dcc.nuke import nodes
+from tools.dcc.nuke import gizmos
 from tools.dcc.nuke.context import Target, from_env, to_env
-from tools.dcc.nuke.ops import NukeOps, OpsError
+from tools.dcc.nuke.ops import NEW_VERSION, NukeOps, OpsError
 
 
 def _ops(td):
@@ -19,171 +17,279 @@ def _ops(td):
     return NukeOps(hub.ctx), api
 
 
+def _t():
+    return Target("ABC", "", "SQ010", "SH0100", "Comp")
+
+
 class TestContext(unittest.TestCase):
-    def test_from_env_and_completeness(self):
-        env = {"SQUARE_PROJECT": "ABC", "SQUARE_SEQUENCE": "SQ010",
-               "SQUARE_SHOT": "SH0100", "SQUARE_TASK": "Comp"}
+    def test_env_round_trip_with_episode(self):
+        env = {}
+        to_env(Target("ABC", "EP01", "SQ010", "SH0100", "Comp"), env)
+        self.assertEqual(env["SQUARE_EPISODE"], "EP01")
         t = from_env(env)
         self.assertTrue(t.complete)
-        self.assertIn("SQ010/SH0100", t.label())
-
-    def test_from_env_partial_is_incomplete(self):
-        self.assertFalse(from_env({"SQUARE_PROJECT": "ABC"}).complete)
-
-    def test_to_env_round_trip_and_clear(self):
-        env = {}
-        to_env(Target("ABC", "SQ010", "SH0100", "Comp"), env)
-        self.assertEqual(env["SQUARE_SHOT"], "SH0100")
-        to_env(Target("ABC", "", "", ""), env)
-        self.assertNotIn("SQUARE_SHOT", env)
+        self.assertIn("EP01/SQ010/SH0100", t.label())
+        to_env(Target("ABC", "", "", "", ""), env)
+        self.assertNotIn("SQUARE_EPISODE", env)
 
 
 class TestOpsNavigation(unittest.TestCase):
-    def test_projects_shots_tasks(self):
+    def test_cascade(self):
         with tempfile.TemporaryDirectory() as td:
             ops, _ = _ops(td)
             self.assertEqual(ops.projects(), ["ABC"])
-            self.assertEqual(ops.shots_by_sequence("ABC"), {"SQ010": ["SH0100", "SH0110"]})
+            self.assertFalse(ops.is_episodic("ABC"))
+            self.assertEqual(ops.episodes("ABC"), [])
+            self.assertEqual(ops.sequences("ABC"), ["SQ010"])
+            self.assertEqual(ops.shots("ABC", "SQ010"), ["SH0100", "SH0110"])
             self.assertEqual(ops.task_types("ABC", "SQ010", "SH0100"), ["Comp", "Roto"])
+            self.assertEqual(ops.default_task_for("ABC", "SQ010", "SH0100"), "Comp")
 
-    def test_resolve_errors_are_actionable(self):
+    def test_resolve_errors(self):
         with tempfile.TemporaryDirectory() as td:
             ops, _ = _ops(td)
             with self.assertRaises(OpsError):
-                ops.next_workfile_path(Target("ABC", "SQ010", "NOPE", "Comp"))
+                ops.next_save(Target("ABC", "", "SQ010", "NOPE", "Comp"))
             with self.assertRaises(OpsError):
-                ops.next_workfile_path(Target("ABC", "SQ010", "SH0100", "Lighting"))
+                ops.next_save(Target("ABC", "", "SQ010", "SH0100", "Lighting"))
 
 
 class TestOpsWorkfiles(unittest.TestCase):
-    def _t(self):
-        return Target("ABC", "SQ010", "SH0100", "Comp")
-
-    def test_next_path_register_and_versions(self):
+    def test_minor_major_save_and_versions(self):
         with tempfile.TemporaryDirectory() as td:
             ops, api = _ops(td)
-            path, rev = ops.next_workfile_path(self._t())
-            self.assertEqual(rev, 1)
-            self.assertTrue(path.endswith("_comp_main_v001.nk"))
-
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            Path(path).write_text("# nuke", encoding="utf-8")
-            ops.register_saved(self._t(), path, comment="first")
+            t1 = ops.next_save(_t(), bump="minor")
+            self.assertEqual((t1.major, t1.minor, t1.is_new_major), (1, 1, True))
+            Path(t1.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t1.path).write_text("v1.1", encoding="utf-8")
+            ops.register_major(_t(), t1, comment="start")
             self.assertEqual(len(api.workfiles), 1)
 
-            vs = ops.versions(self._t())
-            self.assertEqual([w.revision for w in vs], [1])
-            self.assertEqual(ops.version_path(self._t(), 1), path)
+            t2 = ops.next_save(_t(), bump="minor")
+            self.assertEqual((t2.major, t2.minor), (1, 2))
+            Path(t2.path).write_text("v1.2", encoding="utf-8")
 
-    def test_software_is_resolved_not_a_bare_name(self):
-        # RecordingKitsu records the software string as given; the important
-        # part -- that KitsuApi resolves "nuke" before gazu -- is covered in
-        # test_kitsu_api. Here just check the call goes through.
+            t3 = ops.next_save(_t(), bump="major")
+            self.assertEqual((t3.major, t3.minor), (2, 1))
+
+            vs = ops.workfile_versions(_t())
+            self.assertEqual([v.major for v in vs], [1])
+            self.assertEqual([m.minor for m in vs[0].minors], [2, 1])
+            self.assertTrue(vs[0].online)
+
+    def test_workfile_names(self):
         with tempfile.TemporaryDirectory() as td:
-            ops, api = _ops(td)
-            path, _ = ops.next_workfile_path(self._t())
-            Path(path).parent.mkdir(parents=True, exist_ok=True)
-            Path(path).write_text("x", encoding="utf-8")
-            ops.register_saved(self._t(), path)
-            self.assertEqual(api.workfiles[0]["software"], "nuke")
+            ops, _ = _ops(td)
+            t1 = ops.next_save(_t(), name="precomp", bump="major")
+            Path(t1.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t1.path).write_text("x", encoding="utf-8")
+            ops.register_major(_t(), t1, name="precomp")
+            self.assertIn("precomp", ops.workfile_names(_t()))
 
 
 class TestOpsOutputs(unittest.TestCase):
-    def _t(self):
-        return Target("ABC", "SQ010", "SH0100", "Comp")
-
-    def test_next_output_path_has_hash_padding(self):
+    def test_output_types_renderable_only(self):
         with tempfile.TemporaryDirectory() as td:
             ops, _ = _ops(td)
-            path, rev = ops.next_output_path(self._t(), "CompRender")
-            self.assertEqual(rev, 1)
-            self.assertIn(".####.exr", path)
-            self.assertIn("/output/comp/v001/", path.replace("\\", "/"))
+            types = ops.output_types(_t())
+            self.assertIn("CompRender", types)
+            self.assertNotIn("Plate", types)             # not renderable
 
-    def test_publish_render(self):
+    def test_resolve_output_path_new_and_hashed(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            info = ops.resolve_output_path(_t(), "CompRender", NEW_VERSION)
+            self.assertEqual(info["version"], 1)
+            self.assertIn(".####.exr", info["path"])
+            self.assertFalse(info["locked"])
+
+    def test_resolve_output_path_reports_lock(self):
         with tempfile.TemporaryDirectory() as td:
             ops, api = _ops(td)
+            api.outputs.append({"output_type": "CompRender", "revision": 1, "name": "main",
+                                "representation": "exr", "path": "X:/o/v001",
+                                "data": {"square": {"locked": True}}})
+            info = ops.resolve_output_path(_t(), "CompRender", "1")
+            self.assertTrue(info["locked"])
+
+    def test_publish_render_blocks_locked_next_version(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            api.outputs.append({"output_type": "CompRender", "revision": 1, "name": "main",
+                                "representation": "exr", "path": "X:/o/v001",
+                                "data": {"square": {"locked": True}}})
+            # next_version would be 2 here (rev 1 exists) -> not blocked; lock rev 2
+            api.outputs.append({"output_type": "CompRender", "revision": 2, "name": "main",
+                                "representation": "exr", "path": "X:/o/v002",
+                                "data": {"square": {"locked": True}}})
             r = Path(td) / "r"; r.mkdir()
-            for f in (1001, 1002):
-                (r / f"c.{f}.exr").write_bytes(b"x" * 20)
-            res = ops.publish_render(self._t(), sorted(str(p) for p in r.iterdir()),
-                                     proxy_dry_run=True)
-            self.assertEqual(res.version, 1)
-            self.assertEqual(len(api.outputs), 1)
+            (r / "c.1001.exr").write_bytes(b"x" * 10)
+            with self.assertRaises(OpsError):
+                ops.publish_render(_t(), [str(r / "c.1001.exr")], proxy_dry_run=True)
 
-    def test_plate_for_read_resolves_path_and_colorspace(self):
+    def test_resolve_read_path(self):
         with tempfile.TemporaryDirectory() as td:
             ops, api = _ops(td)
-            api.outputs.append({"output_type": "Plate", "revision": 2,
-                                "path": "X:/ABC/shots/SQ010/SH0100/plates/main_v002",
-                                "representation": "exr", "name": "main"})
-            info = ops.plate_for_read(self._t())
-            self.assertEqual(info["version"], 2)
-            self.assertEqual(info["colorspace"], "ACEScg")     # from the built-in Plate entry
-
-    def test_plate_for_read_without_a_plate_errors(self):
-        with tempfile.TemporaryDirectory() as td:
-            ops, _ = _ops(td)
-            with self.assertRaises(OpsError):
-                ops.plate_for_read(self._t())
+            api.outputs.append({"output_type": "Plate", "revision": 3, "name": "main",
+                                "representation": "exr",
+                                "path": "X:/ABC/SQ010/SH0100/plates/main_v003", "data": {}})
+            info = ops.resolve_read_path(_t(), "Plate", "latest")
+            self.assertEqual(info["version"], 3)
+            self.assertEqual(info["colorspace"], "ACEScg")
+            self.assertEqual(info["versions"], [3])
 
 
-class _FakeKnob:
-    def __init__(self):
-        self.v = None
+# --------------------------------------------------------------------------
+# gizmos, with a fake nuke
+# --------------------------------------------------------------------------
+
+class _Knob:
+    def __init__(self, name, values=None):
+        self._name = name
+        self._values = list(values) if values else []
+        self._v = self._values[0] if self._values else ""
+        self._enabled = True
+
+    def name(self):
+        return self._name
+
+    def value(self):
+        return self._v
 
     def setValue(self, v):
-        self.v = v
+        self._v = v
+
+    def setValues(self, vs):
+        self._values = [str(x) for x in vs]
+        if self._v not in self._values and self._values:
+            self._v = self._values[0]
+
+    def values(self):
+        return list(self._values)
+
+    def setVisible(self, b):
+        pass
+
+    def setEnabled(self, b):
+        self._enabled = b
 
 
-class _FakeNode:
+class _Node:
     def __init__(self, cls):
         self._cls = cls
         self._knobs = {}
 
-    def __getitem__(self, k):
-        return self._knobs.setdefault(k, _FakeKnob())
-
     def Class(self):
         return self._cls
+
+    def knobs(self):
+        return self._knobs
+
+    def __getitem__(self, k):
+        return self._knobs.setdefault(k, _Knob(k))
+
+    def addKnob(self, knob):
+        self._knobs[knob.name()] = knob
 
 
 class _FakeNuke:
     def __init__(self):
         self.created = []
+        self._this_node = None
+        self._this_knob = None
 
+    # node creation / knob factories
     def createNode(self, cls, inpanel=False):
-        n = _FakeNode(cls)
+        n = _Node(cls)
         self.created.append(n)
+        self._this_node = n
         return n
+
+    def Tab_Knob(self, name, label=None):
+        return _Knob(name)
+
+    def String_Knob(self, name, label=None):
+        return _Knob(name)
+
+    def Text_Knob(self, name, label=None):
+        return _Knob(name)
+
+    def Boolean_Knob(self, name, label=None):
+        return _Knob(name)
+
+    def Enumeration_Knob(self, name, label, values):
+        return _Knob(name, values)
+
+    def addKnobChanged(self, fn, nodeClass=None):
+        pass
+
+    def thisNode(self):
+        return self._this_node
+
+    def thisKnob(self):
+        return self._this_knob
+
+
+class TestGizmos(unittest.TestCase):
+    def setUp(self):
+        # env target so _populate has something to select
+        import os
+        self._env = dict(os.environ)
+        os.environ.update(SQUARE_PROJECT="ABC", SQUARE_SEQUENCE="SQ010",
+                          SQUARE_SHOT="SH0100", SQUARE_TASK="Comp")
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
+
+    def _wire(self, td):
+        ops, api = _ops(td)
+        import tools.dcc.nuke.panel as panel_mod
+        panel_mod._ops = ops
+        self.addCleanup(lambda: setattr(panel_mod, "_ops", None))
+        return ops, api
+
+    def test_create_square_write_sets_file_from_env_target(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            nk = _FakeNuke()
+            node = gizmos.create_square_write(nk)
+            self.assertEqual(node[gizmos.MARK].value(), "write")
+            self.assertEqual(node["sq_project"].value(), "ABC")
+            self.assertEqual(node["sq_shot"].value(), "SH0100")
+            self.assertEqual(node["sq_media_type"].value(), "CompRender")
+            self.assertIn(".####.exr", node["file"].value())
+            self.assertIn("/output/comp/v001/", node["file"].value().replace("\\", "/"))
+
+    def test_square_write_knob_change_recomputes_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            nk = _FakeNuke()
+            node = gizmos.create_square_write(nk)
+            node["sq_shot"].setValue("SH0110")
+            nk._this_node, nk._this_knob = node, node["sq_shot"]
+            gizmos.on_knob_changed(nk)
+            self.assertIn("SH0110", node["file"].value())
+
+    def test_create_square_read_resolves_a_published_plate(self):
+        with tempfile.TemporaryDirectory() as td:
+            _, api = self._wire(td)
+            api.outputs.append({"output_type": "Plate", "revision": 2, "name": "main",
+                                "representation": "exr",
+                                "path": "X:/ABC/SQ010/SH0100/plates/main_v002", "data": {}})
+            nk = _FakeNuke()
+            node = gizmos.create_square_read(nk)
+            node["sq_media_type"].setValue("Plate")
+            nk._this_node, nk._this_knob = node, node["sq_media_type"]
+            gizmos.on_knob_changed(nk)
+            self.assertIn("main_v002", node["file"].value())
+            self.assertEqual(node["colorspace"].value(), "ACEScg")
 
 
 class TestPanelImports(unittest.TestCase):
-    def test_panel_module_imports_without_nuke(self):
-        # panel.py must not `import nuke` at module level
-        import importlib
-
-        import tools.dcc.nuke.panel as panel
-        importlib.reload(panel)
-        self.assertTrue(hasattr(panel, "save_version"))
-        self.assertTrue(hasattr(panel, "show"))
-
-
-class TestNodes(unittest.TestCase):
-    def test_square_read_sets_path_range_colorspace(self):
-        nk = _FakeNuke()
-        n = nodes.square_read(nk, path=r"X:\a\b\plate.####.exr", colorspace="ACEScg",
-                              frame_in=1001, frame_out=1096, label="[Square] Plate v001")
-        self.assertEqual(n["file"].v, "X:/a/b/plate.####.exr")
-        self.assertEqual(n["first"].v, 1001)
-        self.assertEqual(n["last"].v, 1096)
-        self.assertEqual(n["colorspace"].v, "ACEScg")
-
-    def test_square_write_sets_path_and_dirs(self):
-        nk = _FakeNuke()
-        n = nodes.square_write(nk, path=r"X:\o\comp.####.exr", colorspace="ACEScg")
-        self.assertEqual(n["file"].v, "X:/o/comp.####.exr")
-        self.assertTrue(n["create_directories"].v)
+    def test_panel_and_gizmos_import_without_nuke(self):
+        import tools.dcc.nuke.gizmos as g
+        import tools.dcc.nuke.panel as p
+        self.assertTrue(hasattr(p, "save_version"))
+        self.assertTrue(hasattr(p, "open_version"))
+        self.assertTrue(hasattr(g, "create_square_write"))
 
 
 if __name__ == "__main__":

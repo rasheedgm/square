@@ -57,7 +57,8 @@ class _NavKitsu(RecordingKitsu):
     def output_files(self, entity, *, output_type_name=None):
         from square_core.model import Output
         return [Output(output_type=o["output_type"], revision=o["revision"],
-                       path=o["path"], representation=o["representation"], name=o["name"])
+                       path=o["path"], representation=o["representation"],
+                       name=o["name"], data=o.get("data") or {})
                 for o in self.outputs
                 if not output_type_name or o["output_type"] == output_type_name]
 
@@ -109,11 +110,11 @@ class TestActions(unittest.TestCase):
             shot, task = self._task(hub)
             slot = hub.new_workfile("ABC", shot, task, media_type="NukeScript",
                                     software="nuke", seed=SeedMode.EMPTY, comment="start")
-            self.assertEqual(slot.revision, 1)
+            self.assertEqual((slot.major, slot.minor), (1, 1))
             self.assertFalse(slot.seeded)
             self.assertEqual(len(api.workfiles), 1)
-            vs = hub.workfiles("ABC", task)
-            self.assertEqual([w.revision for w in vs], [1])
+            vs = hub.workfiles("ABC", shot, task)
+            self.assertEqual([v.major for v in vs], [1])
 
     def test_new_workfile_from_template_and_copy_up(self):
         with tempfile.TemporaryDirectory() as td:
@@ -126,7 +127,7 @@ class TestActions(unittest.TestCase):
             self.assertTrue(Path(v1.path).is_file())
             v2 = hub.new_workfile("ABC", shot, task, media_type="NukeScript",
                                   seed=SeedMode.CURRENT)
-            self.assertEqual(v2.revision, 2)
+            self.assertEqual(v2.major, 2)
             self.assertEqual(Path(v2.path).read_text(encoding="utf-8"), "template")
 
     def test_template_seed_without_a_path_or_config_errors(self):

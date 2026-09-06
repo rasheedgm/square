@@ -48,9 +48,15 @@ def create_asset(pctx, name: str, asset_type: str, *, create_folders: bool = Tru
     return asset
 
 
-def build_task_grid(pctx, shots, task_types) -> list:
-    """A task per (shot, task_type). Idempotent -- ensure_tasks won't duplicate."""
+def build_task_grid(pctx, shots, task_types, *, progress=None) -> list:
+    """A task per (shot, task_type). Idempotent -- ensure_tasks won't duplicate.
+
+    `progress(done, total, shot)` is called after each shot if given, so a
+    long grid build can show a bar."""
+    shots = list(shots)
     out = []
-    for shot in shots:
+    for i, shot in enumerate(shots, start=1):
         out.extend(pctx.kitsu.ensure_tasks(shot, list(task_types)))
+        if progress:
+            progress(i, len(shots), shot)
     return out

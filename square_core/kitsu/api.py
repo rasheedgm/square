@@ -129,8 +129,20 @@ class KitsuApi:
         )
         return _map.shot(raw)
 
+    def sequences(self, project) -> list:
+        get = getattr(self._b, "all_sequences_for_project", None)
+        return [_map.sequence(s) for s in (get(_id(project)) if get else [])]
+
     def shots(self, project) -> list:
-        return [_map.shot(s) for s in self._b.all_shots_for_project(_id(project))]
+        shots = [_map.shot(s) for s in self._b.all_shots_for_project(_id(project))]
+        # the project-shots list route carries no sequence_name -- backfill it
+        # from the sequence list so callers get a usable sequence_code.
+        if any(s.sequence_id and not s.sequence_code for s in shots):
+            names = {sq.id: sq.code for sq in self.sequences(project)}
+            for s in shots:
+                if s.sequence_id and not s.sequence_code:
+                    s.sequence_code = names.get(s.sequence_id, "")
+        return shots
 
     def merge_entity_data(self, entity, data: dict) -> None:
         ref = _id(entity)

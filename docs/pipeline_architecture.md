@@ -5,14 +5,16 @@ supersedes the narrow "ingest tool" framing of `ingest_tool_design.md` — the
 ingest tool is now tool #1 of a set, and `restructure_plan.md` folds into
 Phase A (§12) as its first commits.
 
-**Build status (2026-09-04):** Phase A is **built and merged to `master`**
+**Build status (2026-09-06):** Phase A is **built and merged to `master`**
 (PR #2) — `square_core/` model, config (v2 media-type registry), paths, kitsu,
 storage, media, context, services (projects / breakdown / media / work /
-review), live-verified against Zou 1.0.58. Phase B's **config schema +
-config-editor tool** (#2b) is built (`square_core/config/schema.py`,
-`tools/config_editor/`). ~178 tests. Remaining: project-setup tool (#2), then
-the ingest port (§12 step 6, on `ingest_tools`). Parts marked *(exists)* below
-predate the rework and were folded in.
+review), live-verified against Zou 1.0.58. Phase B is **done**: the config
+schema + config-editor tool (#2b, `square_core/config/schema.py`,
+`tools/config_editor/`) and the **ingest tool port** (§12 step 6, PR #4) both
+merged to `master`, and the **project-setup tool** (#2, `tools/project_setup/`)
+— GUI over `services.projects.create` + `services.breakdown` — is built. Next:
+Phase C (work / publish + Nuke). Parts marked *(exists)* below predate the
+rework and were folded in.
 
 ---
 
@@ -557,8 +559,8 @@ tests/
 
 | # | Tool | Lifecycle stage | Core services it drives | Priority |
 |---|---|---|---|---|
-| 1 | **Ingest tool** *(built)* | client material → shots | `media.publish`, `breakdown`, `storage.transfer` | refactor onto core API |
-| 2 | **Project setup / admin** | project created · breakdown · roadmap | `projects.create/archive`, `breakdown.*` | smallest tool that exercises the spine |
+| 1 | **Ingest tool** *(built, ported)* | client material → shots | `media.publish`, `breakdown`, `storage.transfer` | on the core API (PR #4) |
+| 2 | **Project setup / admin** *(built)* | project created · breakdown · roadmap | `projects.create/archive`, `breakdown.*` | `tools/project_setup/` — GUI: new project, shot breakdown (bulk paste), task grid |
 | 2b | **Config editor** (admin-only) *(built)* | studio + project config | `config.schema` / `ConfigStore` — the **only** writer of config | done 2026-09-04 (GUI + `--cli`, `config_schema.md`); kills ingest's Settings dialog |
 | 3 | **DCC integration** (Nuke first: `SquareRead`/`SquareWrite` + publish panel) | workfile · output · task preview | `work.*`, `review.submit`, `media.proxy` | high |
 | 4 | **Workfile / version manager** (DCC-agnostic core, Maya/Houdini hooks) | task started · save · publish | `work.save_workfile`, `work.next_version`, `work.publish_output` | high (shares core with #3) |
@@ -600,13 +602,15 @@ branch — the restructure and the spine touch the same files.
    ledger stays where it is; don't migrate it in this phase. Drop the session's
    `config_snapshot` — the tool reads live `ProjectConfig` on resume.
 
-**Phase B — config editor (#2b) *(done 2026-09-04)* + project setup tool (#2)**
+**Phase B — config editor (#2b) *(done 2026-09-04)* + project setup tool (#2) *(done 2026-09-06)***
 `config/schema.py` (the `ConfigKey` registry, `validate()`, `resolve()`) and the
 admin **config editor** (`tools/config_editor/`, GUI + `--cli`,
 `config_schema.md`) — the only writer of studio / project config — landed first.
-Still to do: the project-setup tool (#2) — a tiny GUI over `services/projects` +
-`services/breakdown` + task templates that spins up a real show end to end. Then
-the ingest port (Phase A step 6).
+Then the **project-setup tool** (`tools/project_setup/`): a GUI over
+`services.projects.create` (New Project tab) and `services.breakdown`
+(Breakdown tab — bulk-paste shot rows; Roadmap tab — task grid). Writes are
+gated on the Kitsu admin/manager role, like the config editor. The ingest port
+(Phase A step 6) merged alongside it (PR #4).
 
 **Phase C — work / publish + DCC tool (#3/#4)**
 `services/work`, path resolution in anger, first managed workfile + first

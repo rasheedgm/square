@@ -43,6 +43,9 @@ class OfflineApi:
         return Shot(id=f"offline-shot-{code}", code=code,
                     frame_in=kw.get("frame_in", 0), frame_out=kw.get("frame_out", 0))
 
+    def sequences(self, project):
+        return []
+
     def shots(self, project):
         return []
 

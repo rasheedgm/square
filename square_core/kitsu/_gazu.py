@@ -169,6 +169,9 @@ class GazuBackend:
     def all_shots_for_project(self, project) -> list:
         return self.g.shot.all_shots_for_project(_ref(project)) or []
 
+    def all_sequences_for_project(self, project) -> list:
+        return self.g.shot.all_sequences_for_project(_ref(project)) or []
+
     def update_shot_data(self, shot, data) -> dict:
         return self.g.shot.update_shot_data(_ref(shot), data)
 

@@ -81,6 +81,9 @@ class FakeBackend:
     def all_shots_for_project(self, project):
         return [s for s in self.shots.values() if True]
 
+    def all_sequences_for_project(self, project):
+        return [s for s in self.seqs.values() if s["project_id"] == project["id"]]
+
     def update_shot_data(self, shot, data):
         shot["data"] = data
         return shot
@@ -246,6 +249,17 @@ class TestProjectsAndBreakdown(unittest.TestCase):
         t2 = api.ensure_tasks(shot, ["Ingest", "Comp"])
         self.assertEqual({t.task_type_name for t in t1}, {"Ingest", "Comp"})
         self.assertEqual([t.id for t in t1], [t.id for t in t2])   # no duplicates
+
+    def test_shots_backfills_sequence_code_from_the_sequence_list(self):
+        """The project-shots list route carries no sequence_name; shots() must
+        still return a usable sequence_code."""
+        api = _api()
+        proj = api.create_project(code="ABC")
+        seq = api.ensure_sequence(proj, "SQ010")
+        api.ensure_shot(proj, seq, "SH0100")
+        api.ensure_shot(proj, seq, "SH0110")
+        got = {s.code: s.sequence_code for s in api.shots(proj)}
+        self.assertEqual(got, {"SH0100": "SQ010", "SH0110": "SQ010"})
 
 
 class TestStatusAndReview(unittest.TestCase):

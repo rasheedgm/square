@@ -43,6 +43,7 @@ ITEM_IS_USER_CHECKABLE = get_qt_enum(QtCore.Qt, "ItemFlag", "ItemIsUserCheckable
 CHECK_CHECKED = get_qt_enum(QtCore.Qt, "CheckState", "Checked")
 CHECK_UNCHECKED = get_qt_enum(QtCore.Qt, "CheckState", "Unchecked")
 SELECT_ROWS = get_qt_enum(QtWidgets.QAbstractItemView, "SelectionBehavior", "SelectRows")
+NO_EDIT_TRIGGERS = get_qt_enum(QtWidgets.QAbstractItemView, "EditTrigger", "NoEditTriggers")
 SELECT_ITEMS = get_qt_enum(QtWidgets.QAbstractItemView, "SelectionBehavior", "SelectItems")
 SINGLE_SELECTION = get_qt_enum(QtWidgets.QAbstractItemView, "SelectionMode", "SingleSelection")
 EXTENDED_SELECTION = get_qt_enum(QtWidgets.QAbstractItemView, "SelectionMode", "ExtendedSelection")
@@ -77,6 +78,9 @@ SIZE_PREFERRED = get_qt_enum(QtWidgets.QSizePolicy, "Policy", "Preferred")
 QDIR_ALL_DIRS = get_qt_enum(QtCore.QDir, "Filter", "AllDirs")
 QDIR_NO_DOT_AND_DOTDOT = get_qt_enum(QtCore.QDir, "Filter", "NoDotDot")
 QDIR_FILES = get_qt_enum(QtCore.QDir, "Filter", "Files")
+
+# item data roles
+USER_ROLE = get_qt_enum(QtCore.Qt, "ItemDataRole", "UserRole")
 
 # gui / drawing
 FONT_BOLD = get_qt_enum(QtGui.QFont, "Weight", "Bold")

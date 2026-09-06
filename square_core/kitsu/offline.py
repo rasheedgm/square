@@ -62,6 +62,9 @@ class OfflineApi:
     def task_statuses(self):
         return []
 
+    def tasks_for_shot(self, shot):
+        return []
+
     def ensure_tasks(self, shot, names):
         return [Task(id=f"offline-task-{n}", task_type_name=n, entity_id=getattr(shot, "id", ""))
                 for n in (names or [])]

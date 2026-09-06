@@ -12,9 +12,13 @@ review), live-verified against Zou 1.0.58. Phase B is **done**: the config
 schema + config-editor tool (#2b, `square_core/config/schema.py`,
 `tools/config_editor/`) and the **ingest tool port** (§12 step 6, PR #4) both
 merged to `master`, and the **project-setup tool** (#2, `tools/project_setup/`)
-— GUI over `services.projects.create` + `services.breakdown` — is built. Next:
-Phase C (work / publish + Nuke). Parts marked *(exists)* below predate the
-rework and were folded in.
+— GUI over `services.projects.create` + `services.breakdown` — is built
+(PR #5). Phase C is **in progress**: `services.work` grew the workfile
+lifecycle (versions / next-path / `new_workfile`) and the **workfile manager**
+(#4, `tools/workfile_manager/`) — a DCC-agnostic GUI: pick a task, see its
+workfile versions + published outputs, start the next version, open it in the
+DCC, publish a render. Still to come in C: the in-Nuke panel (#3). Parts marked
+*(exists)* below predate the rework and were folded in.
 
 ---
 
@@ -562,8 +566,8 @@ tests/
 | 1 | **Ingest tool** *(built, ported)* | client material → shots | `media.publish`, `breakdown`, `storage.transfer` | on the core API (PR #4) |
 | 2 | **Project setup / admin** *(built)* | project created · breakdown · roadmap | `projects.create/archive`, `breakdown.*` | `tools/project_setup/` — GUI: new project, shot breakdown (bulk paste), task grid |
 | 2b | **Config editor** (admin-only) *(built)* | studio + project config | `config.schema` / `ConfigStore` — the **only** writer of config | done 2026-09-04 (GUI + `--cli`, `config_schema.md`); kills ingest's Settings dialog |
-| 3 | **DCC integration** (Nuke first: `SquareRead`/`SquareWrite` + publish panel) | workfile · output · task preview | `work.*`, `review.submit`, `media.proxy` | high |
-| 4 | **Workfile / version manager** (DCC-agnostic core, Maya/Houdini hooks) | task started · save · publish | `work.save_workfile`, `work.next_version`, `work.publish_output` | high (shares core with #3) |
+| 3 | **DCC integration** (Nuke first: `SquareRead`/`SquareWrite` + publish panel) | workfile · output · task preview | `work.*`, `review.submit`, `media.proxy` | high — Phase C, after #4 |
+| 4 | **Workfile / version manager** *(built)* | task started · save · publish | `work.versions/new_workfile/publish_output` | `tools/workfile_manager/` — DCC-agnostic GUI |
 | 5 | **Review player** (desktop) | supervisor review · annotate · approve | `review.*` (annotations + status) | high |
 | 6 | **Localize tool** | artist performance (NAS ↔ local cache) | `storage.transfer`, `paths`, `context.entity_for_path` | medium |
 | 7 | **Vendor package builder** | plates/refs/cameras → freelancer | `delivery.build_package` (internal preset), `breakdown.assign` | medium |

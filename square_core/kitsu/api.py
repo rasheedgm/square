@@ -179,6 +179,10 @@ class KitsuApi:
             self._ts_cache = self._b.all_task_statuses()
         return [_map.task_status(s) for s in self._ts_cache]
 
+    def tasks_for_shot(self, shot) -> list:
+        """Read the task grid on a shot (no creation)."""
+        return [_map.task(t) for t in self._b.all_tasks_for_shot(_id(shot))]
+
     def ensure_tasks(self, shot, task_type_names) -> list:
         """Idempotent: create any missing task types (scoped Shot) and tasks."""
         names = [n for n in (task_type_names or [])]

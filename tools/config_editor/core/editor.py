@@ -31,6 +31,7 @@ logger = logging.getLogger("square.config_editor")
 # editor is the one place that needs them ALL present, whether or not that
 # tool is the one running. Add a line here when a new tool ships config keys.
 import tools.ingest_tool.core.config_keys  # noqa: F401,E402
+import tools.workfile_manager.config_keys  # noqa: F401,E402
 
 ADMIN_ROLES = {"admin", "manager"}
 

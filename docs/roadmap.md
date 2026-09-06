@@ -20,6 +20,8 @@ near-term task list.
 - **Phase B:** project-setup tool — `services/projects` + `services/breakdown`
   *(done — `tools/project_setup/`, GUI: new project · shot breakdown · task grid)*
 - **Phase C:** work/publish core + Nuke integration
+  *(in progress — `services.work` workfile lifecycle + `tools/workfile_manager/`
+  DCC-agnostic GUI done; in-Nuke panel next)*
 - **Phase D:** review core + player (spike Zou annotation JSON here)
 - **Phase E:** delivery core + send-to-client
 

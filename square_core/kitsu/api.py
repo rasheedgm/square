@@ -318,9 +318,21 @@ class KitsuApi:
             out.append(rec)
         return out
 
+    def _software_ref(self, software):
+        """A Kitsu software record for a name like "nuke" (created if the studio
+        has none), or None. gazu rejects a bare name -- it wants an id / dict."""
+        if not software or isinstance(software, dict):
+            return software or None
+        want = str(software).strip().lower()
+        for sw in (self._b.all_softwares() or []):
+            if want in ((sw.get("name") or "").lower(), (sw.get("short_name") or "").lower()):
+                return sw
+        return self._b.new_software(str(software))
+
     def record_working_file(self, task, *, revision: int, path: str, name: str = "main",
                             software: str | None = None, data: dict | None = None):
-        raw = self._b.new_working_file(_id(task), name=name, revision=revision, software=software)
+        sw = self._software_ref(software)
+        raw = self._b.new_working_file(_id(task), name=name, revision=revision, software=sw)
         wf_id = (raw.get("file") or raw).get("id") if isinstance(raw.get("file"), dict) else raw["id"]
         updated = self._b.set_working_file_path(wf_id, path, data)
         return _map.workfile(updated if isinstance(updated, dict) else {**raw, "path": path})

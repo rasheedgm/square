@@ -190,10 +190,24 @@ class FakeBackend:
         return [w for w in self.working_files if w["task_id"] == task["id"]]
 
     def new_working_file(self, task, *, name="main", revision=0, software=None):
+        # gazu rejects a bare string here -- it must be a software dict or None
+        assert software is None or isinstance(software, dict), software
         w = {"id": self._nid("wf"), "task_id": task["id"], "name": name,
-             "revision": revision or 1, "path": "zou/computed/path"}
+             "revision": revision or 1, "path": "zou/computed/path",
+             "software_id": (software or {}).get("id", "")}
         self.working_files.append(w)
         return w
+
+    def all_softwares(self):
+        return list(getattr(self, "softwares", []))
+
+    def new_software(self, name):
+        if not hasattr(self, "softwares"):
+            self.softwares = []
+        sw = {"id": self._nid("sw"), "name": str(name).title(),
+              "short_name": str(name).lower()[:3]}
+        self.softwares.append(sw)
+        return sw
 
     def set_working_file_path(self, wf_id, path, data=None):
         for w in self.working_files:
@@ -373,6 +387,17 @@ class TestVersions(unittest.TestCase):
                                           software="nuke")
         self.assertEqual(wf.path, "X:/ours/work/v001.nk")
         self.assertEqual(self.api.next_working_revision(task), 2)
+
+    def test_working_file_software_name_is_resolved_to_a_record(self):
+        """gazu's new_working_file rejects a bare software name -- KitsuApi must
+        turn "nuke" into a software record (creating one if the studio has none)
+        before it hits the backend."""
+        [task] = self.tasks
+        self.api.record_working_file(task, revision=1, path="X:/a/v001.nk", software="nuke")
+        self.assertEqual([s["name"] for s in self.api._b.all_softwares()], ["Nuke"])
+        # a second file reuses the same software, doesn't make another
+        self.api.record_working_file(task, revision=2, path="X:/a/v002.nk", software="Nuke")
+        self.assertEqual(len(self.api._b.all_softwares()), 1)
 
 
 class TestOffline(unittest.TestCase):

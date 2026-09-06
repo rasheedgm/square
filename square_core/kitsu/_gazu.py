@@ -279,6 +279,18 @@ class GazuBackend:
             _ref(task), name=name, revision=revision, software=software,
         )
 
+    _SW_EXT = {"nuke": ".nk", "maya": ".ma", "houdini": ".hip", "hipnc": ".hipnc",
+               "blender": ".blend", "fusion": ".comp", "aftereffects": ".aep"}
+
+    def all_softwares(self) -> list:
+        return self.g.files.all_softwares() or []
+
+    def new_software(self, name: str) -> dict:
+        key = str(name).strip().lower()
+        return self.g.files.new_software(
+            str(name).title() if key == str(name) else str(name),
+            key[:3], self._SW_EXT.get(key, ""))
+
     def set_working_file_path(self, working_file_id: str, path: str, data: dict | None = None) -> dict:
         payload = {"path": path}
         if data is not None:

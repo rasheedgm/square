@@ -154,15 +154,25 @@ class NukeOps:
         r = self._resolve(t, need_task=False)
         return work.outputs(r.pctx, r.shot, media_type)
 
-    def resolve_output_path(self, t: Target, media_type: str, version) -> dict:
-        """Where a SquareWrite should render `version` (int) or the next new one
-        (`version` is None / '(new)'). Returns path (with #### padding), the
-        version number, and whether it's locked."""
+    def workfile_major(self, t: Target, *, name: str = "main") -> int:
+        r = self._resolve(t)
+        return work.current_workfile_major(r.pctx, r.task, name=name)
+
+    def resolve_output_path(self, t: Target, media_type: str, version, *,
+                            name: str = "main") -> dict:
+        """Where a SquareWrite should render.
+
+        `version` = `(new)` -> the current workfile major (so output version ==
+        workfile major), or the next output revision if the script isn't a saved
+        workfile yet.  `version` = an int -> that existing version (a re-render).
+        Returns the #### path, the version, and whether it is locked.
+        """
         r = self._resolve(t)
         existing = {o.revision: o for o in work.outputs(r.pctx, r.shot, media_type)}
         if version in (None, NEW_VERSION, ""):
-            rev = media.next_version(r.pctx, r.shot, media_type, r.task)
-            locked = False
+            rev = (work.current_workfile_major(r.pctx, r.task, name=name)
+                   or media.next_version(r.pctx, r.shot, media_type, r.task))
+            locked = rev in existing and work.output_locked(existing[rev])
         else:
             rev = int(version)
             locked = rev in existing and work.output_locked(existing[rev])
@@ -175,18 +185,20 @@ class NukeOps:
                 "colorspace": r.pctx.config.media_type(media_type).get("colorspace", "")}
 
     def publish_render(self, t: Target, frames, *, media_type: str = DEFAULT_OUTPUT_TYPE,
-                       comment: str = "", make_preview: bool = True,
-                       source_workfile=None, proxy_dry_run: bool = False):
+                       name: str = "main", version: int | None = None, comment: str = "",
+                       make_preview: bool = True, proxy_dry_run: bool = False):
         r = self._resolve(t)
-        # guard: never overwrite a locked version
-        target_rev = media.next_version(r.pctx, r.shot, media_type, r.task)
+        major = work.current_workfile_major(r.pctx, r.task, name=name)
+        rev = version or major or media.next_version(r.pctx, r.shot, media_type, r.task)
+        wf = next((w for w in r.pctx.kitsu.working_files(r.task)
+                   if (w.name or "main") == name and w.revision == major), None)
         for o in work.outputs(r.pctx, r.shot, media_type):
-            if o.revision == target_rev and work.output_locked(o):
-                raise OpsError(f"{media_type} v{target_rev:03d} is locked (reviewed / "
-                               "delivered) — render a new version.")
-        return work.publish_output(r.pctx, r.shot, r.task, media_type=media_type,
-                                   frames=[str(f) for f in frames], comment=comment,
-                                   source_workfile=source_workfile,
+            if o.revision == rev and work.output_locked(o):
+                raise OpsError(f"{media_type} v{rev:03d} is locked (reviewed / delivered) "
+                               "— save a new workfile major and re-render.")
+        return work.publish_output(r.pctx, r.shot, r.task, media_type=media_type, name=name,
+                                   frames=[str(f) for f in frames], version=rev,
+                                   comment=comment, source_workfile=wf,
                                    make_review_proxy=make_preview,
                                    proxy_dry_run=proxy_dry_run)
 

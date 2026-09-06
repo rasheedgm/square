@@ -349,11 +349,21 @@ class KitsuApi:
         # `source_file_id` (a working_file) is carried in data["square"]["inputs"]
         # by services.media -- gazu's new_entity_output_file has no clean field.
         ot = self.ensure_output_type(output_type_name)
-        raw = self._b.new_output_file(_id(entity), ot, _task_type_ref(task), comment=comment,
-                                      name=name, revision=revision, representation=representation)
-        of_id = (raw.get("file") or raw).get("id") if isinstance(raw.get("file"), dict) else raw["id"]
+        # publishing an explicit version that already exists REPLACES it in place
+        # (a re-render of the same workfile major) rather than forking a parallel
+        # record -- keeps output version == workfile major.
+        existing = next(
+            (o for o in self._b.output_files_for_entity(_id(entity), output_type=ot)
+             if int(o.get("revision") or 0) == int(revision)
+             and (o.get("name") or "main") == name), None)
+        if existing:
+            of_id, base = existing["id"], existing
+        else:
+            base = self._b.new_output_file(_id(entity), ot, _task_type_ref(task), comment=comment,
+                                           name=name, revision=revision, representation=representation)
+            of_id = (base.get("file") or base).get("id") if isinstance(base.get("file"), dict) else base["id"]
         updated = self._b.update_output_file(of_id, path, data)
-        return _map.output(updated if isinstance(updated, dict) else {**raw, "path": path})
+        return _map.output(updated if isinstance(updated, dict) else {**base, "path": path})
 
     def merge_output_data(self, output, extra: dict) -> None:
         """Merge `extra` into an output_file's `data['square']` blob (e.g. a

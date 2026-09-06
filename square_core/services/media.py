@@ -177,14 +177,18 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
 
 # --------------------------------------------------------------------------
 
-def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run):
+def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run,
+                  media_type=""):
     from square_core.media import make_proxy
 
     proxy = Path(dest_dir) / "_review" / f"{name}_v{rev:03d}.mp4"
     fps = getattr(media_info, "fps", None) or pctx.config.fps or 24.0
     is_video = len(files) == 1 and not any(c.isdigit() for c in Path(files[0]).stem[-6:])
     path = make_proxy(files, proxy, fps=float(fps), is_video=is_video, dry_run=dry_run)
-    return pctx.kitsu.upload_preview(task, path, comment=f"Preview v{rev:03d}")
+    # the preview's own Kitsu revision floats (many previews per version) -- the
+    # comment names the media version it is a review of.
+    label = f"{media_type} v{rev:03d}".strip() or f"v{rev:03d}"
+    return pctx.kitsu.upload_preview(task, path, comment=f"Preview — {label}")
 
 
 def make_review_proxy_for(pctx, entity, media_type: str, task, *, files, name: str = "main",
@@ -209,7 +213,8 @@ def make_review_proxy_for(pctx, entity, media_type: str, task, *, files, name: s
         ctx = pctx.ctx(**coords, task=_task_name(task), name=name, version=version,
                        representation=rep, ext=ext)
         dest_dir = pctx.paths.media_dir(media_type, ctx)
-    preview = _review_proxy(pctx, task, files, dest_dir, version, name, media_info, dry_run)
+    preview = _review_proxy(pctx, task, files, dest_dir, version, name, media_info, dry_run,
+                            media_type=media_type)
     if preview:
         pctx.kitsu.set_main_preview(preview)
         if provenance is not None:

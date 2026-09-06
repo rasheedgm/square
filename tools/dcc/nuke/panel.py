@@ -227,9 +227,8 @@ class _SaveVersionPanel:
         self.p = nukescripts.PythonPanel("Square — Save Version", "com.square.save_version")
         self.picker = _Picker(self.p, nuke, get_ops(), with_name=True)
         self.k_bump = nuke.Enumeration_Knob("bump", "Bump", ["minor", "major"])
-        self.k_comment = nuke.String_Knob("comment", "Comment")
         self.k_dest = nuke.Text_Knob("dest", "")
-        for k in (self.k_bump, self.k_comment, self.k_dest):
+        for k in (self.k_bump, self.k_dest):
             self.p.addKnob(k)
         self.p.knobChanged = self._changed
         self._refresh_dest()
@@ -263,8 +262,7 @@ class _SaveVersionPanel:
         name = self.picker.k_name.value() or "main"
         nuke.scriptSaveAs(t.path.replace("\\", "/"))
         if t.is_new_major:
-            get_ops().register_major(self.picker.target(), t, name=name,
-                                     comment=self.k_comment.value())
+            get_ops().register_major(self.picker.target(), t, name=name)
         to_env(self.picker.target())
         _msg(f"Saved {t.label()}\n{t.path}")
 
@@ -283,39 +281,65 @@ def create_square_read():
     gizmos.create_square_read(_nuke())
 
 
-@_guard
-def publish_selected_write():
-    nuke = _nuke()
+def _selected_write(nuke):
     sel = [n for n in nuke.selectedNodes() if n.Class() == "Write"]
     node = sel[0] if sel else next((n for n in nuke.allNodes("Write")), None)
     if node is None:
-        raise OpsError("Select a (Square) Write node to publish.")
+        raise OpsError("Select a (Square) Write node.")
+    return node
 
+
+def _write_context(nuke, node):
     from .context import Target
     if gizmos.MARK in node.knobs() and node[gizmos.MARK].value() == "write":
         t = Target(node["sq_project"].value(), node["sq_episode"].value(),
                    node["sq_sequence"].value(), node["sq_shot"].value(), node["sq_task"].value())
         media_type = node["sq_media_type"].value() or "CompRender"
+        name = node["sq_name"].value() or "main"
         make_preview = bool(node["sq_preview"].value()) if "sq_preview" in node.knobs() else True
     else:
-        t = from_env()
-        media_type, make_preview = "CompRender", True
+        t, media_type, name, make_preview = from_env(), "CompRender", "main", True
     if not t.complete:
-        raise OpsError("No shot context on that Write node.")
+        raise OpsError("No shot context on that Write node — set its Square tab.")
+    return t, media_type, name, make_preview
 
+
+def _publish_write(nuke, node):
+    t, media_type, name, make_preview = _write_context(nuke, node)
     pattern = node["file"].value()
     first, last = int(nuke.root()["first_frame"].value()), int(nuke.root()["last_frame"].value())
     frames = [_expand(pattern, f) for f in range(first, last + 1)]
     missing = [f for f in frames if not _exists(f)]
     if missing:
         raise OpsError(f"{len(missing)} frame(s) not rendered yet (e.g. {missing[0]}).")
-
-    res = get_ops().publish_render(t, frames, media_type=media_type,
+    res = get_ops().publish_render(t, frames, media_type=media_type, name=name,
                                   make_preview=make_preview,
                                   comment=f"from {nuke.root().name()}")
     _msg(f"Published {media_type} v{res.version:03d}"
          + (" + review proxy" if getattr(res, "preview", None) else "")
          + f"\n{res.dir}")
+
+
+@_guard
+def publish_selected_write():
+    """Publish an already-rendered Write (farm renders: submit, then publish)."""
+    nuke = _nuke()
+    _publish_write(nuke, _selected_write(nuke))
+
+
+@_guard
+def render_and_publish_selected():
+    render_and_publish_node(_selected_write(_nuke()))
+
+
+@_guard
+def render_and_publish_node(node):
+    """Render the Write locally over the script range, then publish it."""
+    nuke = _nuke()
+    _write_context(nuke, node)                        # validate context first
+    first, last = int(nuke.root()["first_frame"].value()), int(nuke.root()["last_frame"].value())
+    nuke.execute(node, first, last)
+    _publish_write(nuke, node)
 
 
 # ---- helpers ------------------------------------------------------

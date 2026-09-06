@@ -380,6 +380,14 @@ class TestVersions(unittest.TestCase):
         self.assertTrue(out.path.endswith("_comp_v003.1001.exr"))
         self.assertEqual(out.data["square"]["version"], 3)
 
+    def test_record_output_file_replaces_an_existing_revision_in_place(self):
+        tt = self.tasks[0]
+        self.api.record_output_file(self.shot, "comp", tt, revision=2, path="X:/a/v002")
+        self.api.record_output_file(self.shot, "comp", tt, revision=2, path="X:/b/v002")
+        comps = [o for o in self.api._b.output_files if o["revision"] == 2]
+        self.assertEqual(len(comps), 1)
+        self.assertEqual(comps[0]["path"], "X:/b/v002")
+
     def test_record_working_file_our_path(self):
         [task] = self.tasks
         self.assertEqual(self.api.next_working_revision(task), 1)

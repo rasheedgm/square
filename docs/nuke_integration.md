@@ -21,7 +21,8 @@ Nuke doesn't prompt for a password.
 | **Open Version…** (`Ctrl+Alt+O`) | the Open Version panel |
 | **SquareWrite** | a Write node with a Square tab |
 | **SquareRead** | a Read node with a Square tab |
-| **Publish Selected Write** | publish the selected Write's rendered frames |
+| **Render && Publish Write** | render the selected Write locally, then publish it |
+| **Publish Rendered Write** | publish an already-rendered Write (farm renders) |
 
 ## Context
 
@@ -41,11 +42,18 @@ to list them.
 
 - **Save Version panel** — pick the workfile name and *minor up* (WIP save, same
   major) or *major up* (milestone; resets minor to 1 and records the major in
-  Kitsu). Shows the destination path before you commit.
+  Kitsu). Shows the destination path before you commit. No comment field —
+  comments belong on the task at publish/review time.
 - **Open Version panel** — the cascade + name, then a flat version list
   (`v003.002`, `v003.001`, `v002.001 (offline)` …). "Offline" = the file isn't
   on this machine's NAS path. Opening prompts *clear & open here* / *open in a
   new Nuke* if the session already has nodes.
+
+**Version alignment.** Workfile major **N** ⇔ published output **vN**, by
+construction (publish uses the workfile major, not "next output revision"; a
+re-render replaces vN unless it's locked). Review **previews** float — you may
+post several per version — but each preview's comment names the version it
+reviews (`Preview — CompRender v003`).
 
 ## SquareRead / SquareWrite
 
@@ -54,9 +62,12 @@ type, name, version) drive the node's `file`; a `knobChanged` callback keeps it
 in sync.
 
 - **SquareWrite** — media type lists only `renderable` types (`CompRender`,
-  `Precomp`, …). Version defaults to **(new)**; picking an existing version that
-  is **locked** (reviewed / delivered) blocks the render and the status knob
-  says so. `Make preview on publish` toggles the review proxy.
+  `Precomp`, …). Version **(new)** = the current workfile major, so the
+  published output version always equals the workfile major it came from;
+  picking an existing version re-renders it in place (blocked if that version
+  is **locked** — reviewed / delivered — with the status knob saying so).
+  `Make preview on publish` toggles the review proxy. A **Render & Publish**
+  button renders locally and publishes in one step.
 - **SquareRead** — media type lists delivery + publish types (plates, elements,
   renders). Resolves the path, colorspace, and frame range for the chosen
   version.

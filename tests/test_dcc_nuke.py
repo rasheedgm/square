@@ -103,6 +103,23 @@ class TestOpsOutputs(unittest.TestCase):
             self.assertIn(".####.exr", info["path"])
             self.assertFalse(info["locked"])
 
+    def test_output_version_follows_workfile_major(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            # save workfile up to major 3
+            for _ in range(3):
+                t = ops.next_save(_t(), bump="major")
+                Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+                Path(t.path).write_text("x", encoding="utf-8")
+                ops.register_major(_t(), t)
+            info = ops.resolve_output_path(_t(), "CompRender", NEW_VERSION)
+            self.assertEqual(info["version"], 3)             # == workfile major
+
+            r = Path(td) / "r"; r.mkdir()
+            (r / "c.1001.exr").write_bytes(b"x" * 10)
+            res = ops.publish_render(_t(), [str(r / "c.1001.exr")], proxy_dry_run=True)
+            self.assertEqual(res.version, 3)
+
     def test_resolve_output_path_reports_lock(self):
         with tempfile.TemporaryDirectory() as td:
             ops, api = _ops(td)
@@ -215,6 +232,9 @@ class _FakeNuke:
         return _Knob(name)
 
     def Boolean_Knob(self, name, label=None):
+        return _Knob(name)
+
+    def PyScript_Knob(self, name, label=None, command=None):
         return _Knob(name)
 
     def Enumeration_Knob(self, name, label, values):

@@ -55,6 +55,9 @@ def _create(nuke, node_class: str, kind: str):
         prev = nuke.Boolean_Knob("sq_preview", "Make preview on publish")
         prev.setValue(True)
         node.addKnob(prev)
+        node.addKnob(nuke.PyScript_Knob(
+            "sq_publish", "Render & Publish",
+            "from tools.dcc.nuke import panel; panel.render_and_publish_node(nuke.thisNode())"))
     status = nuke.Text_Knob("sq_status", "")
     node.addKnob(status)
 

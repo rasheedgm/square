@@ -230,14 +230,24 @@ def save_workfile(pctx, entity, task, src_path, *, media_type: str = DEFAULT_WOR
 # ---- outputs -----------------------------------------------
 
 def publish_output(pctx, entity, task, *, media_type: str, frames, name: str = "main",
-                   media_info=None, source_workfile=None, comment: str = "",
-                   transfer_mode: str = "copy", make_review_proxy: bool | None = None,
+                   version: int | None = None, media_info=None, source_workfile=None,
+                   comment: str = "", transfer_mode: str = "copy",
+                   make_review_proxy: bool | None = None,
                    proxy_dry_run: bool = False) -> "media.MediaResult":
+    """Publish rendered frames as `media_type`. `version` pins the output
+    revision (pass the source workfile's major so output version == workfile
+    major); an existing revision is replaced in place."""
     src_id = getattr(source_workfile, "id", "") if source_workfile else ""
     return media.publish(pctx, entity, media_type, task, files=frames, name=name,
-                         media_info=media_info, comment=comment,
+                         version=version, media_info=media_info, comment=comment,
                          transfer_mode=transfer_mode, make_review_proxy=make_review_proxy,
                          proxy_dry_run=proxy_dry_run, source_workfile_id=src_id)
+
+
+def current_workfile_major(pctx, task, *, name: str = "main") -> int:
+    """The highest workfile major registered on this task/name, or 0."""
+    return max((w.revision for w in pctx.kitsu.working_files(task)
+                if (w.name or "main") == name), default=0)
 
 
 def output_locked(output) -> bool:

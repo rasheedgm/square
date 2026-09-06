@@ -48,10 +48,13 @@ class RecordingKitsu(OfflineApi):
     def record_output_file(self, entity, output_type_name, task, *, revision, path,
                            representation="", name="main", comment="", data=None):
         key = (getattr(entity, "id", entity), output_type_name, name)
-        self._rev[key] = revision
-        rec = {"output_type": output_type_name, "revision": revision, "path": path,
-               "representation": representation, "name": name, "data": data or {}}
-        self.outputs.append(rec)
+        self._rev[key] = max(self._rev.get(key, 0), revision)
+        rec = next((o for o in self.outputs if o["output_type"] == output_type_name
+                    and o["revision"] == revision and o["name"] == name), None)
+        if rec is None:
+            rec = {"output_type": output_type_name, "revision": revision, "name": name}
+            self.outputs.append(rec)
+        rec.update(path=path, representation=representation, data=data or {})
         from square_core.model import Output
         return Output(output_type=output_type_name, revision=revision, path=path,
                       representation=representation, name=name, data=data or {})
@@ -290,6 +293,28 @@ class TestWorkfiles(unittest.TestCase):
             work.lock_output(pctx, res.record, reason="approved")
             self.assertEqual(pctx.kitsu.output_data[-1][1], {"locked": True,
                                                              "locked_reason": "approved"})
+
+    def test_explicit_version_replaces_in_place(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            a = Path(td) / "a.1001.exr"; a.write_bytes(b"a" * 20)
+            b = Path(td) / "b.1001.exr"; b.write_bytes(b"b" * 20)
+            work.publish_output(pctx, shot, task, media_type="CompRender", frames=[str(a)],
+                                version=2, make_review_proxy=False)
+            work.publish_output(pctx, shot, task, media_type="CompRender", frames=[str(b)],
+                                version=2, make_review_proxy=False)          # re-render v2
+            comps = [o for o in pctx.kitsu.outputs if o["output_type"] == "CompRender"]
+            self.assertEqual(len(comps), 1)                                   # not forked
+            self.assertEqual(comps[0]["revision"], 2)
+
+    def test_current_workfile_major(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            self.assertEqual(work.current_workfile_major(pctx, task), 0)
+            tmpl = Path(td) / "t.nk"; tmpl.write_text("x", encoding="utf-8")
+            work.new_workfile(pctx, shot, task, template=str(tmpl))
+            work.new_workfile(pctx, shot, task, from_current=True)
+            self.assertEqual(work.current_workfile_major(pctx, task), 2)
 
     def test_publish_output_records_source_workfile(self):
         with tempfile.TemporaryDirectory() as td:

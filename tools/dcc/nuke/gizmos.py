@@ -52,11 +52,14 @@ def _create(nuke, node_class: str, kind: str):
     for name, label in labels:
         node.addKnob(nuke.Enumeration_Knob(name, label, [""]))
     if kind == "write":
-        prev = nuke.Boolean_Knob("sq_preview", "Make preview on publish")
+        prev = nuke.Boolean_Knob("sq_preview", "Make review preview")
         prev.setValue(True)
         node.addKnob(prev)
+        dop = nuke.Boolean_Knob("sq_do_publish", "Publish after render")
+        dop.setValue(True)
+        node.addKnob(dop)
         node.addKnob(nuke.PyScript_Knob(
-            "sq_publish", "Render & Publish",
+            "sq_publish", "Render",
             "from tools.dcc.nuke import panel; panel.render_and_publish_node(nuke.thisNode())"))
     status = nuke.Text_Knob("sq_status", "")
     node.addKnob(status)

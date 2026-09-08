@@ -21,8 +21,23 @@ Nuke doesn't prompt for a password.
 | **Open Version…** (`Ctrl+Alt+O`) | the Open Version panel |
 | **SquareWrite** | a Write node with a Square tab |
 | **SquareRead** | a Read node with a Square tab |
-| **Render && Publish Write** | render the selected Write locally, then publish it |
-| **Publish Rendered Write** | publish an already-rendered Write (farm renders) |
+| **Render && Publish** | render the selected Write, then open the Publish panel |
+| **Publish Output…** | the Publish panel for the selected Write **or Read** |
+
+## Publish
+
+Publishing always goes through the **Publish Output** panel — the cascade +
+media type + version (`(new)` = the current workfile major, or re-render an
+existing one) + a comment + a *make review preview* toggle, all pre-populated
+from the selected node and editable. It publishes:
+
+- a **Write** — its `file` pattern over the script frame range
+- a **Read** — its `file` over the Read's range (register an external / delivered
+  render as an output version)
+
+A SquareWrite's **Render** button renders over the script range then opens the
+panel; untick its **Publish after render** knob to just render (publish later
+via *Publish Output…*). A locked target version is refused.
 
 ## Context
 

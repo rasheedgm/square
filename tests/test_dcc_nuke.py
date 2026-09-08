@@ -303,13 +303,43 @@ class TestGizmos(unittest.TestCase):
             self.assertEqual(node["colorspace"].value(), "ACEScg")
 
 
+    def test_square_write_has_a_publish_toggle(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertIn("sq_do_publish", node.knobs())
+            self.assertTrue(node["sq_do_publish"].value())      # default on
+            self.assertIn("sq_preview", node.knobs())
+
+
 class TestPanelImports(unittest.TestCase):
     def test_panel_and_gizmos_import_without_nuke(self):
         import tools.dcc.nuke.gizmos as g
         import tools.dcc.nuke.panel as p
         self.assertTrue(hasattr(p, "save_version"))
         self.assertTrue(hasattr(p, "open_version"))
+        self.assertTrue(hasattr(p, "publish_dialog"))
         self.assertTrue(hasattr(g, "create_square_write"))
+
+    def test_menu_points_at_publish_dialog(self):
+        src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
+        self.assertIn("publish_dialog", src)
+
+    def test_node_frames_expands_a_read_over_its_range(self):
+        from tools.dcc.nuke import panel
+        node = _Node("Read")
+        node["file"].setValue("X:/sh/plate.####.exr")
+        node["first"].setValue("1001")
+        node["last"].setValue("1003")
+        frames = panel._node_frames(_FakeNuke(), node)
+        self.assertEqual(frames, ["X:/sh/plate.1001.exr", "X:/sh/plate.1002.exr",
+                                  "X:/sh/plate.1003.exr"])
+
+    def test_node_frames_single_file(self):
+        from tools.dcc.nuke import panel
+        node = _Node("Read")
+        node["file"].setValue("X:/sh/plate_v001.mov")
+        self.assertEqual(panel._node_frames(_FakeNuke(), node), ["X:/sh/plate_v001.mov"])
 
 
 if __name__ == "__main__":

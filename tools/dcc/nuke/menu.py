@@ -14,8 +14,9 @@ _menu.addCommand("Open Version…", _P.format("open_version"), "ctrl+alt+o")
 _menu.addSeparator()
 _menu.addCommand("SquareWrite", _P.format("create_square_write"))
 _menu.addCommand("SquareRead", _P.format("create_square_read"))
-_menu.addCommand("Render && Publish Write", _P.format("render_and_publish_selected"))
-_menu.addCommand("Publish Rendered Write", _P.format("publish_selected_write"))
+_menu.addSeparator()
+_menu.addCommand("Render && Publish", _P.format("render_and_publish_selected"))
+_menu.addCommand("Publish Output…", _P.format("publish_dialog"))
 
 # keep every SquareRead / SquareWrite's file path in sync with its Square tab
 gizmos.register_callbacks(nuke)

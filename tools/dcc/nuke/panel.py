@@ -281,65 +281,175 @@ def create_square_read():
     gizmos.create_square_read(_nuke())
 
 
-def _selected_write(nuke):
-    sel = [n for n in nuke.selectedNodes() if n.Class() == "Write"]
-    node = sel[0] if sel else next((n for n in nuke.allNodes("Write")), None)
+# ---------------------------------------------------------------------------
+# Publish  (Write render *or* an existing Read)
+# ---------------------------------------------------------------------------
+
+def _selected_square_node(nuke):
+    """The Write / Read to publish -- a selected one, else the only Write."""
+    sel = [n for n in nuke.selectedNodes() if n.Class() in ("Write", "Read")]
+    sel.sort(key=lambda n: 0 if n.Class() == "Write" else 1)
+    node = sel[0] if sel else next(iter(nuke.allNodes("Write")), None)
     if node is None:
-        raise OpsError("Select a (Square) Write node.")
+        raise OpsError("Select a Square Write or Read node to publish.")
     return node
 
 
-def _write_context(nuke, node):
+def _node_context(nuke, node):
+    """(Target, media_type, name, make_preview) seeded from the node's Square
+    tab, falling back to the launch env."""
     from .context import Target
-    if gizmos.MARK in node.knobs() and node[gizmos.MARK].value() == "write":
+    k = node.knobs()
+    if gizmos.MARK in k:
         t = Target(node["sq_project"].value(), node["sq_episode"].value(),
-                   node["sq_sequence"].value(), node["sq_shot"].value(), node["sq_task"].value())
+                   node["sq_sequence"].value(), node["sq_shot"].value(),
+                   node["sq_task"].value())
         media_type = node["sq_media_type"].value() or "CompRender"
-        name = node["sq_name"].value() or "main"
-        make_preview = bool(node["sq_preview"].value()) if "sq_preview" in node.knobs() else True
+        name = (node["sq_name"].value() if "sq_name" in k else "") or "main"
+        make_preview = bool(node["sq_preview"].value()) if "sq_preview" in k else True
     else:
         t, media_type, name, make_preview = from_env(), "CompRender", "main", True
-    if not t.complete:
-        raise OpsError("No shot context on that Write node — set its Square tab.")
     return t, media_type, name, make_preview
 
 
-def _publish_write(nuke, node):
-    t, media_type, name, make_preview = _write_context(nuke, node)
-    pattern = node["file"].value()
-    first, last = int(nuke.root()["first_frame"].value()), int(nuke.root()["last_frame"].value())
-    frames = [_expand(pattern, f) for f in range(first, last + 1)]
-    missing = [f for f in frames if not _exists(f)]
-    if missing:
-        raise OpsError(f"{len(missing)} frame(s) not rendered yet (e.g. {missing[0]}).")
-    res = get_ops().publish_render(t, frames, media_type=media_type, name=name,
-                                  make_preview=make_preview,
-                                  comment=f"from {nuke.root().name()}")
-    _msg(f"Published {media_type} v{res.version:03d}"
-         + (" + review proxy" if getattr(res, "preview", None) else "")
-         + f"\n{res.dir}")
+def _node_frames(nuke, node):
+    """The source frame paths for `node` over its render range."""
+    pattern = (node["file"].value() or "").strip()
+    if not pattern:
+        return []
+    if "#" not in pattern and "%0" not in pattern:      # single file (mov, ...)
+        return [pattern]
+    if node.Class() == "Read":
+        first, last = int(node["first"].value()), int(node["last"].value())
+    else:
+        first = int(nuke.root()["first_frame"].value())
+        last = int(nuke.root()["last_frame"].value())
+    return [_expand(pattern, f) for f in range(first, last + 1)]
 
 
 @_guard
-def publish_selected_write():
-    """Publish an already-rendered Write (farm renders: submit, then publish)."""
+def publish_dialog(node=None):
+    """The Publish panel -- prefilled from a Square Write/Read (or the selection),
+    everything editable, then publishes."""
     nuke = _nuke()
-    _publish_write(nuke, _selected_write(nuke))
+    node = node or _selected_square_node(nuke)
+    _PublishPanel(nuke, node).run()
+
+
+# back-compat menu names
+def publish_selected_write():
+    publish_dialog()
 
 
 @_guard
 def render_and_publish_selected():
-    render_and_publish_node(_selected_write(_nuke()))
+    render_and_publish_node(_selected_square_node(_nuke()))
 
 
 @_guard
 def render_and_publish_node(node):
-    """Render the Write locally over the script range, then publish it."""
+    """Render a Write over the script range, then open the Publish panel. If the
+    node's 'Publish after render' box is off, just render."""
     nuke = _nuke()
-    _write_context(nuke, node)                        # validate context first
-    first, last = int(nuke.root()["first_frame"].value()), int(nuke.root()["last_frame"].value())
+    if node.Class() != "Write":
+        raise OpsError("Render & Publish needs a Write node.")
+    first = int(nuke.root()["first_frame"].value())
+    last = int(nuke.root()["last_frame"].value())
     nuke.execute(node, first, last)
-    _publish_write(nuke, node)
+    if "sq_do_publish" in node.knobs() and not node["sq_do_publish"].value():
+        _msg(f"Rendered {last - first + 1} frame(s).\n"
+             "Publish later: Square -> Publish Output.")
+        return
+    _PublishPanel(nuke, node).run()
+
+
+class _PublishPanel:
+    def __init__(self, nuke, node):
+        import nukescripts
+        self.nuke, self.node = nuke, node
+        ops = get_ops()
+        seed, mtype, name, preview = _node_context(nuke, node)
+
+        self.p = nukescripts.PythonPanel("Square — Publish Output", "com.square.publish")
+        self.picker = _Picker(self.p, nuke, ops, with_name=True)
+        self.k_mtype = nuke.Enumeration_Knob("mtype", "Media type", [""])
+        self.k_version = nuke.Enumeration_Knob("version", "Version", [NEW_VERSION])
+        self.k_comment = nuke.Multiline_Eval_String_Knob("comment", "Comment")
+        self.k_preview = nuke.Boolean_Knob("preview", "Make review preview")
+        self.k_src = nuke.Text_Knob("src", "Source")
+        self.k_info = nuke.Text_Knob("info", "")
+        for kb in (self.k_mtype, self.k_version, self.k_comment, self.k_preview,
+                   self.k_src, self.k_info):
+            self.p.addKnob(kb)
+        self.k_preview.setValue(bool(preview))
+        if self.picker.k_name and name:
+            self.picker.k_name.setValue(name)
+        self.p.knobChanged = self._changed
+        self._want_mtype = mtype
+        self._reload_types()
+
+    def run(self):
+        if self.p.showModalDialog():
+            self._publish()
+
+    # ---- wiring ----
+    def _changed(self, knob):
+        if self.picker.handles(knob):
+            self.picker.reload(knob.name())
+            self._reload_types()
+        elif knob is self.picker.k_name or knob is self.k_mtype:
+            self._reload_versions()
+
+    def _reload_types(self):
+        try:
+            types = get_ops().output_types(self.picker.target())
+        except OpsError as e:
+            types = []
+            self.k_info.setValue(str(e))
+        self.picker._set(self.k_mtype, types or [""],
+                         self._want_mtype if self._want_mtype in types else "")
+        self._reload_versions()
+
+    def _reload_versions(self):
+        t, mt = self.picker.target(), self.k_mtype.value()
+        self._src_frames = _node_frames(self.nuke, self.node) if self.node else []
+        missing = [f for f in self._src_frames if not _exists(f)]
+        src = self.node.name() if self.node else "(no node)"
+        self.k_src.setValue(f"{len(self._src_frames)} frame(s), "
+                            f"{len(missing)} missing   <-  {src}")
+        vs = []
+        try:
+            if t.complete and mt:
+                vs = [f"v{o.revision:03d}" for o in reversed(get_ops().output_versions(t, mt))]
+        except OpsError:
+            pass
+        self.picker._set(self.k_version, [NEW_VERSION] + vs, self.k_version.value())
+        self.k_info.setValue("(new) = the current workfile major"
+                             if self.k_version.value() == NEW_VERSION else
+                             "re-render of an existing version")
+
+    # ---- do it ----
+    def _publish(self):
+        t = self.picker.target()
+        if not t.complete:
+            raise OpsError("Pick project / sequence / shot / task.")
+        frames = getattr(self, "_src_frames", None) or _node_frames(self.nuke, self.node)
+        if not frames:
+            raise OpsError("No source frames — select a Square Write or Read.")
+        missing = [f for f in frames if not _exists(f)]
+        if missing:
+            raise OpsError(f"{len(missing)} frame(s) not on disk yet (e.g. {missing[0]}).")
+        v = self.k_version.value()
+        version = None if v in (NEW_VERSION, "", None) else int(str(v).lstrip("v"))
+        name = (self.picker.k_name.value() if self.picker.k_name else "main") or "main"
+        res = get_ops().publish_render(
+            t, frames, media_type=self.k_mtype.value(), name=name, version=version,
+            make_preview=bool(self.k_preview.value()),
+            comment=self.k_comment.value() or f"from {self.nuke.root().name()}")
+        to_env(t)
+        _msg(f"Published {self.k_mtype.value()} v{res.version:03d}"
+             + (" + review preview" if getattr(res, "preview", None) else "")
+             + f"\n{res.dir}")
 
 
 # ---- helpers ------------------------------------------------------

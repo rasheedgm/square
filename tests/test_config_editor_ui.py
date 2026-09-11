@@ -49,6 +49,32 @@ def _pipeline_and_sparse_project(tmp):
     return PipelineConfig.load(studio), studio, root
 
 
+def _pipeline_and_project_with_studio_recipe(tmp):
+    """A studio whose `project_defaults.delivery_presets` differs from the
+    built-in, and a project whose own file genuinely never wrote a
+    `delivery_presets` key (like a real project created before that studio
+    preset existed) -- it must show the studio's version (source:
+    studio-default) without that actually being written into the project's
+    own file. Uses a sparse hand-placed-style file, like
+    `_pipeline_and_sparse_project`, NOT `ProjectConfig.from_defaults().save()`
+    -- that bakes every DEFAULT_PROJECT_CONFIG key (delivery_presets included)
+    into the file, which would make delivery_presets look like an *override*
+    instead of an absent key."""
+    studio = Path(tmp) / "studio_config.json"
+    studio.write_text(json.dumps({
+        "kitsu_host": "http://localhost/api",
+        "nas_roots": {"default": str(Path(tmp) / "nas")},
+        "project_defaults": {
+            "delivery_presets": {"ACME": {"container": "dpx"}},
+        },
+    }), encoding="utf-8")
+    root = Path(tmp) / "nas" / "ABC"
+    p = ProjectConfig.path_for(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    return PipelineConfig.load(studio), studio, root
+
+
 class _User:
     role = "admin"
     email = "admin@example.com"
@@ -178,6 +204,34 @@ class TestEditorUI(unittest.TestCase):
             v = ed.get_value()
             self.assertEqual(v["project"], "{nas_root}/{project}")
 
+    def test_pin_writes_the_inherited_studio_default_into_the_project(self):
+        """A field showing an inherited studio-default value (never edited)
+        must not be written on Save -- but 'pin to project' explicitly marks
+        it touched so a deliberate one-click adopt actually persists."""
+        from tools.config_editor.core import ConfigStore
+        from tools.config_editor.ui_main import ScopePane
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project_with_studio_recipe(td)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+            store.open_project(root, "ABC")
+            pane = ScopePane("project", store)
+
+            fv = store.field("project", "delivery_presets")
+            self.assertEqual(fv.source, "studio-default")
+            self.assertFalse(fv.overridden)
+
+            # Save with nothing touched: still absent from the project's file
+            self.assertTrue(pane.save())
+            self.assertNotIn("delivery_presets",
+                             ProjectConfig.load(root).data)
+
+            pane._pin("delivery_presets")
+            self.assertIn("delivery_presets", pane._touched)
+            self.assertTrue(pane.save())
+
+            on_disk = ProjectConfig.load(root)
+            self.assertIn("delivery_presets", on_disk.data)
+            self.assertEqual(on_disk.delivery_template("ACME")["container"], "dpx")
 
 if __name__ == "__main__":
     unittest.main()

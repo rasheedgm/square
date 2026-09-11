@@ -94,6 +94,21 @@ class ScopePane(QtWidgets.QWidget):
                 rb.setStyleSheet("color:#93C5FD;font-size:11px;")
                 rb.clicked.connect(lambda _=False, k=fv.key: self._reset(k))
                 sub.addWidget(rb)
+            elif self.scope == "project" and not fv.overridden:
+                # the value shown here is only *inherited* (studio-default /
+                # builtin) -- editing a sub-editor's table/registry without
+                # actually changing a cell never marks the field touched (by
+                # design: Save must not silently bake in a value nobody typed),
+                # so there was no way to explicitly adopt it into this
+                # project's own file. This does that in one click.
+                pb = QtWidgets.QPushButton("pin to project")
+                pb.setFlat(True)
+                pb.setStyleSheet("color:#93C5FD;font-size:11px;")
+                pb.setToolTip(
+                    "write this inherited value into the project's own config "
+                    "so it stops tracking future studio-default changes")
+                pb.clicked.connect(lambda _=False, k=fv.key: self._pin(k))
+                sub.addWidget(pb)
             v.addLayout(sub)
             form.addRow(label, cell)
 
@@ -112,6 +127,12 @@ class ScopePane(QtWidgets.QWidget):
         self._flush_into_store()      # keep other unsaved edits
         self.store.reset(key)         # then drop this one back to the studio default
         self.rebuild()
+
+    def _pin(self, key: str):
+        """Adopt the currently-inherited (studio-default / builtin) value into
+        this project's own config, without changing what's displayed -- just
+        mark it touched so the next Save actually writes it."""
+        self._on_field_changed(key)
 
     # ----
 

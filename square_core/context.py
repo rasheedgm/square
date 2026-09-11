@@ -101,7 +101,7 @@ class PipelineContext:
             proj.root_path = self.project_root(proj.code)
 
         try:
-            cfg = ProjectConfig.load(proj.root_path)
+            cfg = ProjectConfig.load(proj.root_path, self.config.project_defaults)
         except ConfigError as e:
             logger.warning("no project config at %s (%s) -- using site defaults",
                            proj.root_path, e)

@@ -1,5 +1,11 @@
 # square_core -- the pipeline core
-gazu>=0.10
+# gazu>=0.10 previously had no upper bound -- square_core.kitsu.auth reads
+# token shapes specific to how 1.2.x's KitsuClient actually stores them
+# (a .tokens dict from log_in(), separate .access_token/.refresh_token
+# attributes only from refresh_access_token()); an untested older/newer
+# major version could differ and silently break login. Pin to what's
+# actually verified.
+gazu>=1.2,<2
 requests>=2.31.0
 pillow>=10.0.0
 xxhash>=3.3.0

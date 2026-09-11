@@ -104,12 +104,19 @@ def forget(host: str = "") -> None:
 
 
 def _tokens_from_client() -> dict:
+    """Best-effort fallback reading the current tokens straight off gazu's
+    client -- it exposes them two different ways depending on how they got
+    there: `KitsuClient.refresh_access_token()` sets `.access_token` /
+    `.refresh_token` as plain attributes, but `gazu.log_in()` (via
+    `client.set_tokens()`) only ever sets a `.tokens` dict, never those
+    attributes. Check both, attribute first."""
     import gazu
 
     dc = getattr(getattr(gazu, "client", None), "default_client", None)
+    tok = getattr(dc, "tokens", None) or {}
     return {
-        "access_token": getattr(dc, "access_token", "") or "",
-        "refresh_token": getattr(dc, "refresh_token", "") or "",
+        "access_token": getattr(dc, "access_token", "") or tok.get("access_token") or "",
+        "refresh_token": getattr(dc, "refresh_token", "") or tok.get("refresh_token") or "",
     }
 
 
@@ -118,8 +125,19 @@ def login(host: str, email: str, password: str) -> dict:
     import gazu
 
     gazu.set_host(host)
-    result = gazu.log_in(email, password)  # raises on bad creds
-    tokens = (result or {}).get("tokens") or _tokens_from_client()
+    # gazu.log_in() raises on bad creds and otherwise returns the tokens
+    # directly -- access_token/refresh_token at the top level of the dict,
+    # NOT nested under a "tokens" key (that was the actual bug here: this
+    # used to look for `result["tokens"]`, which never exists, silently
+    # falling through to a client-attribute fallback that was ALSO wrong for
+    # the login path -- see `_tokens_from_client`'s docstring. Net effect: an
+    # empty token got cached after a successful login, and the very next
+    # connect() attempt raised NeedsLogin again as if nothing had happened)
+    result = gazu.log_in(email, password)
+    tokens = {"access_token": (result or {}).get("access_token", ""),
+             "refresh_token": (result or {}).get("refresh_token", "")}
+    if not tokens["access_token"]:
+        tokens = _tokens_from_client()
     store_session(host, tokens)
     return tokens
 

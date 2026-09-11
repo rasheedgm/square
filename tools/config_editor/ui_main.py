@@ -10,8 +10,8 @@ from __future__ import annotations
 from Qt import QtCore, QtWidgets
 
 from square_core.config import ConfigError
-from tools.qt_compat import (ALIGN_TOP, FONT_BOLD, FORM_FIELDS_GROW, MSGBOX_YES,
-                             SIZE_EXPANDING, SIZE_PREFERRED)
+from tools.qt_compat import (ALIGN_TOP, FONT_BOLD, FORM_FIELDS_GROW, MSGBOX_NO,
+                             MSGBOX_YES, SIZE_EXPANDING, SIZE_PREFERRED)
 from .core import ConfigStore, NotAuthorized
 from .widgets.fields import make_field_editor
 
@@ -134,6 +134,24 @@ class ScopePane(QtWidgets.QWidget):
         mark it touched so the next Save actually writes it."""
         self._on_field_changed(key)
 
+    def inherited_keys(self) -> list[str]:
+        """Every project-scope key NOT already an explicit override -- what
+        `freeze_all()` would touch."""
+        if self.scope != "project":
+            return []
+        return [fv.key for fv in self.store.fields(self.scope) if not fv.overridden]
+
+    def freeze_all(self) -> int:
+        """"Freeze this project": pin every inherited key at once, so this
+        project stops tracking ANY future studio config change -- e.g. it's
+        in delivery and must not shift under a studio-wide edit landing
+        mid-flight. Still requires Save to actually persist. Returns how many
+        keys got touched."""
+        keys = self.inherited_keys()
+        for k in keys:
+            self._pin(k)
+        return len(keys)
+
     # ----
 
     def _flush_into_store(self):
@@ -207,6 +225,7 @@ class MainWindow(QtWidgets.QMainWindow):
         spacer = QtWidgets.QWidget()
         spacer.setSizePolicy(SIZE_EXPANDING, SIZE_PREFERRED)
         tb.addWidget(spacer)
+        self._freeze_btn = tb.addAction("Freeze Project", self._freeze_project)
         self._save_btn = tb.addAction("Save", self._save)
         self._revert_btn = tb.addAction("Revert", self._revert)
 
@@ -249,6 +268,33 @@ class MainWindow(QtWidgets.QMainWindow):
         self._current_pane().save()
         self._update_title()
         self._update_status()
+
+    def _freeze_project(self):
+        if not self.store.has_project:
+            QtWidgets.QMessageBox.information(self, "No project open",
+                                             "Open a project first.")
+            return
+        n = len(self.project_pane.inherited_keys())
+        if not n:
+            QtWidgets.QMessageBox.information(
+                self, "Nothing to freeze",
+                "Every key is already an explicit override for this project.")
+            return
+        resp = QtWidgets.QMessageBox.question(
+            self, "Freeze this project",
+            f"Write the current value of {n} inherited key(s) into "
+            f"{self.store.project_code}'s own config?\n\n"
+            "This project will stop tracking any future studio config change "
+            "for all of them, until reset individually -- typically used to "
+            "protect a project that's actively in delivery from a studio "
+            "edit landing mid-flight.\n\n"
+            "You'll still need to click Save to write it to disk.",
+            MSGBOX_YES | MSGBOX_NO)
+        if resp != MSGBOX_YES:
+            return
+        self.tabs.setCurrentWidget(self.project_pane)
+        self.project_pane.freeze_all()
+        self._update_title()
 
     def _update_status(self, *_):
         """Show exactly which file the active tab reads/writes, and where its

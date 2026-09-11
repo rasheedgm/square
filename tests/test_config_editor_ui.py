@@ -233,5 +233,47 @@ class TestEditorUI(unittest.TestCase):
             self.assertIn("delivery_presets", on_disk.data)
             self.assertEqual(on_disk.delivery_template("ACME")["container"], "dpx")
 
+    def test_freeze_all_pins_every_inherited_key_at_once(self):
+        """'Freeze this project' -- protects a project actively in delivery
+        from a studio config edit landing mid-flight: every key still tracking
+        the studio default gets pinned in one shot, an already-overridden key
+        is left alone, and (like a single pin) nothing writes until Save."""
+        from tools.config_editor.core import ConfigStore
+        from tools.config_editor.ui_main import ScopePane
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project_with_studio_recipe(td)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+            store.open_project(root, "ABC")
+            pane = ScopePane("project", store)
+
+            # give the project one real override already, before freezing
+            pane._editors["fps"].spin.setValue(30.0)
+            pane._on_field_changed("fps")
+            self.assertTrue(pane.save())
+            self.assertEqual(ProjectConfig.load(root).data.get("fps"), 30.0)
+
+            pane.rebuild()
+            before = pane.inherited_keys()
+            self.assertIn("delivery_presets", before)
+            self.assertNotIn("fps", before)             # already overridden -- left alone
+
+            n = pane.freeze_all()
+            self.assertEqual(n, len(before))
+            self.assertEqual(set(pane._touched), set(before))
+
+            # nothing on disk yet -- freezing only marks touched
+            self.assertNotIn("delivery_presets", ProjectConfig.load(root).data)
+
+            self.assertTrue(pane.save())
+            on_disk = ProjectConfig.load(root)
+            for key in before:                            # dotted paths (colorspace.*) too
+                cur = on_disk.data
+                for part in key.split("."):
+                    self.assertIsInstance(cur, dict)
+                    self.assertIn(part, cur)
+                    cur = cur[part]
+            self.assertEqual(on_disk.delivery_template("ACME")["container"], "dpx")
+            self.assertEqual(on_disk.data["fps"], 30.0)   # untouched by the freeze
+
 if __name__ == "__main__":
     unittest.main()

@@ -147,6 +147,71 @@ class TestMediaTypeLookup(unittest.TestCase):
         self.assertEqual(self.cfg.tool("ingest"), {})    # a tool fills this in when installed
 
 
+class TestPipelineDefaultsLiveFallback(unittest.TestCase):
+    """A key absent from a project's own `data` resolves through the studio's
+    live `pipeline_defaults` before the hardcoded built-in -- not just at
+    `projects.create` time, but on every load, matching how `tools.*` keys
+    already resolve via `schema.resolve(..., pipeline_defaults=...)`."""
+
+    def test_scalar_falls_back_to_studio_then_builtin(self):
+        cfg = ProjectConfig(data={}, pipeline_defaults={"fps": 30.0})
+        self.assertEqual(cfg.fps, 30.0)
+        cfg2 = ProjectConfig(data={}, pipeline_defaults={})
+        self.assertEqual(cfg2.fps, DEFAULT_PROJECT_CONFIG["fps"])
+
+    def test_project_own_value_still_wins_over_studio(self):
+        cfg = ProjectConfig(data={"fps": 25.0}, pipeline_defaults={"fps": 30.0})
+        self.assertEqual(cfg.fps, 25.0)
+
+    def test_merged_dict_key_layers_builtin_studio_project(self):
+        # builtin has 4 colorspace keys; studio overrides one, project overrides
+        # a different one -- all three must be visible in the final merge
+        cfg = ProjectConfig(data={"colorspace": {"working": "sRGB"}},
+                            pipeline_defaults={"colorspace": {"delivery": "sRGB2"}})
+        self.assertEqual(cfg.colorspace["working"], "sRGB")          # project wins
+        self.assertEqual(cfg.colorspace["delivery"], "sRGB2")        # studio, project silent
+        self.assertEqual(cfg.colorspace["ocio"],
+                         DEFAULT_PROJECT_CONFIG["colorspace"]["ocio"])  # neither set it
+
+    def test_whole_registry_key_falls_back_to_studios_raw_registry(self):
+        studio_presets = {"ACME": {"container": "dpx"}}
+        cfg = ProjectConfig(data={}, pipeline_defaults={"delivery_presets": studio_presets})
+        self.assertEqual(cfg.delivery_template("ACME")["container"], "dpx")
+
+    def test_project_own_registry_key_wins_outright_not_merged(self):
+        # whole-key semantics: a project that sets its own value doesn't
+        # blend it with the studio's -- it replaces it outright
+        studio_presets = {"ACME": {"container": "dpx"}}
+        project_presets = {"ACME": {"container": "mov"}}
+        cfg = ProjectConfig(data={"delivery_presets": project_presets},
+                            pipeline_defaults={"delivery_presets": studio_presets})
+        self.assertEqual(cfg.delivery_template("ACME")["container"], "mov")
+
+    def test_media_type_lookup_uses_studio_registry_when_project_has_none(self):
+        studio_media = copy.deepcopy(DEFAULT_PROJECT_CONFIG["media_types"])
+        studio_media["Widget"] = {"dir": "widgets/{name}_v{version}"}
+        cfg = ProjectConfig(data={}, pipeline_defaults={"media_types": studio_media})
+        self.assertIn("Widget", cfg.media_type_names())
+        self.assertEqual(cfg.media_type("Widget")["dir"], "widgets/{name}_v{version}")
+
+    def test_pipeline_context_project_passes_project_defaults_through(self):
+        from square_core.context import PipelineContext
+        from square_core.config.pipeline import PipelineConfig
+        from square_core.kitsu import OfflineApi
+        with tempfile.TemporaryDirectory() as td:
+            # a hand-placed sparse file -- the realistic case -- never sets fps
+            p = ProjectConfig.path_for(Path(td) / "ABC")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"schema_version": SCHEMA_VERSION}), encoding="utf-8")
+
+            cfg = PipelineConfig(nas_roots={"default": td},
+                                 project_defaults={"fps": 30.0})
+            api = OfflineApi()
+            ctx = PipelineContext(config=cfg, kitsu=api, user=api.current_user())
+            pctx = ctx.project("ABC")
+            self.assertEqual(pctx.config.fps, 30.0)
+
+
 class TestLoadSave(unittest.TestCase):
     def test_round_trip(self):
         with tempfile.TemporaryDirectory() as td:

@@ -148,81 +148,105 @@ def _deep_merge(base: dict, over: dict | None) -> dict:
 @dataclass
 class ProjectConfig:
     data: dict = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)))
+    # `PipelineConfig.project_defaults` -- the studio-wide template, consulted
+    # LIVE as the middle fallback layer (project's own value, else this, else
+    # the hardcoded DEFAULT_PROJECT_CONFIG) by every property below. Not
+    # written to disk; set by `PipelineContext.project()` / `load()`. Empty
+    # by default so every direct `ProjectConfig(data=...)` construction
+    # (tests, the config editor's own structural checks) behaves exactly as
+    # before -- this only changes anything when a caller actually supplies it.
+    pipeline_defaults: dict = field(default_factory=dict)
 
     # ---- typed views -------------------------------------------------
     #
-    # Every one of these falls back to `DEFAULT_PROJECT_CONFIG`, not a second,
-    # separately-maintained literal: a key **absent from this config's `data`**
-    # resolves from code; a key **present** (even partially, for a dict) wins,
-    # merged over the built-in so an admin only ever has to write the part
-    # they're actually changing. This is why `studio_config.template.json` /
-    # a freshly-created project file can start from just a few keys and still
-    # resolve everything -- and why the config editor can show every key
-    # (source `builtin`) without any of them being written back on save unless
-    # the admin actually touches that field.
+    # Every one of these resolves through THREE layers, in order: this
+    # config's own `data` (even partial, for a dict -- merged over what
+    # follows), then the studio's live `pipeline_defaults`
+    # (`PipelineConfig.project_defaults`, e.g. from `studio_config.json`),
+    # then `DEFAULT_PROJECT_CONFIG` (the code default). A key absent from
+    # this project's own file is NOT frozen at whatever the studio template
+    # said when the project was created -- it keeps tracking the studio
+    # default live, the same way `tools.*` keys already do via
+    # `schema.resolve(..., pipeline_defaults=...)`. This is why
+    # `studio_config.template.json` / a freshly-created project file can
+    # start from just a few keys and still resolve everything -- and why the
+    # config editor can show every key (source `builtin` / `studio-default`)
+    # without any of them being written back on save unless the admin
+    # actually touches that field.
+
+    def _scalar(self, key: str, builtin):
+        v = self.data.get(key)
+        if v is not None:
+            return v
+        v = (self.pipeline_defaults or {}).get(key)
+        return v if v is not None else builtin
+
+    def _merged(self, key: str, builtin: dict) -> dict:
+        studio = _deep_merge(builtin, (self.pipeline_defaults or {}).get(key) or {})
+        return _deep_merge(studio, self.data.get(key) or {})
 
     @property
     def fps(self) -> float:
-        return float(self.data.get("fps", DEFAULT_PROJECT_CONFIG["fps"]))
+        return float(self._scalar("fps", DEFAULT_PROJECT_CONFIG["fps"]))
 
     @property
     def resolution(self) -> str:
-        return str(self.data.get("resolution", DEFAULT_PROJECT_CONFIG["resolution"]))
+        return str(self._scalar("resolution", DEFAULT_PROJECT_CONFIG["resolution"]))
 
     @property
     def aspect_ratio(self) -> str:
-        return str(self.data.get("aspect_ratio", DEFAULT_PROJECT_CONFIG["aspect_ratio"]))
+        return str(self._scalar("aspect_ratio", DEFAULT_PROJECT_CONFIG["aspect_ratio"]))
 
     @property
     def version_pad(self) -> int:
-        return int(self.data.get("version_pad", DEFAULT_PROJECT_CONFIG["version_pad"]))
+        return int(self._scalar("version_pad", DEFAULT_PROJECT_CONFIG["version_pad"]))
 
     @property
     def frame_pad(self) -> int:
-        return int(self.data.get("frame_pad", DEFAULT_PROJECT_CONFIG["frame_pad"]))
+        return int(self._scalar("frame_pad", DEFAULT_PROJECT_CONFIG["frame_pad"]))
 
     @property
     def copy_workers(self) -> int:
-        return int(self.data.get("copy_workers", DEFAULT_PROJECT_CONFIG["copy_workers"]))
+        return int(self._scalar("copy_workers", DEFAULT_PROJECT_CONFIG["copy_workers"]))
 
     @property
     def slugify(self) -> dict:
-        return _deep_merge(DEFAULT_PROJECT_CONFIG["slugify"], self.data.get("slugify") or {})
+        return self._merged("slugify", DEFAULT_PROJECT_CONFIG["slugify"])
 
     @property
     def colorspace(self) -> dict:
-        return _deep_merge(DEFAULT_PROJECT_CONFIG["colorspace"], self.data.get("colorspace") or {})
+        return self._merged("colorspace", DEFAULT_PROJECT_CONFIG["colorspace"])
 
     @property
     def roots(self) -> dict:
-        return _deep_merge(DEFAULT_PROJECT_CONFIG["roots"], self.data.get("roots") or {})
+        return self._merged("roots", DEFAULT_PROJECT_CONFIG["roots"])
 
     @property
     def media_types(self) -> dict:
         """The raw registry as configured (unmerged) -- for listing / the
         editor. Use `media_type(name)` for a fully-resolved entry."""
-        return dict(self.data.get("media_types") or {})
+        return dict(self._scalar("media_types", {}) or {})
 
     @property
     def shot_folder_structure(self) -> list:
-        v = self.data.get("shot_folder_structure")
-        return list(v if v is not None else DEFAULT_PROJECT_CONFIG["shot_folder_structure"])
+        return list(self._scalar("shot_folder_structure",
+                                 DEFAULT_PROJECT_CONFIG["shot_folder_structure"]))
 
     @property
     def asset_folder_structure(self) -> list:
-        v = self.data.get("asset_folder_structure")
-        return list(v if v is not None else DEFAULT_PROJECT_CONFIG["asset_folder_structure"])
+        return list(self._scalar("asset_folder_structure",
+                                 DEFAULT_PROJECT_CONFIG["asset_folder_structure"]))
 
     @property
     def project_folder_structure(self) -> list:
-        v = self.data.get("project_folder_structure")
-        return list(v if v is not None else DEFAULT_PROJECT_CONFIG["project_folder_structure"])
+        return list(self._scalar("project_folder_structure",
+                                 DEFAULT_PROJECT_CONFIG["project_folder_structure"]))
 
     @property
     def delivery_presets(self) -> dict:
         """The raw registry as configured (unmerged) -- use `delivery_template()`
         for a fully-resolved preset."""
-        return dict(self.data.get("delivery_presets") or {})
+        return dict(self._scalar("delivery_presets", {}) or {})
 
     @property
     def tools(self) -> dict:
@@ -241,7 +265,7 @@ class ProjectConfig:
         release (e.g. `source`) is present even for a config written before
         it, and an entirely absent `media_types` key resolves the same as an
         empty one. An unknown name still resolves (as `_default`)."""
-        reg = self.data.get("media_types") or {}
+        reg = self.media_types
         own_default = reg.get(_DEFAULT_ENTRY)
         if own_default is not None and not isinstance(own_default, dict):
             raise ConfigError("media_types._default must be an object")
@@ -253,7 +277,7 @@ class ProjectConfig:
         (`delivery` / `publish` / `work`), only the types a tool at that stage
         offers -- e.g. ingest passes `source="delivery"`, a DCC publish panel
         `source="publish"`. A missing `source` on an entry inherits `_default`'s."""
-        names = [k for k in (self.data.get("media_types") or {}) if k != _DEFAULT_ENTRY]
+        names = [k for k in self.media_types if k != _DEFAULT_ENTRY]
         if source is None:
             return names
         return [n for n in names if self.media_type(n).get("source") == source]
@@ -262,7 +286,7 @@ class ProjectConfig:
         """Same inheritance shape as `media_type()`: the built-in
         `_default`, this config's own `_default` (if any), then the named
         client preset, deep-merged on top."""
-        presets = self.data.get("delivery_presets") or {}
+        presets = self.delivery_presets
         own_default = presets.get(_DEFAULT_ENTRY) or presets.get("default") or {}
         base = _deep_merge(DEFAULT_PROJECT_CONFIG["delivery_presets"][_DEFAULT_ENTRY], own_default)
         if client and client in presets:
@@ -284,7 +308,7 @@ class ProjectConfig:
         return Path(project_root) / PIPELINE_DIRNAME / PROJECT_CONFIG_FILENAME
 
     @classmethod
-    def load(cls, project_root: str | Path) -> "ProjectConfig":
+    def load(cls, project_root: str | Path, pipeline_defaults: dict | None = None) -> "ProjectConfig":
         # No migration path, deliberately: nothing has shipped to production
         # yet, so there is no old-shape data anywhere to accommodate. A
         # schema_version mismatch in either direction means recreate the
@@ -303,7 +327,7 @@ class ProjectConfig:
                 f"{p} is schema v{version}, this build understands v{SCHEMA_VERSION} -- "
                 f"recreate the project config (no migration path before v1.0)"
             )
-        cfg = cls(data=data)
+        cfg = cls(data=data, pipeline_defaults=pipeline_defaults or {})
         cfg.check()
         return cfg
 

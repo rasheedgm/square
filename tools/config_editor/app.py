@@ -32,8 +32,6 @@ QPushButton { background:#243047; border:1px solid #33405A; border-radius:4px;
     padding:5px 12px; }
 QPushButton:hover { background:#2C3B57; }
 QPushButton:flat { background:transparent; border:0; }
-QTabBar::tab { background:#161B27; padding:7px 16px; }
-QTabBar::tab:selected { background:#243047; }
 QToolBar { background:#131720; border-bottom:1px solid #2A3446; spacing:6px; padding:4px; }
 """
 

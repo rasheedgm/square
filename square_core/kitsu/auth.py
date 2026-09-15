@@ -32,6 +32,21 @@ def _file() -> Path:
 
 
 def _key(host: str) -> str:
+    """Normalize a host string for use as a session-cache key. Store and
+    lookup both go through this, so it must be idempotent and collision-free
+    for any two spellings of "the same host" -- a stray trailing slash, or a
+    doubled slash from pasting a host that already ends in "/" next to a
+    path that starts with "/" (this exact bug: a session got cached under
+    "http://host//api" while every real lookup asks for "http://host/api" --
+    a plain `rstrip("/")` never touches an *internal* double slash, so the
+    cached session was silently unreachable and every login looked like it
+    had never happened)."""
+    host = (host or "").strip()
+    if "://" in host:
+        scheme, rest = host.split("://", 1)
+        while "//" in rest:
+            rest = rest.replace("//", "/")
+        host = f"{scheme}://{rest}"
     return host.rstrip("/")
 
 

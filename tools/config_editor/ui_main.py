@@ -32,6 +32,8 @@ class ScopePane(QtWidgets.QWidget):
         self.store = store
         self._editors: dict[str, object] = {}
         self._touched: set[str] = set()      # keys actually edited since the last rebuild
+        self._tags: dict[str, QtWidgets.QLabel] = {}       # key -> its source/override label
+        self._pin_btns: dict[str, QtWidgets.QPushButton] = {}  # key -> its "pin to project" button
         self._dirty = False
 
         outer = QtWidgets.QVBoxLayout(self)
@@ -45,6 +47,8 @@ class ScopePane(QtWidgets.QWidget):
     def rebuild(self):
         self._editors.clear()
         self._touched.clear()
+        self._tags.clear()
+        self._pin_btns.clear()
         body = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(body)
         form.setLabelAlignment(ALIGN_TOP)
@@ -71,6 +75,7 @@ class ScopePane(QtWidgets.QWidget):
 
             tag = QtWidgets.QLabel(("● override" if fv.overridden else fv.source))
             tag.setStyleSheet(f"color:{_SOURCE_COLOR.get(fv.source, '#94A3B8')};font-size:11px;")
+            self._tags[fv.key] = tag
 
             editor = make_field_editor(fv, version_pad=version_pad, frame_pad=frame_pad)
             editor.signal_changed.connect(lambda k=fv.key: self._on_field_changed(k))
@@ -109,6 +114,7 @@ class ScopePane(QtWidgets.QWidget):
                     "so it stops tracking future studio-default changes")
                 pb.clicked.connect(lambda _=False, k=fv.key: self._pin(k))
                 sub.addWidget(pb)
+                self._pin_btns[fv.key] = pb
             v.addLayout(sub)
             form.addRow(label, cell)
 
@@ -131,8 +137,24 @@ class ScopePane(QtWidgets.QWidget):
     def _pin(self, key: str):
         """Adopt the currently-inherited (studio-default / builtin) value into
         this project's own config, without changing what's displayed -- just
-        mark it touched so the next Save actually writes it."""
+        mark it touched so the next Save actually writes it.
+
+        A pin copies the value unchanged, so ConfigStore.field()'s override
+        flag (project value != studio default) never flips for it -- that
+        comparison is deliberate (projects.create() bakes the WHOLE config
+        into a new project's file, so presence alone would flag every field
+        of every real project as "overridden", which is worse). That means a
+        rebuild can never show a pin as "project" the way a real edit would,
+        so give feedback locally instead: update this row's tag and hide its
+        "pin to project" button right now, without waiting on a rebuild."""
         self._on_field_changed(key)
+        tag = self._tags.get(key)
+        if tag is not None:
+            tag.setText("● pinned (save to persist)")
+            tag.setStyleSheet(f"color:{_SOURCE_COLOR['project']};font-size:11px;")
+        btn = self._pin_btns.pop(key, None)
+        if btn is not None:
+            btn.hide()
 
     def inherited_keys(self) -> list[str]:
         """Every project-scope key NOT already an explicit override -- what

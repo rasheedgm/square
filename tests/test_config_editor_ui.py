@@ -256,6 +256,29 @@ class TestEditorUI(unittest.TestCase):
             self.assertIn("delivery_presets", on_disk.data)
             self.assertEqual(on_disk.delivery_template("ACME")["container"], "dpx")
 
+    def test_pin_gives_immediate_visual_feedback(self):
+        """A pin copies the studio-default value unchanged, so
+        ConfigStore.field()'s value-comparison override flag never flips for
+        it -- there was no rebuild-driven way to show a pin took effect, so
+        the row updates locally instead: tag text changes and the
+        'pin to project' button disappears immediately, before Save."""
+        from tools.config_editor.core import ConfigStore
+        from tools.config_editor.ui_main import ScopePane
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project_with_studio_recipe(td)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+            store.open_project(root, "ABC")
+            pane = ScopePane("project", store)
+
+            self.assertIn("delivery_presets", pane._pin_btns)
+            tag_before = pane._tags["delivery_presets"].text()
+            self.assertNotIn("pinned", tag_before)
+
+            pane._pin("delivery_presets")
+
+            self.assertNotIn("delivery_presets", pane._pin_btns)
+            self.assertIn("pinned", pane._tags["delivery_presets"].text())
+
     def test_freeze_all_pins_every_inherited_key_at_once(self):
         """'Freeze this project' -- protects a project actively in delivery
         from a studio config edit landing mid-flight: every key still tracking

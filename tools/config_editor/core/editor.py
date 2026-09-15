@@ -213,17 +213,21 @@ class ConfigStore:
             return FieldView(value=(b if b is not _MISSING else ck.default),
                              source="builtin", **common)
 
-        # project scope: effective value is the project's own if present, else
-        # the studio default. It counts as an *override* only when the project
-        # file carries a value that differs from what the studio would give.
+        # project scope: effective value is the project's own if present,
+        # else the studio default. Presence alone makes it an override --
+        # not whether the value happens to differ. "Set override" (and a
+        # frozen project's full bake) write the CURRENT value unchanged on
+        # purpose; if override meant "differs from studio", neither could
+        # ever show as what it is. A newly-created project stays free of
+        # false positives because projects.create() writes a sparse file --
+        # not because this check used to compare values.
         if self.project_raw is None:
             raise RuntimeError("no project open")
-        dflt, dflt_src = self._studio_default(key)
         own = _dig(self.project_raw, key)
-        if own is not _MISSING and own != dflt:
+        if own is not _MISSING:
             return FieldView(value=own, source="project", overridden=True, **common)
-        val = own if own is not _MISSING else dflt
-        return FieldView(value=val, source=dflt_src, **common)
+        dflt, dflt_src = self._studio_default(key)
+        return FieldView(value=dflt, source=dflt_src, **common)
 
     def fields(self, scope: str) -> list[FieldView]:
         return [self.field(scope, ck.key)

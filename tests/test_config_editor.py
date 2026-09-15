@@ -45,17 +45,21 @@ class TestReads(unittest.TestCase):
     def test_project_value_provenance(self):
         with tempfile.TemporaryDirectory() as td:
             pc, sp = _pipeline(td, project_defaults={"version_pad": 4})
-            # project created from the studio defaults, then fps hand-overridden
-            _project(td, "ABC", defaults=pc.project_defaults, overrides={"fps": 25.0})
+            # a sparse project file -- only fps was ever actually written
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"schema_version": 2, "fps": 25.0}), encoding="utf-8")
             store = ConfigStore(pc, user=_User("manager"), studio_path=sp)
-            store.open_project(Path(td) / "nas" / "ABC", "ABC")
+            store.open_project(root, "ABC")
 
             fps = store.field("project", "fps")
             self.assertEqual(fps.value, 25.0)
             self.assertEqual(fps.source, "project")
             self.assertTrue(fps.overridden)
 
-            # matches the studio default -> not flagged as an override
+            # absent from the project's own file -> tracks the studio
+            # default live, whatever its value happens to be
             vp = store.field("project", "version_pad")
             self.assertEqual(vp.value, 4)
             self.assertEqual(vp.source, "studio-default")
@@ -63,6 +67,27 @@ class TestReads(unittest.TestCase):
 
             fp = store.field("project", "frame_pad")
             self.assertEqual(fp.source, "builtin")
+
+    def test_presence_alone_makes_an_override_even_if_the_value_matches(self):
+        """The whole point of "set override" (and a frozen project's full
+        bake): writing the CURRENT value unchanged into the project's own
+        file must still show as an override -- override means "this key is
+        explicitly present", not "this key's value differs"."""
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td, project_defaults={"version_pad": 4})
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # version_pad written explicitly, but with the SAME value the
+            # studio default already resolves to
+            p.write_text(json.dumps({"schema_version": 2, "version_pad": 4}), encoding="utf-8")
+            store = ConfigStore(pc, user=_User("manager"), studio_path=sp)
+            store.open_project(root, "ABC")
+
+            vp = store.field("project", "version_pad")
+            self.assertEqual(vp.value, 4)
+            self.assertEqual(vp.source, "project")
+            self.assertTrue(vp.overridden)
 
 
 class TestEdits(unittest.TestCase):

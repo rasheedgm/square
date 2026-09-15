@@ -71,6 +71,49 @@ class TestTokensFromClient(_IsolatedStateDir):
                              {"access_token": "", "refresh_token": ""})
 
 
+class TestKeyNormalization(unittest.TestCase):
+    def test_collapses_an_internal_double_slash(self):
+        self.assertEqual(auth._key("http://10.10.10.10:8012//api"),
+                         "http://10.10.10.10:8012/api")
+
+    def test_collapses_multiple_internal_double_slashes(self):
+        self.assertEqual(auth._key("http://kitsu///api//v1"), "http://kitsu/api/v1")
+
+    def test_strips_a_trailing_slash(self):
+        self.assertEqual(auth._key("http://kitsu/api/"), "http://kitsu/api")
+
+    def test_idempotent_on_an_already_clean_host(self):
+        self.assertEqual(auth._key("http://kitsu/api"), "http://kitsu/api")
+
+
+class TestSessionKeyConsistency(_IsolatedStateDir):
+    """Regression coverage for a real bug found 2026-09-15 from a studio
+    crash log: a session got cached under a malformed double-slash host
+    (`http://host//api`, from a hand-typed login-dialog value) while every
+    real lookup used the correctly-formed single-slash host that
+    `PipelineConfig.load()` produces. A plain `rstrip("/")` never fixes an
+    *internal* double slash, so the cached session was permanently
+    unreachable and every `connect()` raised `NeedsLogin` as if the login had
+    never happened, even though `login()` itself never failed."""
+
+    @patch("gazu.set_host")
+    def test_login_with_a_malformed_host_is_found_by_a_clean_lookup(self, _set_host):
+        with patch("gazu.log_in", return_value={"access_token": "AT", "refresh_token": "RT"}):
+            auth.login("http://10.10.10.10:8012//api", "a@x.com", "pw")
+        self.assertIsNotNone(auth.cached_session("http://10.10.10.10:8012/api"))
+
+    @patch("gazu.set_host")
+    def test_login_with_a_clean_host_is_found_by_a_malformed_lookup(self, _set_host):
+        with patch("gazu.log_in", return_value={"access_token": "AT", "refresh_token": "RT"}):
+            auth.login("http://10.10.10.10:8012/api", "a@x.com", "pw")
+        self.assertIsNotNone(auth.cached_session("http://10.10.10.10:8012//api"))
+
+    def test_forget_removes_it_regardless_of_slash_spelling(self):
+        auth.store_session("http://kitsu//api", {"access_token": "AT", "refresh_token": "RT"})
+        auth.forget("http://kitsu/api")
+        self.assertIsNone(auth.cached_session("http://kitsu//api"))
+
+
 class TestLogin(_IsolatedStateDir):
     @patch("gazu.set_host")
     def test_reads_top_level_tokens_from_log_in_result(self, _set_host):

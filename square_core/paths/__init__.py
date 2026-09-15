@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from .resolver import PathResolver, PathError, slugify, render_tokens
+from .resolver import PathResolver, PathError, slugify, render_tokens, resolve_roots
 from . import path_pattern, token_parser
 
 __all__ = [
@@ -16,6 +16,7 @@ __all__ = [
     "PathError",
     "slugify",
     "render_tokens",
+    "resolve_roots",
     "path_pattern",
     "token_parser",
 ]

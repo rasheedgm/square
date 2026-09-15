@@ -29,12 +29,24 @@ _PALETTE = ["project", "episode", "sequence", "shot", "asset", "asset_type",
 
 class TemplateBuilderDialog(QtWidgets.QDialog):
     def __init__(self, pattern: str, *, title: str = "Template", is_dir: bool = True,
-                 version_pad: int = 3, frame_pad: int = 4, parent=None):
+                 version_pad: int = 3, frame_pad: int = 4, root_context: dict | None = None,
+                 parent=None):
+        """`root_context`: the full `roots` dict as currently shown in the
+        table (unsaved edits included) -- only meaningful when editing a
+        `roots` entry itself. A root's own pattern legitimately references
+        another root by name, e.g. the built-in `roots.shot` default is
+        `{project_root}/{episode}/shots/{sequence}/{shot}` -- `{project_root}`
+        is not a `PathContext` token at all, it's expanded from the
+        "project" root's own pattern by `square_core.paths.resolve_roots()`
+        before any `PathContext` rendering happens. Without this, editing
+        that exact shipped default here throws "unknown token
+        {project_root}" and permanently disables OK."""
         super().__init__(parent)
         self.setWindowTitle(f"Edit {title}")
         self.setMinimumWidth(560)
         self._is_dir = is_dir
         self._vp, self._fp = version_pad, frame_pad
+        self._root_context = root_context
 
         self.edit = QtWidgets.QLineEdit(pattern)
         self.preview = QtWidgets.QLabel()
@@ -81,6 +93,12 @@ class TemplateBuilderDialog(QtWidgets.QDialog):
         self.edit.setFocus()
 
     def _render(self, pattern: str) -> str:
+        if self._root_context is not None:
+            # expand {X_root} references the same way PathResolver does,
+            # before this pattern ever sees PathContext token rendering
+            from square_core.paths import resolve_roots
+            expanded = resolve_roots({**self._root_context, "__preview__": pattern})
+            pattern = expanded.get("__preview__", pattern)
         ctx = PathContext(**{k: v for k, v in _SAMPLE.items()
                              if k in PathContext.field_names()})
         if self._is_dir:

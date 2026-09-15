@@ -204,6 +204,29 @@ class TestEditorUI(unittest.TestCase):
             v = ed.get_value()
             self.assertEqual(v["project"], "{nas_root}/{project}")
 
+    def test_editing_the_shot_root_pattern_resolves_project_root_reference(self):
+        """Regression: double-clicking the built-in 'shot' root's pattern
+        ('{project_root}/{episode}/shots/{sequence}/{shot}') threw "unknown
+        token {project_root}" and permanently disabled OK -- {project_root}
+        is a root-to-root reference resolved by
+        square_core.paths.resolve_roots(), not a PathContext token, so the
+        template builder's preview must expand it first, the same way
+        PathResolver does at runtime."""
+        from tools.config_editor.widgets.template_builder import TemplateBuilderDialog
+        roots = {"project": "{nas_root}/{project}",
+                 "shot": "{project_root}/{episode}/shots/{sequence}/{shot}"}
+        dlg = TemplateBuilderDialog(roots["shot"], is_dir=True, root_context=roots)
+        self.assertEqual(dlg.err.text(), "")
+        self.assertTrue(dlg._ok.isEnabled())
+        self.assertIn("ABC", dlg.preview.text())          # the sample project rendered in
+
+    def test_template_builder_without_root_context_is_unaffected(self):
+        """A media_type / delivery_preset pattern never has root_context --
+        must behave exactly as before (no regression for the common case)."""
+        from tools.config_editor.widgets.template_builder import TemplateBuilderDialog
+        dlg = TemplateBuilderDialog("plates/{name}_v{version}", is_dir=True)
+        self.assertTrue(dlg._ok.isEnabled())
+
     def test_pin_writes_the_inherited_studio_default_into_the_project(self):
         """A field showing an inherited studio-default value (never edited)
         must not be written on Save -- but 'pin to project' explicitly marks

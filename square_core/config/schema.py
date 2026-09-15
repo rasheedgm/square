@@ -54,6 +54,9 @@ class ConfigKey:
     item_kind: str = ""                   # for "list": the kind of each item
     required: bool = False                # must be present & non-empty in that scope
     secret: bool = False                  # never render / log the value in plain text
+    hidden: bool = False                  # real, validated, but not its own editor row --
+                                          # e.g. a container another key already writes
+                                          # into piecemeal, or state a tool manages itself
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -78,14 +81,15 @@ _REGISTRY: dict[str, ConfigKey] = {}
 
 def register(key: str, kind: str, *, scope: str = "both", default: Any = None,
              description: str = "", choices=(), minimum=None, maximum=None,
-             item_kind: str = "", required: bool = False, secret: bool = False) -> ConfigKey:
+             item_kind: str = "", required: bool = False, secret: bool = False,
+             hidden: bool = False) -> ConfigKey:
     """Add a key to the registry. Idempotent when the descriptor is identical
     (modules get imported more than once); raises `SchemaError` on a conflict
     (two tools claiming one key with different rules)."""
     ck = ConfigKey(key=key, kind=kind, scope=scope, default=default,
                    description=description, choices=tuple(choices),
                    minimum=minimum, maximum=maximum, item_kind=item_kind,
-                   required=required, secret=secret)
+                   required=required, secret=secret, hidden=hidden)
     existing = _REGISTRY.get(key)
     if existing is not None and existing != ck:
         raise SchemaError(
@@ -293,8 +297,10 @@ def _register_builtins() -> None:
              description="named NAS roots; a project picks one by name")
     register("kitsu_project_templates", "list", item_kind="str", scope="studio",
              default=[], description="Kitsu project templates offered at project create")
-    register("project_defaults", "dict", scope="studio", default={},
-             description="a ProjectConfig template copied into each new project")
+    register("project_defaults", "dict", scope="studio", default={}, hidden=True,
+             description="a ProjectConfig template copied into each new project -- "
+                         "redundant as its own row: every sub-key it holds is "
+                         "already registered and shown individually (scope=both)")
 
     # --- project scalars (also studio-default-able) ---------------
     register("schema_version", "int", scope="both", default=2, minimum=1)
@@ -334,10 +340,10 @@ def _register_builtins() -> None:
              description="per-client delivery packaging")
 
     # meta -- managed only by the config editor's Freeze action, never
-    # hand-edited (ConfigStore.fields() filters it out of the normal
-    # per-field list). Registered so it validates as a known key instead of
+    # hand-edited. hidden=True keeps it out of ConfigStore.fields()'s normal
+    # per-field list while still validating as a known key instead of
     # producing an "unknown key" warning on every frozen project.
-    register("_frozen", "bool", scope="project", default=False,
+    register("_frozen", "bool", scope="project", default=False, hidden=True,
              description="set only by Freeze Project -- locks the project's config")
 
     # --- folder-structure lists ----------------------------------

@@ -30,20 +30,6 @@ from square_core.config.project import DEFAULT_PROJECT_CONFIG, SCHEMA_VERSION, _
 import tools.ingest_tool.core.config_keys  # noqa: F401,E402
 
 ADMIN_ROLES = {"admin", "manager"}
-# Registered keys that must stay OUT of fields()'s per-row list -- not
-# because they aren't real, but because rendering them as their own row is
-# either meaningless or actively redundant:
-#   _frozen           -- managed by freeze_project(), never hand-edited
-#   project_defaults  -- the container every scope="both" key already
-#                        writes into individually (fps, roots, ...); showing
-#                        it too would be one giant "Edit JSON..." button
-#                        duplicating every field already on screen. Stays
-#                        REGISTERED (not removed from schema.py) so
-#                        _leaf_paths() still treats it as one opaque leaf --
-#                        unregistering it would make validate() recurse into
-#                        it and warn on every sub-key ("project_defaults.fps"
-#                        not matching the bare "fps" registration).
-_HIDDEN_KEYS = {"_frozen", "project_defaults"}
 
 _MISSING = object()
 
@@ -275,7 +261,7 @@ class ConfigStore:
     def fields(self, scope: str) -> list[FieldView]:
         return [self.field(scope, ck.key)
                 for ck in sorted(schema.for_scope(scope), key=lambda c: c.key)
-                if ck.key not in _HIDDEN_KEYS]
+                if not ck.hidden]
 
     # ---- edits (in memory) -------------------------------------
 

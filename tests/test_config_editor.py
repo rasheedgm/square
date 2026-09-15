@@ -90,6 +90,62 @@ class TestReads(unittest.TestCase):
             self.assertTrue(vp.overridden)
 
 
+class TestFreeze(unittest.TestCase):
+    def _sparse_store(self, td, role="admin", project_defaults=None):
+        pc, sp = _pipeline(td, project_defaults=project_defaults)
+        root = Path(td) / "nas" / "ABC"
+        p = ProjectConfig.path_for(root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")   # genuinely sparse
+        s = ConfigStore(pc, user=_User(role), studio_path=sp)
+        s.open_project(root, "ABC")
+        return s, root
+
+    def test_freeze_writes_every_field_and_sets_the_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, root = self._sparse_store(td, project_defaults={"version_pad": 4})
+            self.assertFalse(s.field("project", "version_pad").overridden)
+
+            s.freeze_project()
+            self.assertTrue(s.is_frozen)
+            vp = s.field("project", "version_pad")
+            self.assertEqual(vp.value, 4)
+            self.assertTrue(vp.overridden)          # now explicitly present
+            self.assertEqual(s.field("project", "fps").value, 24.0)
+            self.assertTrue(s.field("project", "fps").overridden)
+
+            # still requires an explicit save to hit disk
+            self.assertNotIn("_frozen", json.loads(
+                ProjectConfig.path_for(root).read_text(encoding="utf-8")))
+            s.save_project()
+            on_disk = json.loads(ProjectConfig.path_for(root).read_text(encoding="utf-8"))
+            self.assertTrue(on_disk["_frozen"])
+            self.assertEqual(on_disk["version_pad"], 4)
+
+    def test_frozen_project_refuses_further_edits(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, _ = self._sparse_store(td)
+            s.freeze_project()
+            with self.assertRaises(NotAuthorized):
+                s.set("project", "fps", 30.0)
+            with self.assertRaises(NotAuthorized):
+                s.reset("fps")
+
+    def test_freeze_twice_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, _ = self._sparse_store(td)
+            s.freeze_project()
+            with self.assertRaises(ValueError):
+                s.freeze_project()
+
+    def test_frozen_flag_is_not_a_normal_field(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, _ = self._sparse_store(td)
+            s.freeze_project()
+            keys = {fv.key for fv in s.fields("project")}
+            self.assertNotIn("_frozen", keys)
+
+
 class TestEdits(unittest.TestCase):
     def _store(self, td, role="admin", pd=None, ov=None):
         pc, sp = _pipeline(td, project_defaults=pd)

@@ -331,6 +331,13 @@ def _register_builtins() -> None:
     register("delivery_presets", "delivery_registry", scope="project", default={},
              description="per-client delivery packaging")
 
+    # meta -- managed only by the config editor's Freeze action, never
+    # hand-edited (ConfigStore.fields() filters it out of the normal
+    # per-field list). Registered so it validates as a known key instead of
+    # producing an "unknown key" warning on every frozen project.
+    register("_frozen", "bool", scope="project", default=False,
+             description="set only by Freeze Project -- locks the project's config")
+
     # --- folder-structure lists ----------------------------------
     register("shot_folder_structure", "list", item_kind="str", scope="both", default=[])
     register("asset_folder_structure", "list", item_kind="str", scope="both", default=[])

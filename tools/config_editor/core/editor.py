@@ -30,6 +30,7 @@ from square_core.config.project import DEFAULT_PROJECT_CONFIG, _deep_merge
 import tools.ingest_tool.core.config_keys  # noqa: F401,E402
 
 ADMIN_ROLES = {"admin", "manager"}
+_META_KEYS = {"_frozen"}          # managed by ConfigStore itself, never a normal field row
 
 _MISSING = object()
 
@@ -158,7 +159,11 @@ class ConfigStore:
     # ---- project binding -------------------------------------------
 
     def open_project(self, project_root: str | Path, code: str = "") -> None:
-        cfg = ProjectConfig.load(project_root)          # raises ConfigError if broken
+        # a sparse project (the norm since projects.create() stopped baking
+        # the full config in) can only validate correctly with the studio's
+        # live project_defaults available -- without it, check() would judge
+        # a legitimately sparse file against the bare hardcoded builtin only
+        cfg = ProjectConfig.load(project_root, self.pipeline.project_defaults)
         self.project_root = Path(project_root)
         self.project_code = code or self.project_root.name
         self.project_raw = _clone(cfg.data)
@@ -171,6 +176,10 @@ class ConfigStore:
     @property
     def has_project(self) -> bool:
         return self.project_raw is not None
+
+    @property
+    def is_frozen(self) -> bool:
+        return bool((self.project_raw or {}).get("_frozen"))
 
     # ---- provenance ----------------------------------------------
 
@@ -231,7 +240,8 @@ class ConfigStore:
 
     def fields(self, scope: str) -> list[FieldView]:
         return [self.field(scope, ck.key)
-                for ck in sorted(schema.for_scope(scope), key=lambda c: c.key)]
+                for ck in sorted(schema.for_scope(scope), key=lambda c: c.key)
+                if ck.key not in _META_KEYS]
 
     # ---- edits (in memory) -------------------------------------
 
@@ -248,26 +258,42 @@ class ConfigStore:
             raise KeyError(f"{key!r} is not a known config key")
         if not ck.applies_to(scope):
             raise ValueError(f"{key!r} is not editable at {scope} scope")
+        if scope == "project" and self.is_frozen:
+            raise NotAuthorized(
+                f"{self.project_code} is frozen -- no further edits are allowed")
         errs = schema.check_value(ck, value)
         if errs:
             raise ValueError("; ".join(errs))
         schema.put(self._target(scope, key), key, value)
 
-    def reset(self, key: str) -> bool:
-        """Undo a project override: put the studio default value back (the
-        project file stays complete and loadable). Returns True if the value
-        changed. Project scope only."""
+    def freeze_project(self) -> None:
+        """Write the ENTIRE resolved project config -- every field's current
+        value, whatever it resolves to right now (builtin, studio-default,
+        or already-overridden) -- into the project's own file, and mark it
+        frozen. Afterward set() refuses any further edit for this project.
+        Still requires save_project() to actually persist, same as any other
+        edit."""
+        self._require_write()
         if self.project_raw is None:
             raise RuntimeError("no project open")
-        dflt, _ = self._studio_default(key)
-        cur = _dig(self.project_raw, key)
-        if cur == dflt:
-            return False
-        if dflt is None and schema.get(key) is None:
-            return _del_path(self.project_raw, key)
-        schema.put(self.project_raw, key,
-                   _clone(dflt) if isinstance(dflt, (dict, list)) else dflt)
-        return True
+        if self.is_frozen:
+            raise ValueError(f"{self.project_code} is already frozen")
+        for fv in self.fields("project"):
+            schema.put(self.project_raw, fv.key, fv.value)
+        self.project_raw["_frozen"] = True
+
+    def reset(self, key: str) -> bool:
+        """Undo a project override: remove the key from the project's own
+        file entirely, so it goes back to tracking the studio default live.
+        Override is presence-based, so writing the default value back in
+        explicitly would NOT undo it -- the key has to actually be gone.
+        Returns True if a key was actually removed. Project scope only."""
+        if self.project_raw is None:
+            raise RuntimeError("no project open")
+        if self.is_frozen:
+            raise NotAuthorized(
+                f"{self.project_code} is frozen -- no further edits are allowed")
+        return _del_path(self.project_raw, key)
 
     # ---- diff vs disk ------------------------------------------
 
@@ -309,7 +335,8 @@ class ConfigStore:
             except ConfigError as e:
                 errs.append(f"project_defaults: {e}")
             return errs, warns
-        cfg = ProjectConfig(data=_clone(self.project_raw))
+        cfg = ProjectConfig(data=_clone(self.project_raw),
+                           pipeline_defaults=self.pipeline.project_defaults)
         try:
             cfg.check()
         except ConfigError as e:
@@ -328,7 +355,8 @@ class ConfigStore:
         self._require_write()
         if self.project_raw is None:
             raise RuntimeError("no project open")
-        cfg = ProjectConfig(data=_clone(self.project_raw))
+        cfg = ProjectConfig(data=_clone(self.project_raw),
+                           pipeline_defaults=self.pipeline.project_defaults)
         cfg.check()                                    # raises ConfigError
         path = ProjectConfig.path_for(self.project_root)
         bak = _atomic_write(path, self.project_raw, backup=True)

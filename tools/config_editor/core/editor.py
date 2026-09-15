@@ -96,22 +96,30 @@ def _clone(d):
 
 def _atomic_write(path: Path, data: dict, *, backup: bool) -> Path | None:
     """Write `data` as pretty JSON to `path` atomically. If `backup` and the
-    file exists, copy it to `<name>.bak-<ts>` first; return that backup path."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    bak = None
-    if backup and path.exists():
-        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = path.with_name(f"{path.name}.bak-{ts}")
-        bak.write_bytes(path.read_bytes())
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    file exists, copy it to `<name>.bak-<ts>` first; return that backup path.
+
+    Raises `ConfigError` (not a bare OSError) on any filesystem failure --
+    e.g. the project's root lives on a NAS drive that isn't mounted -- so
+    callers that already handle ConfigError show a clean message instead of
+    an unhandled traceback."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-    return bak
+        path.parent.mkdir(parents=True, exist_ok=True)
+        bak = None
+        if backup and path.exists():
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            bak = path.with_name(f"{path.name}.bak-{ts}")
+            bak.write_bytes(path.read_bytes())
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return bak
+    except OSError as e:
+        raise ConfigError(f"could not write {path}: {e}") from e
 
 
 # --------------------------------------------------------------------------

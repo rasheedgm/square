@@ -274,6 +274,19 @@ class TestEdits(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 s.save_project()
 
+    def test_save_wraps_an_unwritable_path_as_a_clean_config_error(self):
+        # e.g. the project's root lives on a NAS drive that isn't mounted --
+        # mkdir raises a bare OSError; save_project must not let that escape
+        # unhandled (it used to crash the UI with a raw traceback instead of
+        # showing a message).
+        with tempfile.TemporaryDirectory() as td:
+            s = self._store(td)
+            s.project_root = Path(td) / "does-not-exist-drive:" / "bad" / "path"
+            from unittest.mock import patch
+            with patch("pathlib.Path.mkdir", side_effect=OSError("no such drive")):
+                with self.assertRaises(ConfigError):
+                    s.save_project()
+
 
 class TestAuth(unittest.TestCase):
     def test_plain_user_cannot_save(self):

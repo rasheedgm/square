@@ -156,9 +156,14 @@ class RegistryEditor(QtWidgets.QWidget):
         if header not in _PATTERN_COLS:
             return
         item = self.table.item(r, c) or QtWidgets.QTableWidgetItem("")
+        # roots may reference each other ({project_root} etc.) -- the
+        # preview needs the whole (possibly still-unsaved) roots table to
+        # expand those before rendering, see TemplateBuilderDialog's docstring
+        root_context = self.get_value() if self._kind == "root" else None
         new = TemplateBuilderDialog.edit_pattern(
             self, item.text(), title=header, is_dir=(header == "dir"),
-            version_pad=self._version_pad, frame_pad=self._frame_pad)
+            version_pad=self._version_pad, frame_pad=self._frame_pad,
+            root_context=root_context)
         if new is not None:
             item.setText(new)
             self.table.setItem(r, c, item)

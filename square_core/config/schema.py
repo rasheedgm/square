@@ -303,7 +303,7 @@ def _register_builtins() -> None:
                          "already registered and shown individually (scope=both)")
 
     # --- project scalars (also studio-default-able) ---------------
-    register("schema_version", "int", scope="both", default=2, minimum=1, hidden=True,
+    register("schema_version", "int", scope="both", default=1, minimum=1, hidden=True,
              description="project_config.json's own format version -- a constant "
                          "the loader checks itself against, not something to hand-edit")
     register("fps", "float", scope="both", default=24.0, minimum=1.0, maximum=240.0,

@@ -20,6 +20,7 @@ except Exception:
     _HAVE_QT = False
 
 from square_core.config import ProjectConfig, PipelineConfig
+from square_core.config.project import SCHEMA_VERSION
 
 
 def _pipeline_and_project(tmp):
@@ -46,7 +47,7 @@ def _pipeline_and_sparse_project(tmp):
     root = Path(tmp) / "nas" / "ABC"
     p = ProjectConfig.path_for(root)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    p.write_text(json.dumps({"schema_version": SCHEMA_VERSION}), encoding="utf-8")
     return PipelineConfig.load(studio), studio, root
 
 
@@ -72,7 +73,7 @@ def _pipeline_and_project_with_studio_recipe(tmp):
     root = Path(tmp) / "nas" / "ABC"
     p = ProjectConfig.path_for(root)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    p.write_text(json.dumps({"schema_version": SCHEMA_VERSION}), encoding="utf-8")
     return PipelineConfig.load(studio), studio, root
 
 

@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError
+from square_core.config.project import SCHEMA_VERSION
 from tools.config_editor.core import ConfigStore, NotAuthorized
 
 
@@ -53,7 +54,7 @@ class TestReads(unittest.TestCase):
             root = Path(td) / "nas" / "ABC"
             p = ProjectConfig.path_for(root)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"schema_version": 2, "fps": 25.0}), encoding="utf-8")
+            p.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "fps": 25.0}), encoding="utf-8")
             store = ConfigStore(pc, user=_User("manager"), studio_path=sp)
             store.open_project(root, "ABC")
 
@@ -84,7 +85,7 @@ class TestReads(unittest.TestCase):
             p.parent.mkdir(parents=True, exist_ok=True)
             # version_pad written explicitly, but with the SAME value the
             # studio default already resolves to
-            p.write_text(json.dumps({"schema_version": 2, "version_pad": 4}), encoding="utf-8")
+            p.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "version_pad": 4}), encoding="utf-8")
             store = ConfigStore(pc, user=_User("manager"), studio_path=sp)
             store.open_project(root, "ABC")
 
@@ -121,7 +122,7 @@ class TestOpenProject(unittest.TestCase):
             root = Path(td) / "nas" / "ABC"
             p = ProjectConfig.path_for(root)
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"schema_version": 2, "roots": {"shot": ""}}),
+            p.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "roots": {"shot": ""}}),
                         encoding="utf-8")
             store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
             store.open_project(root, "ABC")                # must not raise
@@ -158,7 +159,7 @@ class TestFreeze(unittest.TestCase):
         root = Path(td) / "nas" / "ABC"
         p = ProjectConfig.path_for(root)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")   # genuinely sparse
+        p.write_text(json.dumps({"schema_version": SCHEMA_VERSION}), encoding="utf-8")   # genuinely sparse
         s = ConfigStore(pc, user=_User(role), studio_path=sp)
         s.open_project(root, "ABC")
         return s, root

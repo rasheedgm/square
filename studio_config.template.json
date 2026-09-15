@@ -5,7 +5,7 @@
     },
     "kitsu_project_templates": [],
     "project_defaults": {
-        "schema_version": 2,
+        "schema_version": 1,
         "fps": 24.0,
         "resolution": "3840x2160",
         "aspect_ratio": "",

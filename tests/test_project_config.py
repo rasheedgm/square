@@ -263,13 +263,16 @@ class TestLoadSave(unittest.TestCase):
         """No migration path before v1.0 (decisions.md): nothing has shipped,
         so there is no old-shape data to accommodate. A schema_version that
         doesn't match exactly is a clear error asking for a fresh config, not
-        a silent in-memory transform."""
+        a silent in-memory transform. (This shape -- `templates.output` --
+        never actually shipped; it's a stand-in for "some other version's
+        shape", not a real migration case.)"""
         with tempfile.TemporaryDirectory() as td:
-            v1 = {"schema_version": 1, "roots": DEFAULT_PROJECT_CONFIG["roots"],
-                 "templates": {"output": {"dir": "x"}}}
+            old = {"schema_version": SCHEMA_VERSION - 1,
+                  "roots": DEFAULT_PROJECT_CONFIG["roots"],
+                  "templates": {"output": {"dir": "x"}}}
             p = Path(td) / "_pipeline" / "project_config.json"
             p.parent.mkdir(parents=True)
-            p.write_text(json.dumps(v1), encoding="utf-8")
+            p.write_text(json.dumps(old), encoding="utf-8")
             with self.assertRaises(ConfigError):
                 ProjectConfig.load(td)
 

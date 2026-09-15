@@ -41,6 +41,10 @@ class TestReads(unittest.TestCase):
             self.assertIn("kitsu_host", keys)
             self.assertIn("fps", keys)                 # scope=both shows in studio
             self.assertNotIn("delivery_presets", keys)  # project-only
+            # the container every scope=both key already writes into
+            # individually -- showing it too would be a redundant raw-JSON
+            # duplicate of every field already on screen
+            self.assertNotIn("project_defaults", keys)
 
     def test_project_value_provenance(self):
         with tempfile.TemporaryDirectory() as td:
@@ -88,6 +92,64 @@ class TestReads(unittest.TestCase):
             self.assertEqual(vp.value, 4)
             self.assertEqual(vp.source, "project")
             self.assertTrue(vp.overridden)
+
+
+class TestOpenProject(unittest.TestCase):
+    """open_project() must never refuse to open something the editor's own
+    job is to create or fix -- a missing file (no project has been
+    configured yet) or a structurally broken one (exactly what someone
+    needs the editor open to repair). It should still refuse what it
+    genuinely can't make sense of: unreadable JSON, or a shape this build's
+    fields don't describe."""
+
+    def test_missing_file_opens_fine_and_resolves_from_studio(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td, project_defaults={"fps": 30.0})
+            root = Path(td) / "nas" / "ABC"                # never created
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            store.open_project(root, "ABC")                # must not raise
+            self.assertTrue(store.has_project)
+            self.assertEqual(store.field("project", "fps").value, 30.0)
+            self.assertEqual(store.field("project", "fps").source, "studio-default")
+            self.assertFalse(store.field("project", "fps").overridden)
+
+    def test_structurally_broken_file_still_opens(self):
+        """A required root blanked out -- exactly the kind of thing an admin
+        would open the editor to fix. Opening it must not itself fail."""
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"schema_version": 2, "roots": {"shot": ""}}),
+                        encoding="utf-8")
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            store.open_project(root, "ABC")                # must not raise
+            self.assertTrue(store.has_project)
+            errs, _ = store.validate("project")
+            self.assertTrue(any("roots.shot" in e for e in errs))
+
+    def test_bad_json_still_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{ not json", encoding="utf-8")
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            with self.assertRaises(ConfigError):
+                store.open_project(root, "ABC")
+
+    def test_schema_version_mismatch_still_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"schema_version": 999}), encoding="utf-8")
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            with self.assertRaises(ConfigError):
+                store.open_project(root, "ABC")
 
 
 class TestFreeze(unittest.TestCase):

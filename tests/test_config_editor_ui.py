@@ -214,6 +214,42 @@ class TestEditorUI(unittest.TestCase):
             self.assertIn("_default", v)
             self.assertEqual(v["Plate"]["dir"], "plates/{name}_v{version}")
 
+    def test_generic_dict_fields_get_a_table_not_raw_json(self):
+        """nas_roots / slugify are plain {name: value} dicts -- same table
+        shape as roots, just headed 'Value' (not 'Pattern', since these
+        aren't {token} templates) and with no template-builder double-click."""
+        from tools.config_editor.core import ConfigStore
+        from tools.config_editor.widgets.fields import make_field_editor
+        from tools.config_editor.widgets.registries import RegistryEditor
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project(td)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+
+            fv = store.field("studio", "nas_roots")
+            ed = make_field_editor(fv)
+            self.assertIsInstance(ed, RegistryEditor)
+            self.assertTrue(ed._string_mode)
+            self.assertEqual(ed.table.horizontalHeaderItem(1).text(), "Value")
+            self.assertEqual(ed.get_value(), {"default": str(Path(td) / "nas")})
+
+            store.open_project(root, "ABC")
+            fv2 = store.field("project", "slugify")
+            ed2 = make_field_editor(fv2)
+            self.assertIsInstance(ed2, RegistryEditor)
+            v = ed2.get_value()
+            self.assertEqual(v["spaces_to"], "_")
+
+    def test_project_defaults_is_not_its_own_redundant_field(self):
+        """Every scope=both key already writes into project_defaults
+        individually -- showing the whole container too would just be one
+        giant duplicate 'Edit JSON...' button."""
+        from tools.config_editor.core import ConfigStore
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project(td)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+            keys = {f.key for f in store.fields("studio")}
+            self.assertNotIn("project_defaults", keys)
+
     def test_roots_editor_is_string_mode(self):
         from tools.config_editor.widgets.fields import make_field_editor
         with tempfile.TemporaryDirectory() as td:

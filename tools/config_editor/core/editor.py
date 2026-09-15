@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError, schema
-from square_core.config.project import DEFAULT_PROJECT_CONFIG, _deep_merge
+from square_core.config.project import DEFAULT_PROJECT_CONFIG, SCHEMA_VERSION, _deep_merge
 
 # Each installed tool registers its own `tools.<tool>.*` keys at import; the
 # editor is the one place that needs them ALL present, whether or not that
@@ -30,7 +30,20 @@ from square_core.config.project import DEFAULT_PROJECT_CONFIG, _deep_merge
 import tools.ingest_tool.core.config_keys  # noqa: F401,E402
 
 ADMIN_ROLES = {"admin", "manager"}
-_META_KEYS = {"_frozen"}          # managed by ConfigStore itself, never a normal field row
+# Registered keys that must stay OUT of fields()'s per-row list -- not
+# because they aren't real, but because rendering them as their own row is
+# either meaningless or actively redundant:
+#   _frozen           -- managed by freeze_project(), never hand-edited
+#   project_defaults  -- the container every scope="both" key already
+#                        writes into individually (fps, roots, ...); showing
+#                        it too would be one giant "Edit JSON..." button
+#                        duplicating every field already on screen. Stays
+#                        REGISTERED (not removed from schema.py) so
+#                        _leaf_paths() still treats it as one opaque leaf --
+#                        unregistering it would make validate() recurse into
+#                        it and warn on every sub-key ("project_defaults.fps"
+#                        not matching the bare "fps" registration).
+_HIDDEN_KEYS = {"_frozen", "project_defaults"}
 
 _MISSING = object()
 
@@ -159,14 +172,35 @@ class ConfigStore:
     # ---- project binding -------------------------------------------
 
     def open_project(self, project_root: str | Path, code: str = "") -> None:
-        # a sparse project (the norm since projects.create() stopped baking
-        # the full config in) can only validate correctly with the studio's
-        # live project_defaults available -- without it, check() would judge
-        # a legitimately sparse file against the bare hardcoded builtin only
-        cfg = ProjectConfig.load(project_root, self.pipeline.project_defaults)
+        """Open a project for editing. Deliberately does NOT go through
+        ProjectConfig.load() -- that raises on a missing file, and raises
+        again if the file fails full structural/path validation. Neither is
+        right for an EDITOR: a project with no file yet resolves entirely
+        from the studio (that's the whole point of "no file is required, we
+        have a fallback"), and a project whose config is currently broken is
+        exactly the case someone needs the editor open to fix -- refusing to
+        even show it defeats the tool. Only two things still hard-fail here:
+        unreadable JSON (nothing to edit) and a schema_version mismatch (a
+        different shape this build's fields don't describe -- same "no
+        migration before v1.0" rule every other loader follows). Anything
+        else -- broken paths, missing required roots -- surfaces through
+        validate() at Save time instead of blocking Open."""
         self.project_root = Path(project_root)
         self.project_code = code or self.project_root.name
-        self.project_raw = _clone(cfg.data)
+        p = ProjectConfig.path_for(self.project_root)
+        if not p.exists():
+            self.project_raw = {"schema_version": SCHEMA_VERSION}
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise ConfigError(f"{p} is not valid JSON: {e}") from e
+        version = int(data.get("schema_version", 0))
+        if version != SCHEMA_VERSION:
+            raise ConfigError(
+                f"{p} is schema v{version}, this build understands v{SCHEMA_VERSION} -- "
+                f"recreate the project config (no migration path before v1.0)")
+        self.project_raw = data
 
     def close_project(self) -> None:
         self.project_root = None
@@ -241,7 +275,7 @@ class ConfigStore:
     def fields(self, scope: str) -> list[FieldView]:
         return [self.field(scope, ck.key)
                 for ck in sorted(schema.for_scope(scope), key=lambda c: c.key)
-                if ck.key not in _META_KEYS]
+                if ck.key not in _HIDDEN_KEYS]
 
     # ---- edits (in memory) -------------------------------------
 

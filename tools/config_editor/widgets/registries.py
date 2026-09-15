@@ -3,10 +3,15 @@
   - `roots`            -> name -> "{token}" pattern            (string entries)
   - `media_types`      -> name -> {base, dir, file, kitsu_kind, ...}  (dict entries)
   - `delivery_presets` -> name -> {base, dir, file, case, ...}        (dict entries)
+  - a plain `key_value_registry` (`nas_roots`, `slugify`, ...) -- name -> a
+    plain value, same 2-column grid as `roots`, just without the
+    template-builder double-click (these values are not `{token}` patterns)
 
-One `RegistryEditor` handles all three: string-entry mode is a 2-column
-name/pattern grid; dict-entry mode is a grid of the entry's fields. `dir` /
-`file` / `pattern` cells open the template builder on double-click.
+One `RegistryEditor` handles all four: string-entry mode is a 2-column grid
+(header "Pattern" for `root`, so the template builder still opens on
+double-click; "Value" for a plain `key_value_registry`, no builder); dict-
+entry mode is a grid of the entry's fields. `dir` / `file` / `pattern` cells
+open the template builder on double-click.
 """
 
 from __future__ import annotations
@@ -39,7 +44,7 @@ class RegistryEditor(QtWidgets.QWidget):
         self._frame_pad = frame_pad
         data = json.loads(json.dumps(fv.value or {}))
         self._string_mode = all(isinstance(v, str) for v in data.values()) and bool(data)
-        if self._kind == "root":
+        if self._kind in ("root", "key_value_registry"):
             self._string_mode = True
 
         lay = QtWidgets.QVBoxLayout(self)
@@ -96,7 +101,8 @@ class RegistryEditor(QtWidgets.QWidget):
         self.table.clear()
         if self._string_mode:
             self._columns = ["pattern"]
-            headers = ["Name", "Pattern"]
+            value_header = "Pattern" if self._kind == "root" else "Value"
+            headers = ["Name", value_header]
         else:
             self._columns = self._entry_columns(data)
             headers = ["Name"] + self._columns

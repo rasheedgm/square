@@ -32,7 +32,8 @@ SCALAR_KINDS = ("str", "int", "float", "bool", "path", "enum")
 CONTAINER_KINDS = ("list", "dict")
 # kinds the editor opens a specialised sub-editor for and that PathResolver,
 # not this module, validates in depth
-STRUCTURED_KINDS = ("template", "root", "media_type_registry", "delivery_registry")
+STRUCTURED_KINDS = ("template", "root", "media_type_registry", "delivery_registry",
+                    "key_value_registry")
 KINDS = SCALAR_KINDS + CONTAINER_KINDS + STRUCTURED_KINDS
 
 
@@ -287,8 +288,9 @@ def _register_builtins() -> None:
     # --- studio -----------------------------------------------------
     register("kitsu_host", "str", scope="studio", default="http://localhost/api",
              required=True, description="Kitsu API base URL")
-    register("nas_roots", "dict", scope="studio", default={"default": "X:/projects"},
-             required=True, description="named NAS roots; a project picks one by name")
+    register("nas_roots", "key_value_registry", scope="studio",
+             default={"default": "X:/projects"}, required=True,
+             description="named NAS roots; a project picks one by name")
     register("kitsu_project_templates", "list", item_kind="str", scope="studio",
              default=[], description="Kitsu project templates offered at project create")
     register("project_defaults", "dict", scope="studio", default={},
@@ -315,7 +317,7 @@ def _register_builtins() -> None:
     register("colorspace.plate_assumed", "str", scope="both", default="ACEScg",
              description="colorspace assumed for a delivered plate that declares none")
 
-    register("slugify", "dict", scope="both",
+    register("slugify", "key_value_registry", scope="both",
              default={"spaces_to": "_", "strip": '<>:"/\\|?*', "collapse": "_"},
              description="how a token value is cleaned for the filesystem")
 

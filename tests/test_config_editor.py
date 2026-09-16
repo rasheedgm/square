@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError
+from square_core.config.project import SCHEMA_VERSION
 from tools.config_editor.core import ConfigStore, NotAuthorized
 
 
@@ -41,21 +42,29 @@ class TestReads(unittest.TestCase):
             self.assertIn("kitsu_host", keys)
             self.assertIn("fps", keys)                 # scope=both shows in studio
             self.assertNotIn("delivery_presets", keys)  # project-only
+            # the container every scope=both key already writes into
+            # individually -- showing it too would be a redundant raw-JSON
+            # duplicate of every field already on screen
+            self.assertNotIn("project_defaults", keys)
 
     def test_project_value_provenance(self):
         with tempfile.TemporaryDirectory() as td:
             pc, sp = _pipeline(td, project_defaults={"version_pad": 4})
-            # project created from the studio defaults, then fps hand-overridden
-            _project(td, "ABC", defaults=pc.project_defaults, overrides={"fps": 25.0})
+            # a sparse project file -- only fps was ever actually written
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "fps": 25.0}), encoding="utf-8")
             store = ConfigStore(pc, user=_User("manager"), studio_path=sp)
-            store.open_project(Path(td) / "nas" / "ABC", "ABC")
+            store.open_project(root, "ABC")
 
             fps = store.field("project", "fps")
             self.assertEqual(fps.value, 25.0)
             self.assertEqual(fps.source, "project")
             self.assertTrue(fps.overridden)
 
-            # matches the studio default -> not flagged as an override
+            # absent from the project's own file -> tracks the studio
+            # default live, whatever its value happens to be
             vp = store.field("project", "version_pad")
             self.assertEqual(vp.value, 4)
             self.assertEqual(vp.source, "studio-default")
@@ -63,6 +72,141 @@ class TestReads(unittest.TestCase):
 
             fp = store.field("project", "frame_pad")
             self.assertEqual(fp.source, "builtin")
+
+    def test_presence_alone_makes_an_override_even_if_the_value_matches(self):
+        """The whole point of "set override" (and a frozen project's full
+        bake): writing the CURRENT value unchanged into the project's own
+        file must still show as an override -- override means "this key is
+        explicitly present", not "this key's value differs"."""
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td, project_defaults={"version_pad": 4})
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            # version_pad written explicitly, but with the SAME value the
+            # studio default already resolves to
+            p.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "version_pad": 4}), encoding="utf-8")
+            store = ConfigStore(pc, user=_User("manager"), studio_path=sp)
+            store.open_project(root, "ABC")
+
+            vp = store.field("project", "version_pad")
+            self.assertEqual(vp.value, 4)
+            self.assertEqual(vp.source, "project")
+            self.assertTrue(vp.overridden)
+
+
+class TestOpenProject(unittest.TestCase):
+    """open_project() must never refuse to open something the editor's own
+    job is to create or fix -- a missing file (no project has been
+    configured yet) or a structurally broken one (exactly what someone
+    needs the editor open to repair). It should still refuse what it
+    genuinely can't make sense of: unreadable JSON, or a shape this build's
+    fields don't describe."""
+
+    def test_missing_file_opens_fine_and_resolves_from_studio(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td, project_defaults={"fps": 30.0})
+            root = Path(td) / "nas" / "ABC"                # never created
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            store.open_project(root, "ABC")                # must not raise
+            self.assertTrue(store.has_project)
+            self.assertEqual(store.field("project", "fps").value, 30.0)
+            self.assertEqual(store.field("project", "fps").source, "studio-default")
+            self.assertFalse(store.field("project", "fps").overridden)
+
+    def test_structurally_broken_file_still_opens(self):
+        """A required root blanked out -- exactly the kind of thing an admin
+        would open the editor to fix. Opening it must not itself fail."""
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"schema_version": SCHEMA_VERSION, "roots": {"shot": ""}}),
+                        encoding="utf-8")
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            store.open_project(root, "ABC")                # must not raise
+            self.assertTrue(store.has_project)
+            errs, _ = store.validate("project")
+            self.assertTrue(any("roots.shot" in e for e in errs))
+
+    def test_bad_json_still_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("{ not json", encoding="utf-8")
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            with self.assertRaises(ConfigError):
+                store.open_project(root, "ABC")
+
+    def test_schema_version_mismatch_still_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            root = Path(td) / "nas" / "ABC"
+            p = ProjectConfig.path_for(root)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"schema_version": 999}), encoding="utf-8")
+            store = ConfigStore(pc, user=_User("admin"), studio_path=sp)
+            with self.assertRaises(ConfigError):
+                store.open_project(root, "ABC")
+
+
+class TestFreeze(unittest.TestCase):
+    def _sparse_store(self, td, role="admin", project_defaults=None):
+        pc, sp = _pipeline(td, project_defaults=project_defaults)
+        root = Path(td) / "nas" / "ABC"
+        p = ProjectConfig.path_for(root)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"schema_version": SCHEMA_VERSION}), encoding="utf-8")   # genuinely sparse
+        s = ConfigStore(pc, user=_User(role), studio_path=sp)
+        s.open_project(root, "ABC")
+        return s, root
+
+    def test_freeze_writes_every_field_and_sets_the_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, root = self._sparse_store(td, project_defaults={"version_pad": 4})
+            self.assertFalse(s.field("project", "version_pad").overridden)
+
+            s.freeze_project()
+            self.assertTrue(s.is_frozen)
+            vp = s.field("project", "version_pad")
+            self.assertEqual(vp.value, 4)
+            self.assertTrue(vp.overridden)          # now explicitly present
+            self.assertEqual(s.field("project", "fps").value, 24.0)
+            self.assertTrue(s.field("project", "fps").overridden)
+
+            # still requires an explicit save to hit disk
+            self.assertNotIn("_frozen", json.loads(
+                ProjectConfig.path_for(root).read_text(encoding="utf-8")))
+            s.save_project()
+            on_disk = json.loads(ProjectConfig.path_for(root).read_text(encoding="utf-8"))
+            self.assertTrue(on_disk["_frozen"])
+            self.assertEqual(on_disk["version_pad"], 4)
+
+    def test_frozen_project_refuses_further_edits(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, _ = self._sparse_store(td)
+            s.freeze_project()
+            with self.assertRaises(NotAuthorized):
+                s.set("project", "fps", 30.0)
+            with self.assertRaises(NotAuthorized):
+                s.reset("fps")
+
+    def test_freeze_twice_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, _ = self._sparse_store(td)
+            s.freeze_project()
+            with self.assertRaises(ValueError):
+                s.freeze_project()
+
+    def test_frozen_flag_is_not_a_normal_field(self):
+        with tempfile.TemporaryDirectory() as td:
+            s, _ = self._sparse_store(td)
+            s.freeze_project()
+            keys = {fv.key for fv in s.fields("project")}
+            self.assertNotIn("_frozen", keys)
 
 
 class TestEdits(unittest.TestCase):
@@ -130,6 +274,19 @@ class TestEdits(unittest.TestCase):
                                 "file": "{shot}_{name}.{ext}", "kitsu_kind": "output"}})
             with self.assertRaises(ConfigError):
                 s.save_project()
+
+    def test_save_wraps_an_unwritable_path_as_a_clean_config_error(self):
+        # e.g. the project's root lives on a NAS drive that isn't mounted --
+        # mkdir raises a bare OSError; save_project must not let that escape
+        # unhandled (it used to crash the UI with a raw traceback instead of
+        # showing a message).
+        with tempfile.TemporaryDirectory() as td:
+            s = self._store(td)
+            s.project_root = Path(td) / "does-not-exist-drive:" / "bad" / "path"
+            from unittest.mock import patch
+            with patch("pathlib.Path.mkdir", side_effect=OSError("no such drive")):
+                with self.assertRaises(ConfigError):
+                    s.save_project()
 
 
 class TestAuth(unittest.TestCase):

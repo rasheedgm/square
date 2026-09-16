@@ -6,10 +6,6 @@ Written by `projects.create` from `PipelineConfig.project_defaults` + a thin
 and refuses a broken config (a bad template means writes land in the wrong
 place). Schema: `docs/config_and_paths.md`.
 
-v2 (2026-09-04): one `media_types` registry -- ingest and render-output are the
-same operation. `templates.output` / `templates.workfile` / `ingest.by_type`
-are gone.
-
 No migration path: `load()` requires `schema_version == SCHEMA_VERSION`
 exactly and rejects anything else. Nothing has shipped to production, so
 there is no old-shape data to accommodate -- see decisions.md "No migration
@@ -33,7 +29,7 @@ from .conventions import SHOT_FOLDER_STRUCTURE
 
 _log = logging.getLogger("square.config.project")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 PIPELINE_DIRNAME = "_pipeline"
 PROJECT_CONFIG_FILENAME = "project_config.json"
 

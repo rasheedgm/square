@@ -32,7 +32,8 @@ SCALAR_KINDS = ("str", "int", "float", "bool", "path", "enum")
 CONTAINER_KINDS = ("list", "dict")
 # kinds the editor opens a specialised sub-editor for and that PathResolver,
 # not this module, validates in depth
-STRUCTURED_KINDS = ("template", "root", "media_type_registry", "delivery_registry")
+STRUCTURED_KINDS = ("template", "root", "media_type_registry", "delivery_registry",
+                    "key_value_registry")
 KINDS = SCALAR_KINDS + CONTAINER_KINDS + STRUCTURED_KINDS
 
 
@@ -53,6 +54,9 @@ class ConfigKey:
     item_kind: str = ""                   # for "list": the kind of each item
     required: bool = False                # must be present & non-empty in that scope
     secret: bool = False                  # never render / log the value in plain text
+    hidden: bool = False                  # real, validated, but not its own editor row --
+                                          # e.g. a container another key already writes
+                                          # into piecemeal, or state a tool manages itself
 
     def __post_init__(self):
         if self.kind not in KINDS:
@@ -77,14 +81,15 @@ _REGISTRY: dict[str, ConfigKey] = {}
 
 def register(key: str, kind: str, *, scope: str = "both", default: Any = None,
              description: str = "", choices=(), minimum=None, maximum=None,
-             item_kind: str = "", required: bool = False, secret: bool = False) -> ConfigKey:
+             item_kind: str = "", required: bool = False, secret: bool = False,
+             hidden: bool = False) -> ConfigKey:
     """Add a key to the registry. Idempotent when the descriptor is identical
     (modules get imported more than once); raises `SchemaError` on a conflict
     (two tools claiming one key with different rules)."""
     ck = ConfigKey(key=key, kind=kind, scope=scope, default=default,
                    description=description, choices=tuple(choices),
                    minimum=minimum, maximum=maximum, item_kind=item_kind,
-                   required=required, secret=secret)
+                   required=required, secret=secret, hidden=hidden)
     existing = _REGISTRY.get(key)
     if existing is not None and existing != ck:
         raise SchemaError(
@@ -287,15 +292,20 @@ def _register_builtins() -> None:
     # --- studio -----------------------------------------------------
     register("kitsu_host", "str", scope="studio", default="http://localhost/api",
              required=True, description="Kitsu API base URL")
-    register("nas_roots", "dict", scope="studio", default={"default": "X:/projects"},
-             required=True, description="named NAS roots; a project picks one by name")
+    register("nas_roots", "key_value_registry", scope="studio",
+             default={"default": "X:/projects"}, required=True,
+             description="named NAS roots; a project picks one by name")
     register("kitsu_project_templates", "list", item_kind="str", scope="studio",
              default=[], description="Kitsu project templates offered at project create")
-    register("project_defaults", "dict", scope="studio", default={},
-             description="a ProjectConfig template copied into each new project")
+    register("project_defaults", "dict", scope="studio", default={}, hidden=True,
+             description="a ProjectConfig template copied into each new project -- "
+                         "redundant as its own row: every sub-key it holds is "
+                         "already registered and shown individually (scope=both)")
 
     # --- project scalars (also studio-default-able) ---------------
-    register("schema_version", "int", scope="both", default=2, minimum=1)
+    register("schema_version", "int", scope="both", default=1, minimum=1, hidden=True,
+             description="project_config.json's own format version -- a constant "
+                         "the loader checks itself against, not something to hand-edit")
     register("fps", "float", scope="both", default=24.0, minimum=1.0, maximum=240.0,
              description="project frame rate")
     register("resolution", "str", scope="both", default="3840x2160",
@@ -315,7 +325,7 @@ def _register_builtins() -> None:
     register("colorspace.plate_assumed", "str", scope="both", default="ACEScg",
              description="colorspace assumed for a delivered plate that declares none")
 
-    register("slugify", "dict", scope="both",
+    register("slugify", "key_value_registry", scope="both",
              default={"spaces_to": "_", "strip": '<>:"/\\|?*', "collapse": "_"},
              description="how a token value is cleaned for the filesystem")
 
@@ -330,6 +340,13 @@ def _register_builtins() -> None:
              default={}, description="every ingest / render / workfile media type")
     register("delivery_presets", "delivery_registry", scope="project", default={},
              description="per-client delivery packaging")
+
+    # meta -- managed only by the config editor's Freeze action, never
+    # hand-edited. hidden=True keeps it out of ConfigStore.fields()'s normal
+    # per-field list while still validating as a known key instead of
+    # producing an "unknown key" warning on every frozen project.
+    register("_frozen", "bool", scope="project", default=False, hidden=True,
+             description="set only by Freeze Project -- locks the project's config")
 
     # --- folder-structure lists ----------------------------------
     register("shot_folder_structure", "list", item_kind="str", scope="both", default=[])

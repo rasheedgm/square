@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError, schema
-from square_core.config.project import DEFAULT_PROJECT_CONFIG, _deep_merge
+from square_core.config.project import DEFAULT_PROJECT_CONFIG, SCHEMA_VERSION, _deep_merge
 
 # Each installed tool registers its own `tools.<tool>.*` keys at import; the
 # editor is the one place that needs them ALL present, whether or not that
@@ -96,22 +96,30 @@ def _clone(d):
 
 def _atomic_write(path: Path, data: dict, *, backup: bool) -> Path | None:
     """Write `data` as pretty JSON to `path` atomically. If `backup` and the
-    file exists, copy it to `<name>.bak-<ts>` first; return that backup path."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    bak = None
-    if backup and path.exists():
-        ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        bak = path.with_name(f"{path.name}.bak-{ts}")
-        bak.write_bytes(path.read_bytes())
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    file exists, copy it to `<name>.bak-<ts>` first; return that backup path.
+
+    Raises `ConfigError` (not a bare OSError) on any filesystem failure --
+    e.g. the project's root lives on a NAS drive that isn't mounted -- so
+    callers that already handle ConfigError show a clean message instead of
+    an unhandled traceback."""
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
-    return bak
+        path.parent.mkdir(parents=True, exist_ok=True)
+        bak = None
+        if backup and path.exists():
+            ts = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+            bak = path.with_name(f"{path.name}.bak-{ts}")
+            bak.write_bytes(path.read_bytes())
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        return bak
+    except OSError as e:
+        raise ConfigError(f"could not write {path}: {e}") from e
 
 
 # --------------------------------------------------------------------------
@@ -158,10 +166,35 @@ class ConfigStore:
     # ---- project binding -------------------------------------------
 
     def open_project(self, project_root: str | Path, code: str = "") -> None:
-        cfg = ProjectConfig.load(project_root)          # raises ConfigError if broken
+        """Open a project for editing. Deliberately does NOT go through
+        ProjectConfig.load() -- that raises on a missing file, and raises
+        again if the file fails full structural/path validation. Neither is
+        right for an EDITOR: a project with no file yet resolves entirely
+        from the studio (that's the whole point of "no file is required, we
+        have a fallback"), and a project whose config is currently broken is
+        exactly the case someone needs the editor open to fix -- refusing to
+        even show it defeats the tool. Only two things still hard-fail here:
+        unreadable JSON (nothing to edit) and a schema_version mismatch (a
+        different shape this build's fields don't describe -- same "no
+        migration before v1.0" rule every other loader follows). Anything
+        else -- broken paths, missing required roots -- surfaces through
+        validate() at Save time instead of blocking Open."""
         self.project_root = Path(project_root)
         self.project_code = code or self.project_root.name
-        self.project_raw = _clone(cfg.data)
+        p = ProjectConfig.path_for(self.project_root)
+        if not p.exists():
+            self.project_raw = {"schema_version": SCHEMA_VERSION}
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as e:
+            raise ConfigError(f"{p} is not valid JSON: {e}") from e
+        version = int(data.get("schema_version", 0))
+        if version != SCHEMA_VERSION:
+            raise ConfigError(
+                f"{p} is schema v{version}, this build understands v{SCHEMA_VERSION} -- "
+                f"recreate the project config (no migration path before v1.0)")
+        self.project_raw = data
 
     def close_project(self) -> None:
         self.project_root = None
@@ -171,6 +204,10 @@ class ConfigStore:
     @property
     def has_project(self) -> bool:
         return self.project_raw is not None
+
+    @property
+    def is_frozen(self) -> bool:
+        return bool((self.project_raw or {}).get("_frozen"))
 
     # ---- provenance ----------------------------------------------
 
@@ -213,21 +250,26 @@ class ConfigStore:
             return FieldView(value=(b if b is not _MISSING else ck.default),
                              source="builtin", **common)
 
-        # project scope: effective value is the project's own if present, else
-        # the studio default. It counts as an *override* only when the project
-        # file carries a value that differs from what the studio would give.
+        # project scope: effective value is the project's own if present,
+        # else the studio default. Presence alone makes it an override --
+        # not whether the value happens to differ. "Set override" (and a
+        # frozen project's full bake) write the CURRENT value unchanged on
+        # purpose; if override meant "differs from studio", neither could
+        # ever show as what it is. A newly-created project stays free of
+        # false positives because projects.create() writes a sparse file --
+        # not because this check used to compare values.
         if self.project_raw is None:
             raise RuntimeError("no project open")
-        dflt, dflt_src = self._studio_default(key)
         own = _dig(self.project_raw, key)
-        if own is not _MISSING and own != dflt:
+        if own is not _MISSING:
             return FieldView(value=own, source="project", overridden=True, **common)
-        val = own if own is not _MISSING else dflt
-        return FieldView(value=val, source=dflt_src, **common)
+        dflt, dflt_src = self._studio_default(key)
+        return FieldView(value=dflt, source=dflt_src, **common)
 
     def fields(self, scope: str) -> list[FieldView]:
         return [self.field(scope, ck.key)
-                for ck in sorted(schema.for_scope(scope), key=lambda c: c.key)]
+                for ck in sorted(schema.for_scope(scope), key=lambda c: c.key)
+                if not ck.hidden]
 
     # ---- edits (in memory) -------------------------------------
 
@@ -244,26 +286,42 @@ class ConfigStore:
             raise KeyError(f"{key!r} is not a known config key")
         if not ck.applies_to(scope):
             raise ValueError(f"{key!r} is not editable at {scope} scope")
+        if scope == "project" and self.is_frozen:
+            raise NotAuthorized(
+                f"{self.project_code} is frozen -- no further edits are allowed")
         errs = schema.check_value(ck, value)
         if errs:
             raise ValueError("; ".join(errs))
         schema.put(self._target(scope, key), key, value)
 
-    def reset(self, key: str) -> bool:
-        """Undo a project override: put the studio default value back (the
-        project file stays complete and loadable). Returns True if the value
-        changed. Project scope only."""
+    def freeze_project(self) -> None:
+        """Write the ENTIRE resolved project config -- every field's current
+        value, whatever it resolves to right now (builtin, studio-default,
+        or already-overridden) -- into the project's own file, and mark it
+        frozen. Afterward set() refuses any further edit for this project.
+        Still requires save_project() to actually persist, same as any other
+        edit."""
+        self._require_write()
         if self.project_raw is None:
             raise RuntimeError("no project open")
-        dflt, _ = self._studio_default(key)
-        cur = _dig(self.project_raw, key)
-        if cur == dflt:
-            return False
-        if dflt is None and schema.get(key) is None:
-            return _del_path(self.project_raw, key)
-        schema.put(self.project_raw, key,
-                   _clone(dflt) if isinstance(dflt, (dict, list)) else dflt)
-        return True
+        if self.is_frozen:
+            raise ValueError(f"{self.project_code} is already frozen")
+        for fv in self.fields("project"):
+            schema.put(self.project_raw, fv.key, fv.value)
+        self.project_raw["_frozen"] = True
+
+    def reset(self, key: str) -> bool:
+        """Undo a project override: remove the key from the project's own
+        file entirely, so it goes back to tracking the studio default live.
+        Override is presence-based, so writing the default value back in
+        explicitly would NOT undo it -- the key has to actually be gone.
+        Returns True if a key was actually removed. Project scope only."""
+        if self.project_raw is None:
+            raise RuntimeError("no project open")
+        if self.is_frozen:
+            raise NotAuthorized(
+                f"{self.project_code} is frozen -- no further edits are allowed")
+        return _del_path(self.project_raw, key)
 
     # ---- diff vs disk ------------------------------------------
 
@@ -305,7 +363,8 @@ class ConfigStore:
             except ConfigError as e:
                 errs.append(f"project_defaults: {e}")
             return errs, warns
-        cfg = ProjectConfig(data=_clone(self.project_raw))
+        cfg = ProjectConfig(data=_clone(self.project_raw),
+                           pipeline_defaults=self.pipeline.project_defaults)
         try:
             cfg.check()
         except ConfigError as e:
@@ -324,7 +383,8 @@ class ConfigStore:
         self._require_write()
         if self.project_raw is None:
             raise RuntimeError("no project open")
-        cfg = ProjectConfig(data=_clone(self.project_raw))
+        cfg = ProjectConfig(data=_clone(self.project_raw),
+                           pipeline_defaults=self.pipeline.project_defaults)
         cfg.check()                                    # raises ConfigError
         path = ProjectConfig.path_for(self.project_root)
         bak = _atomic_write(path, self.project_raw, backup=True)

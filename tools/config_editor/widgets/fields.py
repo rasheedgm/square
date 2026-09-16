@@ -4,9 +4,10 @@
   - `get_value()`            -> the edited value (native type)
   - `signal_changed`        -> a Qt signal, emitted on any edit
 
-Scalar kinds render inline; `list` gets a line-per-item box; `dict` and the
-structured kinds (`root`, `media_type_registry`, `delivery_registry`) open a
-dedicated sub-editor.
+Scalar kinds render inline; `list` gets a line-per-item box; the structured
+kinds (`root`, `media_type_registry`, `delivery_registry`,
+`key_value_registry`) open a dedicated table editor; a bare `dict` (nothing
+more specific registered) falls back to raw "Edit JSON...".
 """
 
 from __future__ import annotations
@@ -207,7 +208,7 @@ def make_field_editor(fv, parent=None, *, version_pad: int = 3, frame_pad: int =
         return _SCALAR[fv.kind](fv, parent)
     if fv.kind == "list":
         return _ListField(fv, parent)
-    if fv.kind in ("root", "media_type_registry", "delivery_registry"):
+    if fv.kind in ("root", "media_type_registry", "delivery_registry", "key_value_registry"):
         from .registries import RegistryEditor
         return RegistryEditor(fv, parent, version_pad=version_pad, frame_pad=frame_pad)
     return _JsonField(fv, parent)     # dict, template, anything else

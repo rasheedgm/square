@@ -7,6 +7,7 @@ plugin and neutered modal pop-ups.
 import json
 import os
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -19,6 +20,7 @@ except Exception:
     _HAVE_QT = False
 
 from square_core.config import ProjectConfig, PipelineConfig
+from square_core.config.project import SCHEMA_VERSION
 
 
 def _pipeline_and_project(tmp):
@@ -45,7 +47,7 @@ def _pipeline_and_sparse_project(tmp):
     root = Path(tmp) / "nas" / "ABC"
     p = ProjectConfig.path_for(root)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    p.write_text(json.dumps({"schema_version": SCHEMA_VERSION}), encoding="utf-8")
     return PipelineConfig.load(studio), studio, root
 
 
@@ -71,13 +73,28 @@ def _pipeline_and_project_with_studio_recipe(tmp):
     root = Path(tmp) / "nas" / "ABC"
     p = ProjectConfig.path_for(root)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    p.write_text(json.dumps({"schema_version": SCHEMA_VERSION}), encoding="utf-8")
     return PipelineConfig.load(studio), studio, root
 
 
 class _User:
     role = "admin"
     email = "admin@example.com"
+
+
+class _FakeCtx:
+    """Just enough of PipelineContext for MainWindow: a project list and a
+    way to resolve one's root_path -- MainWindow never touches Kitsu beyond
+    this."""
+    def __init__(self, projects: dict[str, str]):
+        # {code: root_path}
+        self._roots = projects
+        self.user = _User()
+        self.kitsu = types.SimpleNamespace(
+            projects=lambda: [types.SimpleNamespace(code=c, name=c) for c in projects])
+
+    def project(self, code):
+        return types.SimpleNamespace(project=types.SimpleNamespace(root_path=self._roots[code]))
 
 
 @unittest.skipUnless(_HAVE_QT, "no Qt binding")
@@ -100,6 +117,7 @@ class TestEditorUI(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             store, root = self._store(td)
             pane = ScopePane("project", store)
+            pane._confirm_pending = lambda pending: True
             self.assertIn("fps", pane._editors)
             pane._editors["fps"].spin.setValue(30.0)
             self.assertTrue(pane.save())
@@ -119,6 +137,7 @@ class TestEditorUI(unittest.TestCase):
             store = ConfigStore(pc, user=_User(), studio_path=sp)
             store.open_project(root, "ABC")
             pane = ScopePane("project", store)
+            pane._confirm_pending = lambda pending: True
 
             # the editor resolves everything (media_types, roots, ...)...
             self.assertEqual(store.field("project", "media_types").source, "builtin")
@@ -167,6 +186,7 @@ class TestEditorUI(unittest.TestCase):
             }), encoding="utf-8")
             store = ConfigStore(PipelineConfig.load(studio), user=_User(), studio_path=studio)
             pane = ScopePane("studio", store)
+            pane._confirm_pending = lambda pending: True
 
             self.assertEqual(store.field("studio", "fps").source, "builtin")
             pane._editors["fps"].spin.setValue(30.0)
@@ -195,6 +215,42 @@ class TestEditorUI(unittest.TestCase):
             self.assertIn("_default", v)
             self.assertEqual(v["Plate"]["dir"], "plates/{name}_v{version}")
 
+    def test_generic_dict_fields_get_a_table_not_raw_json(self):
+        """nas_roots / slugify are plain {name: value} dicts -- same table
+        shape as roots, just headed 'Value' (not 'Pattern', since these
+        aren't {token} templates) and with no template-builder double-click."""
+        from tools.config_editor.core import ConfigStore
+        from tools.config_editor.widgets.fields import make_field_editor
+        from tools.config_editor.widgets.registries import RegistryEditor
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project(td)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+
+            fv = store.field("studio", "nas_roots")
+            ed = make_field_editor(fv)
+            self.assertIsInstance(ed, RegistryEditor)
+            self.assertTrue(ed._string_mode)
+            self.assertEqual(ed.table.horizontalHeaderItem(1).text(), "Value")
+            self.assertEqual(ed.get_value(), {"default": str(Path(td) / "nas")})
+
+            store.open_project(root, "ABC")
+            fv2 = store.field("project", "slugify")
+            ed2 = make_field_editor(fv2)
+            self.assertIsInstance(ed2, RegistryEditor)
+            v = ed2.get_value()
+            self.assertEqual(v["spaces_to"], "_")
+
+    def test_project_defaults_is_not_its_own_redundant_field(self):
+        """Every scope=both key already writes into project_defaults
+        individually -- showing the whole container too would just be one
+        giant duplicate 'Edit JSON...' button."""
+        from tools.config_editor.core import ConfigStore
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp, root = _pipeline_and_project(td)
+            store = ConfigStore(pc, user=_User(), studio_path=sp)
+            keys = {f.key for f in store.fields("studio")}
+            self.assertNotIn("project_defaults", keys)
+
     def test_roots_editor_is_string_mode(self):
         from tools.config_editor.widgets.fields import make_field_editor
         with tempfile.TemporaryDirectory() as td:
@@ -204,10 +260,35 @@ class TestEditorUI(unittest.TestCase):
             v = ed.get_value()
             self.assertEqual(v["project"], "{nas_root}/{project}")
 
-    def test_pin_writes_the_inherited_studio_default_into_the_project(self):
-        """A field showing an inherited studio-default value (never edited)
-        must not be written on Save -- but 'pin to project' explicitly marks
-        it touched so a deliberate one-click adopt actually persists."""
+    def test_editing_the_shot_root_pattern_resolves_project_root_reference(self):
+        """Regression: double-clicking the built-in 'shot' root's pattern
+        ('{project_root}/{episode}/shots/{sequence}/{shot}') threw "unknown
+        token {project_root}" and permanently disabled OK -- {project_root}
+        is a root-to-root reference resolved by
+        square_core.paths.resolve_roots(), not a PathContext token, so the
+        template builder's preview must expand it first, the same way
+        PathResolver does at runtime."""
+        from tools.config_editor.widgets.template_builder import TemplateBuilderDialog
+        roots = {"project": "{nas_root}/{project}",
+                 "shot": "{project_root}/{episode}/shots/{sequence}/{shot}"}
+        dlg = TemplateBuilderDialog(roots["shot"], is_dir=True, root_context=roots)
+        self.assertEqual(dlg.err.text(), "")
+        self.assertTrue(dlg._ok.isEnabled())
+        self.assertIn("ABC", dlg.preview.text())          # the sample project rendered in
+
+    def test_template_builder_without_root_context_is_unaffected(self):
+        """A media_type / delivery_preset pattern never has root_context --
+        must behave exactly as before (no regression for the common case)."""
+        from tools.config_editor.widgets.template_builder import TemplateBuilderDialog
+        dlg = TemplateBuilderDialog("plates/{name}_v{version}", is_dir=True)
+        self.assertTrue(dlg._ok.isEnabled())
+
+    def test_set_override_writes_the_inherited_value_and_shows_as_override(self):
+        """The whole feature: adopt an inherited studio-default value into
+        the project's own file without changing it. Presence-based override
+        means it correctly shows as a real override right away, and (unlike
+        the old value-comparison check) it stays that way after a save +
+        rebuild, not just until the next redraw."""
         from tools.config_editor.core import ConfigStore
         from tools.config_editor.ui_main import ScopePane
         with tempfile.TemporaryDirectory() as td:
@@ -215,6 +296,7 @@ class TestEditorUI(unittest.TestCase):
             store = ConfigStore(pc, user=_User(), studio_path=sp)
             store.open_project(root, "ABC")
             pane = ScopePane("project", store)
+            pane._confirm_pending = lambda pending: True
 
             fv = store.field("project", "delivery_presets")
             self.assertEqual(fv.source, "studio-default")
@@ -222,58 +304,165 @@ class TestEditorUI(unittest.TestCase):
 
             # Save with nothing touched: still absent from the project's file
             self.assertTrue(pane.save())
-            self.assertNotIn("delivery_presets",
-                             ProjectConfig.load(root).data)
+            self.assertNotIn("delivery_presets", ProjectConfig.load(root).data)
 
-            pane._pin("delivery_presets")
-            self.assertIn("delivery_presets", pane._touched)
+            pane._set_override("delivery_presets")
+            self.assertTrue(store.field("project", "delivery_presets").overridden)
             self.assertTrue(pane.save())
 
             on_disk = ProjectConfig.load(root)
             self.assertIn("delivery_presets", on_disk.data)
             self.assertEqual(on_disk.delivery_template("ACME")["container"], "dpx")
+            # still shows as an override after the save + rebuild -- doesn't revert
+            self.assertTrue(store.field("project", "delivery_presets").overridden)
 
-    def test_freeze_all_pins_every_inherited_key_at_once(self):
-        """'Freeze this project' -- protects a project actively in delivery
-        from a studio config edit landing mid-flight: every key still tracking
-        the studio default gets pinned in one shot, an already-overridden key
-        is left alone, and (like a single pin) nothing writes until Save."""
+    def test_frozen_project_shows_banner_and_disables_editors(self):
         from tools.config_editor.core import ConfigStore
         from tools.config_editor.ui_main import ScopePane
         with tempfile.TemporaryDirectory() as td:
-            pc, sp, root = _pipeline_and_project_with_studio_recipe(td)
-            store = ConfigStore(pc, user=_User(), studio_path=sp)
-            store.open_project(root, "ABC")
+            store, root = self._store(td)
+            store.freeze_project()
             pane = ScopePane("project", store)
+            self.assertFalse(pane._editors["fps"].isEnabled())
 
-            # give the project one real override already, before freezing
+    def test_save_confirms_pending_changes_before_writing(self):
+        """'save should show what is being changed' -- Save must not write
+        silently once there's a real diff to show."""
+        from tools.config_editor.core import ConfigStore
+        from tools.config_editor.ui_main import ScopePane
+        with tempfile.TemporaryDirectory() as td:
+            store, root = self._store(td)
+            pane = ScopePane("project", store)
             pane._editors["fps"].spin.setValue(30.0)
             pane._on_field_changed("fps")
+
+            seen = {}
+            pane._confirm_pending = lambda pending: seen.update(pending) or False
+            self.assertFalse(pane.save())              # cancelled -- nothing written
+            self.assertIn("fps", seen)
+            self.assertNotEqual(ProjectConfig.load(root).fps, 30.0)
+
+            pane._confirm_pending = lambda pending: True
             self.assertTrue(pane.save())
-            self.assertEqual(ProjectConfig.load(root).data.get("fps"), 30.0)
+            self.assertEqual(ProjectConfig.load(root).fps, 30.0)
 
-            pane.rebuild()
-            before = pane.inherited_keys()
-            self.assertIn("delivery_presets", before)
-            self.assertNotIn("fps", before)             # already overridden -- left alone
 
-            n = pane.freeze_all()
-            self.assertEqual(n, len(before))
-            self.assertEqual(set(pane._touched), set(before))
+@unittest.skipUnless(_HAVE_QT, "no Qt binding")
+class TestMainWindow(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        for m in ("information", "warning", "critical", "question"):
+            setattr(QtWidgets.QMessageBox, m, staticmethod(lambda *a, **k: None))
 
-            # nothing on disk yet -- freezing only marks touched
-            self.assertNotIn("delivery_presets", ProjectConfig.load(root).data)
+    def _window(self, tmp):
+        from tools.config_editor.core import ConfigStore
+        pc, sp, root = _pipeline_and_project(tmp)
+        ctx = _FakeCtx({"ABC": str(root)})
+        store = ConfigStore(pc, user=_User(), studio_path=sp)
+        from tools.config_editor.ui_main import MainWindow
+        return MainWindow(ctx, store), root
 
-            self.assertTrue(pane.save())
-            on_disk = ProjectConfig.load(root)
-            for key in before:                            # dotted paths (colorspace.*) too
-                cur = on_disk.data
-                for part in key.split("."):
-                    self.assertIsInstance(cur, dict)
-                    self.assertIn(part, cur)
-                    cur = cur[part]
-            self.assertEqual(on_disk.delivery_template("ACME")["container"], "dpx")
-            self.assertEqual(on_disk.data["fps"], 30.0)   # untouched by the freeze
+    def test_starts_on_studio_scope(self):
+        with tempfile.TemporaryDirectory() as td:
+            win, _ = self._window(td)
+            self.assertEqual(win.pane.scope, "studio")
+            self.assertFalse(win.store.has_project)
+
+    def test_picking_a_project_switches_to_project_scope(self):
+        with tempfile.TemporaryDirectory() as td:
+            win, root = self._window(td)
+            win._select_code("ABC")
+            self.assertEqual(win.pane.scope, "project")
+            self.assertTrue(win.store.has_project)
+            self.assertEqual(win.store.project_code, "ABC")
+
+    def test_switch_with_unsaved_changes_cancel_stays_put(self):
+        with tempfile.TemporaryDirectory() as td:
+            win, _ = self._window(td)
+            win._select_code("ABC")
+            win.pane._editors["fps"].spin.setValue(30.0)
+            win.pane._on_field_changed("fps")
+
+            win._confirm_switch = lambda: "cancel"
+            win._project_combo.setCurrentIndex(0)          # try to go back to studio-only
+            self.assertEqual(win.pane.scope, "project")     # blocked -- stayed on the project
+            self.assertEqual(win.store.project_code, "ABC")
+
+    def test_switch_with_unsaved_changes_discard_proceeds(self):
+        with tempfile.TemporaryDirectory() as td:
+            win, _ = self._window(td)
+            win._select_code("ABC")
+            win.pane._editors["fps"].spin.setValue(30.0)
+            win.pane._on_field_changed("fps")
+
+            win._confirm_switch = lambda: "discard"
+            win._project_combo.setCurrentIndex(0)
+            self.assertEqual(win.pane.scope, "studio")
+            self.assertFalse(win.store.has_project)
+
+    def test_switch_with_unsaved_changes_save_persists_then_proceeds(self):
+        with tempfile.TemporaryDirectory() as td:
+            win, root = self._window(td)
+            win._select_code("ABC")
+            win.pane._editors["fps"].spin.setValue(30.0)
+            win.pane._on_field_changed("fps")
+            win.pane._confirm_pending = lambda pending: True
+
+            win._confirm_switch = lambda: "save"
+            win._project_combo.setCurrentIndex(0)
+            self.assertEqual(win.pane.scope, "studio")
+            self.assertEqual(ProjectConfig.load(root).fps, 30.0)
+
+    def test_freeze_button_disabled_on_studio_scope_and_when_frozen(self):
+        with tempfile.TemporaryDirectory() as td:
+            win, _ = self._window(td)
+            self.assertFalse(win._freeze_btn.isEnabled())   # studio scope
+
+            win._select_code("ABC")
+            win._update_title()
+            self.assertTrue(win._freeze_btn.isEnabled())
+
+            win.store.freeze_project()
+            win._update_title()
+            self.assertFalse(win._freeze_btn.isEnabled())
+            self.assertFalse(win._save_btn.isEnabled())
+
+    def test_freeze_then_switch_without_saving_warns_and_does_not_lose_it(self):
+        """Regression: freeze_project() sets is_frozen and bakes every field
+        into project_raw in memory BEFORE anything is written to disk. That
+        used to look identical, to the UI, to "fully saved" -- rebuild()
+        unconditionally cleared dirty, and the Save button disabled itself
+        off is_frozen alone -- so switching to another project right after
+        Freeze (without an explicit Save) warned about nothing and silently
+        threw the freeze away."""
+        from tools.qt_compat import MSGBOX_YES
+        with tempfile.TemporaryDirectory() as td:
+            win, root = self._window(td)
+            win._select_code("ABC")
+
+            QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: MSGBOX_YES)
+            self.addCleanup(lambda: setattr(
+                QtWidgets.QMessageBox, "question", staticmethod(lambda *a, **k: None)))
+
+            win._freeze_project()
+            self.assertTrue(win.store.is_frozen)
+            self.assertTrue(win.pane.dirty)             # a real, unsaved change
+            self.assertTrue(win._save_btn.isEnabled())  # so Save must stay reachable
+
+            win._confirm_switch = lambda: "cancel"
+            win._project_combo.setCurrentIndex(0)       # try to leave without saving
+            self.assertEqual(win.pane.scope, "project")  # blocked -- stayed put
+            on_disk = json.loads(ProjectConfig.path_for(root).read_text(encoding="utf-8"))
+            self.assertFalse(on_disk.get("_frozen"))    # not written yet
+
+            win.pane._confirm_pending = lambda pending: True
+            win._save()
+            on_disk = json.loads(ProjectConfig.path_for(root).read_text(encoding="utf-8"))
+            self.assertTrue(on_disk["_frozen"])
+            self.assertFalse(win.pane.dirty)
+            self.assertFalse(win._save_btn.isEnabled())  # now genuinely nothing left to save
+
 
 if __name__ == "__main__":
     unittest.main()

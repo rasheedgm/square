@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass, field
 
 from square_core.config import ProjectConfig
+from square_core.config.project import SCHEMA_VERSION
 from square_core.model import ProjectCreated
 from square_core.storage import layout
 
@@ -59,7 +60,16 @@ def create(pipeline, spec: ProjectSpec) -> ProjectCreated:
         overrides.setdefault("fps", spec.fps)
     if spec.resolution:
         overrides.setdefault("resolution", spec.resolution)
-    cfg = ProjectConfig.from_defaults(pipeline.config.project_defaults, overrides=overrides)
+    # Sparse by design -- only this project's real, explicit choices get
+    # written; everything else resolves LIVE from the studio's
+    # project_defaults (ProjectConfig.pipeline_defaults), same as a
+    # hand-placed minimal config file already does. A full bake here (the
+    # old from_defaults() behavior) would make every untouched field look
+    # like a permanent project override the moment presence, not value
+    # comparison, is what "override" means in the config editor.
+    data = {"schema_version": SCHEMA_VERSION, **overrides}
+    cfg = ProjectConfig(data=data, pipeline_defaults=pipeline.config.project_defaults)
+    cfg.check()
     cfg_path = cfg.save(root)
 
     created = layout.create_tree(root, cfg.project_folder_structure)

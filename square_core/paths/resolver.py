@@ -168,7 +168,7 @@ def _cleanup(path: str) -> str:
 class PathResolver:
     def __init__(self, config):
         self.config = config
-        self._roots = _resolve_roots(config.roots)
+        self._roots = resolve_roots(config.roots)
 
     # ---- roots --------------------------------------------------------
 
@@ -344,7 +344,13 @@ def _root_refs(tmpl: str, root_names: set) -> list:
     return [r for r in _ROOT_REF_RE.findall(tmpl) if r in root_names]
 
 
-def _resolve_roots(roots: dict) -> dict:
+def resolve_roots(roots: dict) -> dict:
+    """Expand every `{X_root}` reference (X another root's name) into that
+    root's own -- already expanded -- template text, so `roots.shot` can read
+    `{project_root}/{sequence}/{shot}` instead of repeating the "project"
+    root's whole pattern. Public: the config editor's template-builder
+    preview needs this same expansion to make sense of a root pattern in
+    isolation -- see `tools/config_editor/widgets/template_builder.py`."""
     root_names = set(roots or {})
     resolved: dict = {}
     pending = dict(roots or {})

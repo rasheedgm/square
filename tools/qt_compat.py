@@ -68,6 +68,8 @@ MSG_WARNING = get_qt_enum(QtWidgets.QMessageBox, "Icon", "Warning")
 # message box / layout / size policy / filesystem model
 MSGBOX_YES = get_qt_enum(QtWidgets.QMessageBox, "StandardButton", "Yes")
 MSGBOX_NO = get_qt_enum(QtWidgets.QMessageBox, "StandardButton", "No")
+MSGBOX_ACTION_ROLE = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "ActionRole")
+MSGBOX_REJECT_ROLE = get_qt_enum(QtWidgets.QMessageBox, "ButtonRole", "RejectRole")
 FORM_FIELDS_GROW = get_qt_enum(QtWidgets.QFormLayout, "FieldGrowthPolicy",
                                "AllNonFixedFieldsGrow")
 SIZE_EXPANDING = get_qt_enum(QtWidgets.QSizePolicy, "Policy", "Expanding")

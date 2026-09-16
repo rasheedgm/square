@@ -428,6 +428,41 @@ class TestMainWindow(unittest.TestCase):
             self.assertFalse(win._freeze_btn.isEnabled())
             self.assertFalse(win._save_btn.isEnabled())
 
+    def test_freeze_then_switch_without_saving_warns_and_does_not_lose_it(self):
+        """Regression: freeze_project() sets is_frozen and bakes every field
+        into project_raw in memory BEFORE anything is written to disk. That
+        used to look identical, to the UI, to "fully saved" -- rebuild()
+        unconditionally cleared dirty, and the Save button disabled itself
+        off is_frozen alone -- so switching to another project right after
+        Freeze (without an explicit Save) warned about nothing and silently
+        threw the freeze away."""
+        from tools.qt_compat import MSGBOX_YES
+        with tempfile.TemporaryDirectory() as td:
+            win, root = self._window(td)
+            win._select_code("ABC")
+
+            QtWidgets.QMessageBox.question = staticmethod(lambda *a, **k: MSGBOX_YES)
+            self.addCleanup(lambda: setattr(
+                QtWidgets.QMessageBox, "question", staticmethod(lambda *a, **k: None)))
+
+            win._freeze_project()
+            self.assertTrue(win.store.is_frozen)
+            self.assertTrue(win.pane.dirty)             # a real, unsaved change
+            self.assertTrue(win._save_btn.isEnabled())  # so Save must stay reachable
+
+            win._confirm_switch = lambda: "cancel"
+            win._project_combo.setCurrentIndex(0)       # try to leave without saving
+            self.assertEqual(win.pane.scope, "project")  # blocked -- stayed put
+            on_disk = json.loads(ProjectConfig.path_for(root).read_text(encoding="utf-8"))
+            self.assertFalse(on_disk.get("_frozen"))    # not written yet
+
+            win.pane._confirm_pending = lambda pending: True
+            win._save()
+            on_disk = json.loads(ProjectConfig.path_for(root).read_text(encoding="utf-8"))
+            self.assertTrue(on_disk["_frozen"])
+            self.assertFalse(win.pane.dirty)
+            self.assertFalse(win._save_btn.isEnabled())  # now genuinely nothing left to save
+
 
 if __name__ == "__main__":
     unittest.main()

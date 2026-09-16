@@ -147,7 +147,18 @@ class ScopePane(QtWidgets.QWidget):
             form.addRow(label, cell)
 
         self._scroll.setWidget(body)
-        self._set_dirty(False)
+        # Dirty means "memory differs from disk" -- derive it from the store,
+        # don't just assume a rebuild means nothing's pending. freeze_project()
+        # / _set_override() / reset() all write straight into store.project_raw
+        # (not through the deferred _touched-then-flush-at-save path) and then
+        # call rebuild(); unconditionally clearing dirty here used to hide
+        # that real unsaved state, so switching projects right after Freeze
+        # silently discarded it with no warning.
+        try:
+            dirty = bool(self.store.pending(self.scope))
+        except RuntimeError:
+            dirty = False
+        self._set_dirty(dirty)
 
     def _on_field_changed(self, key: str):
         self._touched.add(key)
@@ -411,7 +422,11 @@ class MainWindow(QtWidgets.QMainWindow):
         mark = " *" if self.pane.dirty else ""
         self.setWindowTitle(f"Square — Config Editor{mark}")
         frozen = self.store.has_project and self.store.is_frozen
-        self._save_btn.setEnabled(self.store.can_write() and not frozen)
+        # frozen alone doesn't mean "nothing to save" -- freeze_project() sets
+        # is_frozen in memory before anything is written to disk, so a just-
+        # frozen-but-unsaved project must keep Save enabled (pane.dirty, now
+        # correctly derived from the real disk-vs-memory diff, covers that).
+        self._save_btn.setEnabled(self.store.can_write() and (not frozen or self.pane.dirty))
         self._freeze_btn.setEnabled(
             self.store.can_write() and self.pane.scope == "project"
             and self.store.has_project and not frozen)

@@ -35,6 +35,9 @@ class OfflineApi:
     def project_templates(self):
         return []
 
+    def ensure_file_tree(self, project):
+        return False
+
     # breakdown
     def ensure_sequence(self, project, code):
         return Sequence(id=f"offline-seq-{code}", code=code)

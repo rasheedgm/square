@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import logging
 import os
 import tempfile
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ from typing import Any
 
 from square_core.config import ProjectConfig, PipelineConfig, ConfigError, schema
 from square_core.config.project import DEFAULT_PROJECT_CONFIG, SCHEMA_VERSION, _deep_merge
+
+logger = logging.getLogger("square.config_editor")
 
 # Each installed tool registers its own `tools.<tool>.*` keys at import; the
 # editor is the one place that needs them ALL present, whether or not that
@@ -125,9 +128,13 @@ def _atomic_write(path: Path, data: dict, *, backup: bool) -> Path | None:
 # --------------------------------------------------------------------------
 
 class ConfigStore:
-    def __init__(self, pipeline: PipelineConfig, *, user=None, studio_path=None):
+    def __init__(self, pipeline: PipelineConfig, *, user=None, studio_path=None, kitsu=None):
         self.pipeline = pipeline
         self.user = user
+        # optional live KitsuApi (or OfflineApi) -- when given, save_project()
+        # best-effort repairs a project's missing Kitsu file_tree; when None
+        # (e.g. a headless ConfigStore in a test), that step is just skipped.
+        self.kitsu = kitsu
         self.studio_path = Path(studio_path or pipeline.source_path
                                 or PipelineConfig._resolve_path(None)
                                 or "studio_config.json")
@@ -388,4 +395,26 @@ class ConfigStore:
         cfg.check()                                    # raises ConfigError
         path = ProjectConfig.path_for(self.project_root)
         bak = _atomic_write(path, self.project_raw, backup=True)
+        self._ensure_kitsu_file_tree()
         return path, bak
+
+    def _ensure_kitsu_file_tree(self) -> None:
+        """Best-effort: a project saved here might have been created outside
+        Square's own tools (straight in Kitsu's web UI, migrated from another
+        studio, ...) and so never got a Kitsu file_tree -- the first ingest
+        into it would hard-fail with "No tree can be found for given
+        project." Piggyback the repair onto a config save, since that's
+        already a live, authenticated Kitsu session touching this exact
+        project -- no separate maintenance step needed for a project someone
+        is actively configuring. Never blocks the save that already
+        succeeded: no kitsu handle, Kitsu being unreachable, or any other
+        failure here is only logged."""
+        if self.kitsu is None or not self.project_code:
+            return
+        try:
+            proj = self.kitsu.project(self.project_code)
+            if proj is not None:
+                self.kitsu.ensure_file_tree(proj)
+        except Exception as e:
+            logger.warning("could not ensure Kitsu file tree for %r: %s",
+                           self.project_code, e)

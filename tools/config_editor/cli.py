@@ -28,7 +28,7 @@ def _store(args) -> ConfigStore:
         print("not logged in -- run the ingest tool / editor GUI once to sign in, "
               "or set SQUARE_KITSU_TOKEN", file=sys.stderr)
         raise SystemExit(2)
-    store = ConfigStore(ctx.config, user=ctx.user)
+    store = ConfigStore(ctx.config, user=ctx.user, kitsu=ctx.kitsu)
     if getattr(args, "project", None):
         pctx = ctx.project(args.project)
         store.open_project(pctx.project.root_path, pctx.project.code)

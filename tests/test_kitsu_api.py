@@ -64,6 +64,16 @@ class FakeBackend:
 
     def set_minimal_file_tree(self, project):
         self.file_tree_set.append(project["id"])
+        for p in self.projects:
+            if p["id"] == project["id"]:
+                p["file_tree"] = {"working": {}, "output": {}}
+
+    def ensure_minimal_file_tree(self, project):
+        fresh = self.get_project(project["id"]) or {}
+        if fresh.get("file_tree"):
+            return False
+        self.set_minimal_file_tree(project)
+        return True
 
     # breakdown
     def get_or_create_sequence(self, project, name):
@@ -237,6 +247,23 @@ class TestProjectsAndBreakdown(unittest.TestCase):
         self.assertTrue(p.is_episodic)
         self.assertEqual(api._b.applied_templates, [(p.id, "VFX Shots")])
         self.assertIn(p.id, api._b.file_tree_set)
+
+    def test_ensure_file_tree_sets_one_when_missing(self):
+        """A project made outside create_project() (straight in Kitsu's web
+        UI, in this fake: just new_project() with none of create_project()'s
+        follow-up calls) has no file_tree yet -- ensure_file_tree must give
+        it the minimal one and report that it did."""
+        api = _api()
+        raw = api._b.new_project("Legacy")     # bypasses create_project()
+        self.assertTrue(api.ensure_file_tree(raw))
+        self.assertIn(raw["id"], api._b.file_tree_set)
+
+    def test_ensure_file_tree_is_a_no_op_once_set(self):
+        api = _api()
+        proj = api.create_project(code="ABC")   # already gets one
+        api._b.file_tree_set.clear()            # isolate this call
+        self.assertFalse(api.ensure_file_tree(proj))
+        self.assertEqual(api._b.file_tree_set, [])   # not written again
 
     def test_ensure_shot_and_tasks_idempotent(self):
         api = _api()

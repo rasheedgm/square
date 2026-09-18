@@ -53,7 +53,7 @@ def main() -> None:
     app.setStyleSheet(_QSS)
 
     ctx = _connect()
-    store = ConfigStore(ctx.config, user=ctx.user)
+    store = ConfigStore(ctx.config, user=ctx.user, kitsu=ctx.kitsu)
     win = MainWindow(ctx, store)
     win.show()
     sys.exit(app.exec() if hasattr(app, "exec") else app.exec_())

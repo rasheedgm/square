@@ -142,6 +142,21 @@ class GazuBackend:
     def set_minimal_file_tree(self, project: dict) -> None:
         self.g.files.update_project_file_tree(_ref(project), _MINIMAL_FILE_TREE)
 
+    def ensure_minimal_file_tree(self, project: dict) -> bool:
+        """Idempotent version of `set_minimal_file_tree`: only writes when the
+        project doesn't already have one. A project made outside Square's own
+        `create_project()` (straight in Kitsu's web UI, migrated from another
+        studio, ...) never gets one, and `new_working_file` /
+        `new_entity_output_file` reject outright without one -- but a
+        studio-configured tree on an existing project must not be clobbered.
+        Returns whether it actually set one."""
+        ref = _ref(project)
+        fresh = self.get_project(ref["id"]) or {}
+        if fresh.get("file_tree"):
+            return False
+        self.g.files.update_project_file_tree(ref, _MINIMAL_FILE_TREE)
+        return True
+
     # ---- breakdown ------------------------------------------------
 
     def get_or_create_sequence(self, project, name) -> dict:

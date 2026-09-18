@@ -125,7 +125,6 @@ rem running it directly works regardless of sys.path.
 pause
 """
 
-
 def write_launchers(launchers_dir: Path, release_dir: Path):
     launchers_dir.mkdir(parents=True, exist_ok=True)
     tools_dir = release_dir / "tools"

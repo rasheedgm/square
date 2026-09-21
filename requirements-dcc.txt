@@ -13,14 +13,26 @@
 #
 # Being pure Python is necessary but not sufficient: a dependency's own
 # SOURCE can still use newer syntax than the oldest DCC Python has to
-# support. urllib3>=2.7 assigns `typing.Iterable[bytes | str]` to a plain
-# module-level variable in _base_connection.py -- eager, not a deferred
-# annotation, so `from __future__ import annotations` doesn't save it -- and
-# `X | Y` needs `type.__or__`, added in Python 3.10. That's a real crash
-# hit inside Nuke 14.1 (Python 3.9): "TypeError: unsupported operand
-# type(s) for |: 'type' and 'type'". Pinned below for exactly that reason;
-# don't remove the pin without checking urllib3's current source against
-# the oldest Python this file still has to support.
+# support (`X | Y` needs `type.__or__`, added in Python 3.10 -- Nuke 14
+# bundles Python 3.9). Both hit for real inside Nuke 14.1, both crashing on
+# the very first `import gazu` with "TypeError: unsupported operand type(s)
+# for |: 'type' and 'type'":
+#   - urllib3>=2.7 assigns `typing.Iterable[bytes | str]` to a plain
+#     module-level variable in _base_connection.py -- eager, not a deferred
+#     annotation, so `from __future__ import annotations` doesn't save it.
+#   - requests>=2.34 added `def to_native_string(string: str | bytes, ...)`
+#     to _internal_utils.py, a file with no `from __future__ import
+#     annotations` at all, so the annotation itself is evaluated eagerly.
+# Pinned below for exactly those two reasons -- don't loosen either without
+# re-checking that package's current source against the oldest Python this
+# file still has to support (an AST-based scanner for exactly this pattern,
+# not committed here, is how both were actually confirmed: it flags a
+# `X | Y` where both sides look type-like -- a builtin type name, `None`, a
+# `Typing[...]` subscript -- that's either a plain eager expression or an
+# annotation in a file lacking future-annotations; it deliberately ignores
+# ordinary bitwise-OR / flag-combining `|` between real runtime values,
+# e.g. `re.UNICODE | re.DOTALL` or `os.O_WRONLY | os.O_CREAT`, which have
+# always worked and have nothing to do with `type.__or__`).
 # Installed with --no-deps (both here and in run_nuke.bat) -- gazu declares
 # a HARD dependency on pywin32 (for its events.py live-notification client,
 # via python-socketio; nothing in this codebase ever imports gazu.events),
@@ -30,7 +42,7 @@
 # and gazu's own transitive ones -- must be listed explicitly below; pip
 # will NOT pull anything in on its own.
 gazu==1.2.1
-requests>=2.28
+requests>=2.28,<2.34
 urllib3<2.7
 idna
 certifi

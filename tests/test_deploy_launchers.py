@@ -5,8 +5,9 @@ non-zero exit so the user can read it."""
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from tools.pipeline_deploy.deploy import write_launchers
+from tools.pipeline_deploy.deploy import build_dcc_deps, write_launchers
 
 
 class TestLauncherBat(unittest.TestCase):
@@ -74,6 +75,44 @@ class TestLauncherBat(unittest.TestCase):
             launchers = Path(td) / "launchers"
             write_launchers(launchers, release)
             self.assertFalse((launchers / "square_xstudio.bat").exists())
+
+
+class TestBuildDccDeps(unittest.TestCase):
+    """Regression coverage for a real crash: gazu declares a hard dependency
+    on pywin32 (for its unused events.py live-notification client), which
+    has no pure-Python wheel at all -- resolving gazu's full tree under
+    --only-binary=:all: fails outright unless --no-deps is also passed, so
+    requirements-dcc.txt is the one place the actual runtime dependency list
+    lives. Missing --no-deps here would have made every deploy fail (or,
+    before --only-binary was added, silently install whatever wheel matched
+    the DEPLOYING machine's Python -- unrelated to the embedded DCC
+    interpreter's own ABI -- which is exactly how a urllib3 release using
+    Python 3.10+-only syntax ended up inside Nuke 14's Python 3.9 and
+    crashed on the very first import)."""
+
+    def test_install_command_is_no_deps_and_pure_python_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            envs_dir = Path(td) / "envs"
+            envs_dir.mkdir()
+            with patch("tools.pipeline_deploy.deploy.subprocess.run") as run:
+                build_dcc_deps(envs_dir, rebuild=True)
+            self.assertTrue(run.called)
+            cmd = run.call_args[0][0]
+            self.assertIn("--no-deps", cmd)
+            self.assertIn("--only-binary=:all:", cmd)
+            for pair in (("--platform", "any"), ("--implementation", "py"), ("--abi", "none")):
+                self.assertIn(pair[0], cmd)
+                self.assertEqual(cmd[cmd.index(pair[0]) + 1], pair[1])
+            self.assertIn("--target", cmd)
+            self.assertEqual(cmd[cmd.index("--target") + 1], str(envs_dir / "dcc-deps"))
+
+    def test_skips_the_build_when_the_folder_exists_and_not_rebuilding(self):
+        with tempfile.TemporaryDirectory() as td:
+            envs_dir = Path(td) / "envs"
+            (envs_dir / "dcc-deps").mkdir(parents=True)
+            with patch("tools.pipeline_deploy.deploy.subprocess.run") as run:
+                build_dcc_deps(envs_dir, rebuild=False)
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

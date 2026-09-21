@@ -1,12 +1,41 @@
 # Pure-Python deps injected onto the sys.path of embedded DCC interpreters
-# (xStudio's CPython 3.11, Nuke's Python) -- NEVER the studio `env/` venv,
-# whose compiled extensions (numpy, Qt, ...) clash with the host's own.
+# (xStudio's CPython 3.11, Nuke's Python -- 3.9 for Nuke 14) -- NEVER the
+# studio `env/` venv, whose compiled extensions (numpy, Qt, ...) clash with
+# the host's own.
 #
-# Keep this list PURE PYTHON. The deploy step installs it with
-#   pip install --target <pipeline>/envs/dcc-deps --no-deps? -- no, with deps,
-# but audit that nothing pulls a binary wheel.
+# "Pure Python" is ENFORCED, not just this comment: both the deploy step and
+# run_nuke.bat install with `--platform any --implementation py --abi none
+# --only-binary=:all:`, so pip refuses any compiled wheel outright (some of
+# these -- charset-normalizer, at least -- ship one alongside a pure-Python
+# `py3-none-any` build; without forcing the platform, pip picks whichever
+# matches the machine RUNNING the deploy, which has nothing to do with the
+# embedded interpreter's own ABI and would silently break it).
+#
+# Being pure Python is necessary but not sufficient: a dependency's own
+# SOURCE can still use newer syntax than the oldest DCC Python has to
+# support. urllib3>=2.7 assigns `typing.Iterable[bytes | str]` to a plain
+# module-level variable in _base_connection.py -- eager, not a deferred
+# annotation, so `from __future__ import annotations` doesn't save it -- and
+# `X | Y` needs `type.__or__`, added in Python 3.10. That's a real crash
+# hit inside Nuke 14.1 (Python 3.9): "TypeError: unsupported operand
+# type(s) for |: 'type' and 'type'". Pinned below for exactly that reason;
+# don't remove the pin without checking urllib3's current source against
+# the oldest Python this file still has to support.
+# Installed with --no-deps (both here and in run_nuke.bat) -- gazu declares
+# a HARD dependency on pywin32 (for its events.py live-notification client,
+# via python-socketio; nothing in this codebase ever imports gazu.events),
+# and pywin32 has no pure-Python wheel at all, so letting pip resolve gazu's
+# full declared tree fails outright under --only-binary=:all:. --no-deps
+# means every package actually needed at runtime -- including requests's
+# and gazu's own transitive ones -- must be listed explicitly below; pip
+# will NOT pull anything in on its own.
 gazu==1.2.1
 requests>=2.28
+urllib3<2.7
+idna
+certifi
+charset-normalizer
+typing_extensions>=4
 # Qt.py is a compatibility shim, not a Qt binding itself -- it just needs
 # ONE already importable in the host interpreter (Nuke ships its own
 # PySide2/PySide6), which is exactly what tools/widgets/login_dialog.py

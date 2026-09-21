@@ -172,7 +172,24 @@ def write_launchers(launchers_dir: Path, release_dir: Path):
 def build_dcc_deps(envs_dir: Path, rebuild: bool) -> None:
     """A pure-Python dep set injected onto embedded DCC interpreters' sys.path
     (xStudio's 3.11, Nuke's Python) -- never the compiled `win_x64_python311`
-    venv, whose extensions clash with the host's own."""
+    venv, whose extensions clash with the host's own.
+
+    --no-deps: gazu declares a HARD dependency on pywin32 (for its unused
+    events.py live-notification client), which has no pure-Python wheel at
+    all -- letting pip resolve gazu's full declared tree fails outright
+    under --only-binary=:all:. requirements-dcc.txt lists every package
+    actually needed at runtime explicitly instead; pip installs exactly
+    that list and nothing transitive.
+
+    `--platform any --implementation py --abi none --only-binary=:all:`
+    makes "pure Python" an install-time GUARANTEE, not just an audit
+    requirement in requirements-dcc.txt's own comment: without it, pip
+    happily installs whichever wheel matches the machine RUNNING deploy
+    (`sys.executable` here) -- which has nothing to do with the embedded
+    interpreter this folder is actually for, and some of these packages
+    (charset-normalizer, at least) ship a compiled wheel alongside their
+    pure-Python one. Forcing the platform makes pip refuse a compiled
+    wheel outright instead of silently installing one that can't import."""
     target = envs_dir / "dcc-deps"
     req = repo_root / "requirements-dcc.txt"
     if not req.exists():
@@ -183,7 +200,9 @@ def build_dcc_deps(envs_dir: Path, rebuild: bool) -> None:
     shutil.rmtree(target, ignore_errors=True)
     try:
         subprocess.run([sys.executable, "-m", "pip", "install",
-                        "--target", str(target), "-r", str(req)], check=True)
+                        "--target", str(target), "--no-deps", "-r", str(req),
+                        "--platform", "any", "--implementation", "py",
+                        "--abi", "none", "--only-binary=:all:"], check=True)
     except Exception as e:
         print(f"[WARN] dcc-deps build failed: {e}")
 

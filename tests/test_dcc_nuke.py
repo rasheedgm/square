@@ -351,7 +351,7 @@ class TestPanelImports(unittest.TestCase):
 
 
 class TestAccountStatus(unittest.TestCase):
-    """menu_title() / sign_out() -- pure logic, no Qt or real Nuke needed.
+    """status_label() / sign_out() -- pure logic, no Qt or real Nuke needed.
     sign_in() opens a real LoginDialog and isn't covered here, same as the
     other panels."""
 
@@ -374,24 +374,24 @@ class TestAccountStatus(unittest.TestCase):
             os.environ["SQUARE_STATE_DIR"] = self._old_state_dir
         self._td.cleanup()
 
-    def test_menu_title_plain_when_nothing_cached_and_ops_unset(self):
-        self.assertEqual(self.panel.menu_title(), "Square")
+    def test_status_label_plain_when_nothing_cached_and_ops_unset(self):
+        self.assertEqual(self.panel.status_label(), "Not signed in")
 
-    def test_menu_title_hints_signed_in_from_a_cached_token_alone(self):
-        """No live Kitsu call happens here -- menu_title() must never block
-        Nuke startup on the network -- so a merely-cached token (whose owner
-        we don't know without asking the server) gets a generic hint, not a
-        name."""
+    def test_status_label_hints_signed_in_from_a_cached_token_alone(self):
+        """No live Kitsu call happens here -- status_label() must never
+        block Nuke startup on the network -- so a merely-cached token (whose
+        owner we don't know without asking the server) gets a generic hint,
+        not a name."""
         from square_core.kitsu import auth
         auth.store_session(self.panel._pipeline_host(),
                            {"access_token": "AT", "refresh_token": ""})
-        self.assertEqual(self.panel.menu_title(), "Square (signed in)")
+        self.assertEqual(self.panel.status_label(), "Signed in (cached)")
 
-    def test_menu_title_shows_the_real_name_once_ops_is_resolved(self):
+    def test_status_label_shows_the_real_name_once_ops_is_resolved(self):
         with tempfile.TemporaryDirectory() as td:
             ops, _ = _ops(td)
             self.panel._ops = ops
-            self.assertEqual(self.panel.menu_title(), "Square — artist@studio.com")
+            self.assertEqual(self.panel.status_label(), "Signed in as artist@studio.com")
 
     def test_sign_out_forgets_the_session_and_clears_ops(self):
         with tempfile.TemporaryDirectory() as td:
@@ -405,10 +405,25 @@ class TestAccountStatus(unittest.TestCase):
 
         self.assertIsNone(self.panel._ops)
         self.assertIsNone(auth.cached_session(host))
-        self.assertEqual(self.panel.menu_title(), "Square")
+        self.assertEqual(self.panel.status_label(), "Not signed in")
 
-    def test_rebuild_menu_is_a_safe_noop_outside_nuke(self):
-        self.panel._rebuild_menu()          # must not raise -- no real nuke here
+    def test_refresh_status_is_a_safe_noop_outside_nuke(self):
+        self.panel._refresh_status()          # must not raise -- no real nuke here
+
+
+class TestMenuNeverRenamesItself(unittest.TestCase):
+    """Regression: the top-level Square menu's own name must never change --
+    an earlier version renamed it to show the signed-in user, which broke
+    Menu.removeItem(name)'s exact-match lookup on the next login change and
+    left a duplicate "Square" menu behind instead of replacing the first."""
+
+    def test_menu_source_never_calls_addMenu_with_a_computed_title(self):
+        src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
+        self.assertIn('addMenu("Square")', src)
+
+    def test_menu_source_uses_setLabel_for_the_status_item(self):
+        src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
+        self.assertIn("setLabel", src)
 
 
 if __name__ == "__main__":

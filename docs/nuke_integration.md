@@ -27,11 +27,16 @@ PySide2/PySide6).
 
 ## The Square menu
 
-The top-level **Square** label itself shows who's signed in once known
-(`Square — Jane Doe`) -- Nuke's classic menu API has no live-updating label,
-so this only refreshes right after **Sign In…** / **Sign Out**, or the first
-time any command successfully authenticates with an already-cached token
-(never at Nuke startup itself, which must not block on a Kitsu round trip).
+A status item (`Not signed in` / `Signed in as Jane Doe`) shows who's signed
+in -- click it to see the same text again as a message. It refreshes right
+after **Sign In…** / **Sign Out**, or the first time any command
+successfully authenticates with an already-cached token (never at Nuke
+startup itself, which must not block on a Kitsu round trip). This is a
+`MenuItem.setLabel()` on the SAME item every time, never a rebuild of the
+menu itself: Nuke's `Menu.removeItem(name)` needs the exact current name to
+find what to remove, so an earlier version that renamed the top-level
+**Square** menu on every login change made that lookup miss and left a
+second "Square" menu behind instead of replacing the first.
 
 | Command | |
 |---|---|
@@ -41,6 +46,7 @@ time any command successfully authenticates with an already-cached token
 | **SquareRead** | a Read node with a Square tab |
 | **Render && Publish** | render the selected Write, then open the Publish panel |
 | **Publish Output…** | the Publish panel for the selected Write **or Read** |
+| *(status item)* | who's signed in -- click to see it as a message too |
 | **Sign In…** | the shared Kitsu login dialog |
 | **Sign Out** | forgets the cached session (this machine only) |
 

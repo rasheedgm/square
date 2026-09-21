@@ -8,28 +8,24 @@ import nuke
 from tools.dcc.nuke import gizmos
 
 _P = "from tools.dcc.nuke import panel; panel.{}()"
-_current_title = "Square"
+_status_item = None
 
 
 def build() -> None:
-    """(Re)builds the Square menu: once at Nuke start (below), and again from
-    `panel.sign_in()` / `sign_out()` so the top-level label's login status
-    stays correct -- Nuke's classic menu API has no live-updating label, so
-    this is how "show the signed-in user" actually gets reflected. Only the
-    menu ITEMS are rebuilt here; the gizmo knobChanged callbacks are
-    registered exactly once, at the bottom of this module, never in here --
-    a rebuild calling that again would double-fire every one of them (the
-    same class of bug a doubled-plugin-load once caused for xStudio)."""
-    global _current_title
+    """Builds the Square menu ONCE, at Nuke start (below) -- the menu's own
+    title never changes again. An earlier version renamed the top-level
+    "Square" menu itself to show who's signed in, removing and re-adding it
+    on every Sign In / Sign Out via `Menu.removeItem(name)`. That lookup
+    needs the EXACT current label, and since the label was exactly what
+    kept changing, removeItem() started missing -- leaving the old menu in
+    place and adding a second "Square" alongside it every time. The login
+    status now lives on one ordinary menu ITEM instead (see refresh_status()
+    below), mutated in place via MenuItem.setLabel() -- no add/remove of
+    anything, so there is nothing left to leave behind or duplicate."""
+    global _status_item
     from tools.dcc.nuke import panel
 
-    m = nuke.menu("Nuke")
-    try:
-        m.removeItem(_current_title)
-    except Exception:
-        pass          # nothing to remove yet (first build)
-    _current_title = panel.menu_title()
-    menu = m.addMenu(_current_title)
+    menu = nuke.menu("Nuke").addMenu("Square")
     menu.addCommand("Save Version…", _P.format("save_version"), "ctrl+alt+s")
     menu.addCommand("Open Version…", _P.format("open_version"), "ctrl+alt+o")
     menu.addSeparator()
@@ -39,8 +35,21 @@ def build() -> None:
     menu.addCommand("Render && Publish", _P.format("render_and_publish_selected"))
     menu.addCommand("Publish Output…", _P.format("publish_dialog"))
     menu.addSeparator()
+    _status_item = menu.addCommand(panel.status_label(), _P.format("show_status"))
     menu.addCommand("Sign In…", _P.format("sign_in"))
     menu.addCommand("Sign Out", _P.format("sign_out"))
+
+
+def refresh_status() -> None:
+    """Update the status item's label in place -- called once by build()
+    (above) and again whenever panel.sign_in() / sign_out() changes the
+    login state, or the first command that authenticates from an
+    already-cached token. Safe to call before build() has run (e.g. from a
+    test): just a no-op."""
+    if _status_item is None:
+        return
+    from tools.dcc.nuke import panel
+    _status_item.setLabel(panel.status_label())
 
 
 build()

@@ -24,11 +24,18 @@ def _nuke():
 
 def get_ops() -> NukeOps:
     global _ops
+    was_unset = _ops is None
     if _ops is None:
         try:
             _ops = NukeOps()
         except NeedsLogin:
-            raise OpsError("Not signed in to Kitsu — run any Square tool once to log in.")
+            raise OpsError(
+                "Not signed in to Kitsu — Square -> Sign In…, or run any other Square tool.")
+    if was_unset:
+        # the cached token turned out to still be valid -- the menu's title
+        # (built before we knew that) still says "Square", not the signed-in
+        # user; catch it up now that we actually have one to show.
+        _rebuild_menu()
     return _ops
 
 
@@ -37,6 +44,35 @@ def _msg(text: str) -> None:
         _nuke().message(f"Square\n\n{text}")
     except Exception:
         print(f"Square: {text}")
+
+
+def _pipeline_host() -> str:
+    from square_core.config import PipelineConfig
+    return PipelineConfig.load().kitsu_host
+
+
+def _user_label(user) -> str:
+    return user.name or user.email or user.id
+
+
+def menu_title() -> str:
+    """The Square menu's top-level label -- never makes a live Kitsu call
+    (Nuke startup must not block on the network): if `ops` is already
+    resolved in this session, show the real signed-in name; otherwise a
+    cheap LOCAL check of whether some cached token exists at all, with no
+    way to know whose it is without asking the server."""
+    if _ops is not None:
+        return f"Square — {_user_label(_ops._ctx.user)}"
+    from square_core.kitsu import auth
+    return "Square (signed in)" if auth.cached_session(_pipeline_host()) else "Square"
+
+
+def _rebuild_menu() -> None:
+    try:
+        from tools.dcc.nuke import menu
+        menu.build()
+    except Exception:
+        pass          # outside Nuke (e.g. unit tests), or menu.py hasn't run yet
 
 
 def _guard(fn):
@@ -48,6 +84,32 @@ def _guard(fn):
         except Exception as e:
             _msg(f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
     return wrapped
+
+
+@_guard
+def sign_in():
+    from tools.qt_compat import exec_dialog
+    from tools.widgets.login_dialog import LoginDialog
+    global _ops
+    if not exec_dialog(LoginDialog(_pipeline_host())):
+        return
+    _ops = None                       # drop any stale session, force a fresh one
+    try:
+        ops = get_ops()               # reconnect now (also rebuilds the menu title)
+    except OpsError as e:
+        _msg(str(e))
+        return
+    _msg(f"Signed in as {_user_label(ops._ctx.user)}")
+
+
+@_guard
+def sign_out():
+    from square_core.kitsu import auth
+    global _ops
+    auth.forget(_pipeline_host())
+    _ops = None
+    _rebuild_menu()
+    _msg("Signed out.")
 
 
 # ---------------------------------------------------------------------------

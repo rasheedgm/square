@@ -2,7 +2,8 @@
 
 Tool #3. Runs inside Nuke's own Python (14+, i.e. Python 3.9+). It imports
 `square_core` directly and authenticates through the shared
-`~/.square/session.json`, like every other Square tool.
+`~/.square/kitsu_session.json` (or the OS keyring, when available), like
+every other Square tool.
 
 ## Install
 
@@ -11,17 +12,26 @@ Tool #3. Runs inside Nuke's own Python (14+, i.e. Python 3.9+). It imports
 `config/studio_config.json` (`dcc.nuke_exe`, or `SQUARE_NUKE_EXE`), prepends
 `current/tools/dcc/nuke` (so Nuke runs its `menu.py`) and `current` (imports)
 to `NUKE_PATH`, points `SQUARE_DEPS` at the shared `envs/dcc-deps` (pure-Python
-`gazu`), and launches Nuke.
+`gazu` + `Qt.py`), and launches Nuke.
 
 **From a checkout:** put `tools/dcc/nuke` **and** the repo root on `NUKE_PATH`
 (Nuke runs the first `menu.py` on a path entry; the imports need the repo root
 on `sys.path`).
 
 The **Square** menu appears and the SquareRead / SquareWrite callbacks are
-installed. A user must have signed in once through any Square tool so the JWT
-is cached; Nuke doesn't prompt for a password.
+installed. A session cached by any other Square tool is picked up
+automatically (no prompt); otherwise use **Sign In…** right from this menu --
+it shows the same login dialog every desktop tool uses (via `Qt.py`, which
+just needs a Qt binding already importable in the host -- Nuke ships its own
+PySide2/PySide6).
 
 ## The Square menu
+
+The top-level **Square** label itself shows who's signed in once known
+(`Square — Jane Doe`) -- Nuke's classic menu API has no live-updating label,
+so this only refreshes right after **Sign In…** / **Sign Out**, or the first
+time any command successfully authenticates with an already-cached token
+(never at Nuke startup itself, which must not block on a Kitsu round trip).
 
 | Command | |
 |---|---|
@@ -31,6 +41,8 @@ is cached; Nuke doesn't prompt for a password.
 | **SquareRead** | a Read node with a Square tab |
 | **Render && Publish** | render the selected Write, then open the Publish panel |
 | **Publish Output…** | the Publish panel for the selected Write **or Read** |
+| **Sign In…** | the shared Kitsu login dialog |
+| **Sign Out** | forgets the cached session (this machine only) |
 
 ## Publish
 

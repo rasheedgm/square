@@ -7,3 +7,8 @@
 # but audit that nothing pulls a binary wheel.
 gazu==1.2.1
 requests>=2.28
+# Qt.py is a compatibility shim, not a Qt binding itself -- it just needs
+# ONE already importable in the host interpreter (Nuke ships its own
+# PySide2/PySide6), which is exactly what tools/widgets/login_dialog.py
+# (Sign In... from the Square menu) needs to run inside Nuke at all.
+Qt.py>=1.3.0

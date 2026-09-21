@@ -1,7 +1,10 @@
 """The Nuke integration's pipeline glue (`ops`), context, and the Square-tab
 gizmos (driven with a fake `nuke`). The panels need a real Nuke and aren't
-covered here."""
+covered here -- sign_in()'s dialog flow is the same category (a real Qt
+LoginDialog), so it's manual-test-only too; menu_title()/sign_out() are pure
+logic and covered below."""
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -325,6 +328,11 @@ class TestPanelImports(unittest.TestCase):
         src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
         self.assertIn("publish_dialog", src)
 
+    def test_menu_has_sign_in_and_sign_out(self):
+        src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
+        self.assertIn("sign_in", src)
+        self.assertIn("sign_out", src)
+
     def test_node_frames_expands_a_read_over_its_range(self):
         from tools.dcc.nuke import panel
         node = _Node("Read")
@@ -340,6 +348,67 @@ class TestPanelImports(unittest.TestCase):
         node = _Node("Read")
         node["file"].setValue("X:/sh/plate_v001.mov")
         self.assertEqual(panel._node_frames(_FakeNuke(), node), ["X:/sh/plate_v001.mov"])
+
+
+class TestAccountStatus(unittest.TestCase):
+    """menu_title() / sign_out() -- pure logic, no Qt or real Nuke needed.
+    sign_in() opens a real LoginDialog and isn't covered here, same as the
+    other panels."""
+
+    def setUp(self):
+        import tools.dcc.nuke.panel as panel_mod
+        self.panel = panel_mod
+        self._orig_ops = panel_mod._ops
+        panel_mod._ops = None
+        self.addCleanup(lambda: setattr(panel_mod, "_ops", self._orig_ops))
+
+        self._td = tempfile.TemporaryDirectory()
+        self._old_state_dir = os.environ.get("SQUARE_STATE_DIR")
+        os.environ["SQUARE_STATE_DIR"] = self._td.name
+        self.addCleanup(self._restore_state_dir)
+
+    def _restore_state_dir(self):
+        if self._old_state_dir is None:
+            os.environ.pop("SQUARE_STATE_DIR", None)
+        else:
+            os.environ["SQUARE_STATE_DIR"] = self._old_state_dir
+        self._td.cleanup()
+
+    def test_menu_title_plain_when_nothing_cached_and_ops_unset(self):
+        self.assertEqual(self.panel.menu_title(), "Square")
+
+    def test_menu_title_hints_signed_in_from_a_cached_token_alone(self):
+        """No live Kitsu call happens here -- menu_title() must never block
+        Nuke startup on the network -- so a merely-cached token (whose owner
+        we don't know without asking the server) gets a generic hint, not a
+        name."""
+        from square_core.kitsu import auth
+        auth.store_session(self.panel._pipeline_host(),
+                           {"access_token": "AT", "refresh_token": ""})
+        self.assertEqual(self.panel.menu_title(), "Square (signed in)")
+
+    def test_menu_title_shows_the_real_name_once_ops_is_resolved(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            self.panel._ops = ops
+            self.assertEqual(self.panel.menu_title(), "Square — artist@studio.com")
+
+    def test_sign_out_forgets_the_session_and_clears_ops(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            self.panel._ops = ops
+        from square_core.kitsu import auth
+        host = self.panel._pipeline_host()
+        auth.store_session(host, {"access_token": "AT", "refresh_token": "RT"})
+
+        self.panel.sign_out()
+
+        self.assertIsNone(self.panel._ops)
+        self.assertIsNone(auth.cached_session(host))
+        self.assertEqual(self.panel.menu_title(), "Square")
+
+    def test_rebuild_menu_is_a_safe_noop_outside_nuke(self):
+        self.panel._rebuild_menu()          # must not raise -- no real nuke here
 
 
 if __name__ == "__main__":

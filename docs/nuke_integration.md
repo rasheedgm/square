@@ -27,16 +27,21 @@ PySide2/PySide6).
 
 ## The Square menu
 
-A status item (`Not signed in` / `Signed in as Jane Doe`) shows who's signed
-in -- click it to see the same text again as a message. It refreshes right
-after **Sign In…** / **Sign Out**, or the first time any command
-successfully authenticates with an already-cached token (never at Nuke
-startup itself, which must not block on a Kitsu round trip). This is a
-`MenuItem.setLabel()` on the SAME item every time, never a rebuild of the
-menu itself: Nuke's `Menu.removeItem(name)` needs the exact current name to
-find what to remove, so an earlier version that renamed the top-level
-**Square** menu on every login change made that lookup miss and left a
-second "Square" menu behind instead of replacing the first.
+The menu's own top-level label shows who's signed in: **Square** when
+signed out, **Square — Jane Doe** once known. It refreshes right after
+**Sign In…** / **Sign Out**, or the first time any command successfully
+authenticates with an already-cached token (never at Nuke startup itself,
+which must not block on a Kitsu round trip). Nuke's classic menu API has no
+live-updating label, so this is a full remove-and-rebuild of the menu each
+time (`menu.build()`) -- but removal asks Nuke what's actually on the menu
+bar right now (`Menu.items()` / `.name()`), not a name this module tracked
+separately in a Python variable. An earlier version did the latter, that
+tracked value fell out of sync with the real current name after the very
+first rename, `Menu.removeItem(name)`'s exact-match lookup missed, and a
+second "Square" menu got left behind instead of replacing the first.
+
+Only one of **Sign In…** / **Sign Out** is ever present, never both --
+whichever matches the current state.
 
 | Command | |
 |---|---|
@@ -46,9 +51,8 @@ second "Square" menu behind instead of replacing the first.
 | **SquareRead** | a Read node with a Square tab |
 | **Render && Publish** | render the selected Write, then open the Publish panel |
 | **Publish Output…** | the Publish panel for the selected Write **or Read** |
-| *(status item)* | who's signed in -- click to see it as a message too |
-| **Sign In…** | the shared Kitsu login dialog |
-| **Sign Out** | forgets the cached session (this machine only) |
+| **Sign In…** | the shared Kitsu login dialog -- shown only when signed out |
+| **Sign Out** | forgets the cached session (this machine only) -- shown only when signed in |
 
 ## Publish
 
@@ -101,6 +105,20 @@ reviews (`Preview — CompRender v003`).
 Stock Read / Write nodes with a **Square** tab. Its knobs (project … task, media
 type, name, version) drive the node's `file`; a `knobChanged` callback keeps it
 in sync.
+
+Creating a node is lazy, one cascade level at a time: it costs one Kitsu call
+(the project list) unless the launch context (`SQUARE_PROJECT` / `_SEQUENCE`
+/ `_SHOT` / `_TASK`) names a project, in which case it walks project →
+sequence → shot → task → media type/version, but only as far as that context
+actually specifies -- a bare project stops after loading episode + sequence;
+picking a sequence by hand loads shots; picking a shot loads tasks; picking a
+task loads media types and versions. The usual case (launched from the
+workfile manager with a full target already known) still resolves the whole
+node in one pass. `NukeOps` also caches each project's shot list, each shot's
+task list, and each shot's output-file list for the life of the Nuke
+session -- the same shot/task data used to get re-fetched from Kitsu 5-7
+times over for a single node, which was the actual cause of "creating a Read
+or Write node is slow."
 
 - **SquareWrite** — media type lists only `renderable` types (`CompRender`,
   `Precomp`, …). Version **(new)** = the current workfile major, so the

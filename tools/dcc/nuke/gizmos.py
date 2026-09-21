@@ -5,6 +5,14 @@ knobs (project / episode / sequence / shot / task / media type / name /
 version) resolve the node's `file` from the pipeline. A `knobChanged` callback
 keeps `file` in sync and blocks rendering a locked output version.
 
+Lazy, one level at a time: picking a project loads only episode + sequence;
+picking a sequence loads only shots; picking a shot loads only tasks; picking
+a task loads media types + versions. Node creation seeds the cascade from the
+launch context (`SQUARE_PROJECT` / `_SEQUENCE` / `_SHOT` / `_TASK`) but only
+walks as far as that context actually specifies -- a bare project with
+nothing else set costs exactly one Kitsu call (the project list) to create
+the node, not the whole tree underneath it.
+
 `menu.py` calls `register_callbacks()` once so hand-built or loaded nodes keep
 working.
 """
@@ -17,6 +25,7 @@ from .ops import NEW_VERSION, OpsError
 MARK = "sq_kind"                    # hidden String knob: "read" | "write"
 _CASCADE = ["sq_project", "sq_episode", "sq_sequence", "sq_shot", "sq_task"]
 _ALL = _CASCADE + ["sq_media_type", "sq_name", "sq_version"]
+_HAS_NEXT_LEVEL = {"sq_project", "sq_episode", "sq_sequence", "sq_shot"}
 
 
 def _ops():
@@ -84,8 +93,11 @@ def on_knob_changed(nuke) -> None:
     knob = nuke.thisKnob()
     if knob is None or knob.name() not in _ALL:
         return
-    if knob.name() in _CASCADE:
-        _guard(node, _repopulate_downstream, nuke, node, knob.name())
+    name = knob.name()
+    if name in _HAS_NEXT_LEVEL:
+        _guard(node, _repopulate_next_level, nuke, node, name)
+    if name in ("sq_task", "sq_media_type"):
+        _guard(node, _repopulate_media, nuke, node)
     _guard(node, _apply_file, nuke, node)
 
 
@@ -115,31 +127,66 @@ def _kind(node) -> str:
 
 
 def _populate(nuke, node, t: Target) -> None:
+    """Fast: sets only the project list + selected value (one Kitsu call).
+    Nothing downstream loads unless the launch context actually names a
+    project -- and even then only as far down the cascade as that context
+    specifies; see _seed_cascade()."""
     ops = _ops()
     _set_values(node, "sq_project", ops.projects(), t.project)
-    _guard(node, _repopulate_downstream, nuke, node, "sq_project", t)
-    _guard(node, _apply_file, nuke, node)
+    if t.project:
+        _guard(node, _seed_cascade, nuke, node, t)
 
 
-def _repopulate_downstream(nuke, node, changed: str, seed: Target | None = None) -> None:
+def _seed_cascade(nuke, node, t: Target) -> None:
+    """Auto-continues the lazy, one-level-at-a-time cascade exactly as far as
+    `t` (the launch context) actually resolves -- a project alone stops
+    after loading episode + sequence; a full project/sequence/shot/task
+    context (the common case, launched from the workfile manager) resolves
+    the whole node in one pass, same end result as before, just without the
+    redundant re-fetches each step used to cost.
+
+    Checks `t`'s OWN fields to decide whether to continue, not the knobs'
+    values: a freshly-populated Enumeration_Knob defaults to showing its
+    first entry the moment `setValues()` runs, whether or not anything was
+    actually seeded -- reading the knob back would make "project alone"
+    look identical to "project, sequence, shot and task all seeded" and
+    always walk the whole tree regardless."""
+    _repopulate_next_level(nuke, node, "sq_project", t)
+    if not t.sequence:
+        return
+    _repopulate_next_level(nuke, node, "sq_sequence", t)
+    if not t.shot:
+        return
+    _repopulate_next_level(nuke, node, "sq_shot", t)
+    if not t.task_type:
+        return
+    _repopulate_media(nuke, node)
+    _apply_file(nuke, node)
+
+
+def _repopulate_next_level(nuke, node, changed: str, seed: Target | None = None) -> None:
+    """Loads ONLY the level(s) immediately below `changed` -- lazy, not the
+    whole downstream chain -- so picking a project doesn't also fetch every
+    shot and task underneath it before the user (or the seed target) has
+    even reached a sequence."""
     ops = _ops()
-    t = seed or _target(node)
     proj = node["sq_project"].value()
-    order = ["sq_project", "sq_episode", "sq_sequence", "sq_shot", "sq_task"]
-    below = order[order.index(changed) + 1:]
 
-    if "sq_episode" in below:
+    if changed == "sq_project":
         eps = ops.episodes(proj) if (proj and ops.is_episodic(proj)) else []
         node["sq_episode"].setEnabled(bool(eps))
         _set_values(node, "sq_episode", eps or [""], getattr(seed, "episode", "") if seed else "")
-    if "sq_sequence" in below:
         seqs = ops.sequences(proj, node["sq_episode"].value()) if proj else []
         _set_values(node, "sq_sequence", seqs or [""],
                     getattr(seed, "sequence", "") if seed else "")
-    if "sq_shot" in below:
+    elif changed == "sq_episode":
+        seqs = ops.sequences(proj, node["sq_episode"].value()) if proj else []
+        _set_values(node, "sq_sequence", seqs or [""],
+                    getattr(seed, "sequence", "") if seed else "")
+    elif changed == "sq_sequence":
         shots = ops.shots(proj, node["sq_sequence"].value()) if proj else []
         _set_values(node, "sq_shot", shots or [""], getattr(seed, "shot", "") if seed else "")
-    if "sq_task" in below:
+    elif changed == "sq_shot":
         tt = []
         if proj and node["sq_sequence"].value() and node["sq_shot"].value():
             tt = ops.task_types(proj, node["sq_sequence"].value(), node["sq_shot"].value())
@@ -147,8 +194,6 @@ def _repopulate_downstream(nuke, node, changed: str, seed: Target | None = None)
             (ops.default_task_for(proj, node["sq_sequence"].value(), node["sq_shot"].value())
              if tt else "")
         _set_values(node, "sq_task", tt or [""], want)
-
-    _repopulate_media(nuke, node)
 
 
 def _repopulate_media(nuke, node) -> None:

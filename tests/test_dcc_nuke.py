@@ -24,6 +24,20 @@ def _t():
     return Target("ABC", "", "SQ010", "SH0100", "Comp")
 
 
+def _count_calls(api, name: str) -> list:
+    """Wrap `api.<name>` to append to the returned list on every call --
+    counts real Kitsu round trips a fake can't otherwise report."""
+    calls = []
+    orig = getattr(api, name)
+
+    def wrapped(*a, **k):
+        calls.append((a, k))
+        return orig(*a, **k)
+
+    setattr(api, name, wrapped)
+    return calls
+
+
 class TestContext(unittest.TestCase):
     def test_env_round_trip_with_episode(self):
         env = {}
@@ -55,6 +69,56 @@ class TestOpsNavigation(unittest.TestCase):
                 ops.next_save(Target("ABC", "", "SQ010", "NOPE", "Comp"))
             with self.assertRaises(OpsError):
                 ops.next_save(Target("ABC", "", "SQ010", "SH0100", "Lighting"))
+
+
+class TestOpsCaching(unittest.TestCase):
+    """Regression coverage: NukeOps._resolve() (shots + tasks) used to hit
+    Kitsu fresh on every single call, and gizmos._populate() chains 5+ calls
+    that all need the same shot/task data for one node creation -- the
+    actual cause of "Read/Write node creation is slow". Each of these fetches
+    the project's full shot list, this shot's task list, or this shot's
+    output-file list from Kitsu exactly ONCE per NukeOps instance, however
+    many times it's asked for."""
+
+    def test_shots_fetched_once_across_many_calls(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            calls = _count_calls(api, "shots")
+            ops.shots("ABC", "SQ010")
+            ops.task_types("ABC", "SQ010", "SH0100")
+            ops.default_task_for("ABC", "SQ010", "SH0100")   # re-derives task_types itself
+            ops.output_types(_t())
+            ops.resolve_output_path(_t(), "CompRender", NEW_VERSION)
+            self.assertEqual(len(calls), 1)
+
+    def test_tasks_for_shot_fetched_once_across_many_calls(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            calls = _count_calls(api, "tasks_for_shot")
+            ops.task_types("ABC", "SQ010", "SH0100")
+            ops.default_task_for("ABC", "SQ010", "SH0100")
+            ops.next_save(_t())            # need_task=True -> resolves the task too
+            self.assertEqual(len(calls), 1)
+
+    def test_output_files_fetched_once_per_creation_then_invalidated_by_publish(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            calls = _count_calls(api, "output_files")
+            # the exact chain gizmos._populate() runs for one SquareWrite:
+            ops.output_versions(_t(), "CompRender")
+            ops.resolve_output_path(_t(), "CompRender", NEW_VERSION)
+            self.assertEqual(len(calls), 1)
+
+            r = Path(td) / "r"
+            r.mkdir()
+            (r / "c.1001.exr").write_bytes(b"x" * 10)
+            ops.publish_render(_t(), [str(r / "c.1001.exr")], proxy_dry_run=True)
+            # publish_render()'s own lock-check reused the cached list (still
+            # 1 fetch) -- but it must invalidate that cache once the publish
+            # actually lands, so the NEXT read is a real fetch again, not
+            # still serving the pre-publish snapshot
+            ops.output_versions(_t(), "CompRender")
+            self.assertEqual(len(calls), 2)
 
 
 class TestOpsWorkfiles(unittest.TestCase):
@@ -315,6 +379,76 @@ class TestGizmos(unittest.TestCase):
             self.assertIn("sq_preview", node.knobs())
 
 
+class TestGizmosLazyCreation(unittest.TestCase):
+    """Regression: node creation used to eagerly walk the WHOLE cascade
+    (shots, tasks, media types, versions -- 6+ Kitsu round trips minimum,
+    several of them repeat fetches of the exact same data) regardless of
+    how much of that was actually known from the launch context. It's lazy
+    now: creation walks only as far down project -> sequence -> shot ->
+    task as SQUARE_PROJECT / _SEQUENCE / _SHOT / _TASK actually specify."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        for k in ("SQUARE_PROJECT", "SQUARE_EPISODE", "SQUARE_SEQUENCE",
+                 "SQUARE_SHOT", "SQUARE_TASK"):
+            os.environ.pop(k, None)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
+
+    def _wire(self, td):
+        ops, api = _ops(td)
+        import tools.dcc.nuke.panel as panel_mod
+        panel_mod._ops = ops
+        self.addCleanup(lambda: setattr(panel_mod, "_ops", None))
+        return ops, api
+
+    def test_creation_with_nothing_seeded_only_fetches_the_project_list(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            shots_calls = _count_calls(api, "shots")
+            tasks_calls = _count_calls(api, "tasks_for_shot")
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertEqual(node["sq_project"].values(), ["ABC"])
+            self.assertEqual(shots_calls, [])
+            self.assertEqual(tasks_calls, [])
+            self.assertEqual(node["file"].value(), "")
+
+    def test_creation_with_only_project_seeded_stops_after_sequence(self):
+        os.environ["SQUARE_PROJECT"] = "ABC"
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            shots_calls = _count_calls(api, "shots")
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertEqual(node["sq_project"].value(), "ABC")
+            self.assertEqual(node["sq_sequence"].value(), "SQ010")   # loaded (next level)
+            self.assertEqual(shots_calls, [])                        # shots not fetched yet
+            self.assertEqual(node["sq_shot"].values(), [""])
+            self.assertEqual(node["file"].value(), "")               # nothing to resolve yet
+
+    def test_creation_with_full_context_still_resolves_the_whole_node(self):
+        os.environ.update(SQUARE_PROJECT="ABC", SQUARE_SEQUENCE="SQ010",
+                          SQUARE_SHOT="SH0100", SQUARE_TASK="Comp")
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertEqual(node["sq_shot"].value(), "SH0100")
+            self.assertEqual(node["sq_media_type"].value(), "CompRender")
+            self.assertIn(".####.exr", node["file"].value())
+
+    def test_project_only_node_loads_shots_lazily_once_sequence_is_picked(self):
+        os.environ["SQUARE_PROJECT"] = "ABC"
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            nk = _FakeNuke()
+            node = gizmos.create_square_write(nk)
+            self.assertEqual(node["sq_shot"].values(), [""])
+
+            node["sq_sequence"].setValue("SQ010")
+            nk._this_node, nk._this_knob = node, node["sq_sequence"]
+            gizmos.on_knob_changed(nk)
+            self.assertEqual(set(node["sq_shot"].values()), {"SH0100", "SH0110"})
+            self.assertEqual(node["sq_task"].values(), [""])   # still not loaded
+
+
 class TestPanelImports(unittest.TestCase):
     def test_panel_and_gizmos_import_without_nuke(self):
         import tools.dcc.nuke.gizmos as g
@@ -350,10 +484,10 @@ class TestPanelImports(unittest.TestCase):
         self.assertEqual(panel._node_frames(_FakeNuke(), node), ["X:/sh/plate_v001.mov"])
 
 
-class TestAccountStatus(unittest.TestCase):
-    """status_label() / sign_out() -- pure logic, no Qt or real Nuke needed.
-    sign_in() opens a real LoginDialog and isn't covered here, same as the
-    other panels."""
+class TestAccountState(unittest.TestCase):
+    """menu_title() / is_signed_in() / sign_out() -- pure logic, no Qt or
+    real Nuke needed. sign_in() opens a real LoginDialog and isn't covered
+    here, same as the other panels."""
 
     def setUp(self):
         import tools.dcc.nuke.panel as panel_mod
@@ -374,24 +508,27 @@ class TestAccountStatus(unittest.TestCase):
             os.environ["SQUARE_STATE_DIR"] = self._old_state_dir
         self._td.cleanup()
 
-    def test_status_label_plain_when_nothing_cached_and_ops_unset(self):
-        self.assertEqual(self.panel.status_label(), "Not signed in")
+    def test_menu_title_plain_when_nothing_cached_and_ops_unset(self):
+        self.assertEqual(self.panel.menu_title(), "Square")
+        self.assertFalse(self.panel.is_signed_in())
 
-    def test_status_label_hints_signed_in_from_a_cached_token_alone(self):
-        """No live Kitsu call happens here -- status_label() must never
-        block Nuke startup on the network -- so a merely-cached token (whose
-        owner we don't know without asking the server) gets a generic hint,
-        not a name."""
+    def test_menu_title_hints_signed_in_from_a_cached_token_alone(self):
+        """No live Kitsu call happens here -- menu_title() must never block
+        Nuke startup on the network -- so a merely-cached token (whose owner
+        we don't know without asking the server) gets a generic hint, not a
+        name."""
         from square_core.kitsu import auth
         auth.store_session(self.panel._pipeline_host(),
                            {"access_token": "AT", "refresh_token": ""})
-        self.assertEqual(self.panel.status_label(), "Signed in (cached)")
+        self.assertEqual(self.panel.menu_title(), "Square — signed in")
+        self.assertTrue(self.panel.is_signed_in())
 
-    def test_status_label_shows_the_real_name_once_ops_is_resolved(self):
+    def test_menu_title_shows_the_real_name_once_ops_is_resolved(self):
         with tempfile.TemporaryDirectory() as td:
             ops, _ = _ops(td)
             self.panel._ops = ops
-            self.assertEqual(self.panel.status_label(), "Signed in as artist@studio.com")
+            self.assertEqual(self.panel.menu_title(), "Square — artist@studio.com")
+            self.assertTrue(self.panel.is_signed_in())
 
     def test_sign_out_forgets_the_session_and_clears_ops(self):
         with tempfile.TemporaryDirectory() as td:
@@ -405,25 +542,58 @@ class TestAccountStatus(unittest.TestCase):
 
         self.assertIsNone(self.panel._ops)
         self.assertIsNone(auth.cached_session(host))
-        self.assertEqual(self.panel.status_label(), "Not signed in")
+        self.assertEqual(self.panel.menu_title(), "Square")
+        self.assertFalse(self.panel.is_signed_in())
 
-    def test_refresh_status_is_a_safe_noop_outside_nuke(self):
-        self.panel._refresh_status()          # must not raise -- no real nuke here
+    def test_rebuild_menu_is_a_safe_noop_outside_nuke(self):
+        self.panel._rebuild_menu()          # must not raise -- no real nuke here
 
 
-class TestMenuNeverRenamesItself(unittest.TestCase):
-    """Regression: the top-level Square menu's own name must never change --
-    an earlier version renamed it to show the signed-in user, which broke
-    Menu.removeItem(name)'s exact-match lookup on the next login change and
-    left a duplicate "Square" menu behind instead of replacing the first."""
+class TestMenuSource(unittest.TestCase):
+    """menu.py needs real Nuke just to import (it does `import nuke` and
+    calls build() unconditionally at module load, exactly so Nuke auto-runs
+    it on startup) -- like the panels, it's checked by reading the source,
+    not importing it. menu_title() / is_signed_in() -- the actual decision
+    logic build() calls into -- are plain functions in panel.py and get
+    real unit coverage in TestAccountState above.
 
-    def test_menu_source_never_calls_addMenu_with_a_computed_title(self):
-        src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
-        self.assertIn('addMenu("Square")', src)
+    Regression: an earlier fix avoided renaming the top-level menu at all,
+    because Menu.removeItem(name) needs an exact match against a
+    SEPARATELY TRACKED Python string that fell out of sync with the real
+    current name after the very first rename, leaving a duplicate "Square"
+    menu behind instead of replacing it. The rename is back (that's the
+    actually-wanted look), but removal now has to ask Nuke itself what's
+    currently there (top.items()) instead of trusting tracked state to
+    stay in sync -- these checks are what stand in for that regression
+    test without a real Nuke to drive it against."""
 
-    def test_menu_source_uses_setLabel_for_the_status_item(self):
-        src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
-        self.assertIn("setLabel", src)
+    def setUp(self):
+        self.src = Path("tools/dcc/nuke/menu.py").read_text(encoding="utf-8")
+
+    def test_removes_by_asking_nuke_whats_there_not_a_tracked_name(self):
+        self.assertIn(".items()", self.src)
+        self.assertIn(".name()", self.src)
+
+    def test_title_is_computed_from_panel_not_hardcoded(self):
+        self.assertIn("panel.menu_title()", self.src)
+        self.assertNotIn('addMenu("Square")', self.src)
+
+    def test_sign_in_and_sign_out_are_mutually_exclusive(self):
+        self.assertIn("panel.is_signed_in()", self.src)
+        # both command strings still appear (one on each branch) -- but
+        # only ONE add call actually runs for a given state, unlike the
+        # old always-show-both version
+        self.assertIn('if panel.is_signed_in():', self.src)
+        self.assertIn("sign_out", self.src)
+        self.assertIn("sign_in", self.src)
+
+    def test_gizmo_callbacks_registered_exactly_once_outside_build(self):
+        # register_callbacks() must NOT be called from inside build() --
+        # a rebuild (Sign In / Sign Out) would double-fire every
+        # knobChanged callback otherwise (the doubled-xStudio-plugin bug)
+        build_body = self.src.split("def build()", 1)[1].split("\nbuild()", 1)[0]
+        self.assertNotIn("register_callbacks", build_body)
+        self.assertIn("register_callbacks", self.src)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from square_core.config.pipeline import PipelineConfig
 from square_core.context import PipelineContext
-from square_core.model import Project, Shot, Task
+from square_core.model import Project, Sequence, Shot, Task
 from square_core.services import projects
 from square_core.services.projects import ProjectSpec
 
@@ -50,6 +50,16 @@ class _NavKitsu(RecordingKitsu):
 
     def shots(self, project):
         return list(self._shots)
+
+    def sequences(self, project):
+        """A dedicated endpoint, like the real KitsuApi.sequences() -- so
+        ops.sequences()'s "derive from the shot list" fallback (for a
+        backend that genuinely has no such endpoint) is NOT what gets
+        exercised by tests using this fake. Real Kitsu has this endpoint;
+        a fake without it would make every "just loaded a sequence" test
+        look like it also had to fetch every shot in the project first."""
+        codes = sorted({s.sequence_code for s in self._shots if s.sequence_code})
+        return [Sequence(id=f"seq-{c}", code=c) for c in codes]
 
     def tasks_for_shot(self, shot):
         return list(self._tasks.get(getattr(shot, "id", shot), []))

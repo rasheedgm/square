@@ -38,6 +38,20 @@ class NukeOps:
     def __init__(self, ctx=None):
         self._ctx = ctx or PipelineContext.connect()      # raises NeedsLogin
         self._proj_cache: dict = {}
+        # per-instance, session-lifetime caches -- _resolve() (shots + tasks)
+        # is called from nearly every method below, and gizmos._populate()
+        # calls a whole chain of them back to back for one node creation;
+        # without these, the SAME shot list / task list / output list for
+        # one shot got re-fetched from Kitsu 5-7 times over for a single
+        # SquareRead/SquareWrite. _outputs_cache is invalidated per
+        # (shot, media_type) by publish_render() -- it's the one cache here
+        # that a Nuke action in THIS session actually changes; shots/tasks
+        # don't, so they're never invalidated (same tradeoff _proj_cache
+        # already makes: a project-setup edit mid-session needs a fresh
+        # NukeOps, i.e. a new Nuke session, to be seen).
+        self._shots_cache: dict = {}                        # project -> [shot, ...]
+        self._tasks_cache: dict = {}                         # shot.id -> [task, ...]
+        self._outputs_cache: dict = {}                # (shot.id, media_type) -> [output, ...]
 
     # ---- navigation (the panel / gizmo pickers) -------------------
 
@@ -68,7 +82,7 @@ class NukeOps:
 
     def task_types(self, project: str, sequence: str, shot: str, episode: str = "") -> list[str]:
         r = self._resolve(Target(project, episode, sequence, shot, ""), need_task=False)
-        return sorted({t.task_type_name for t in r.pctx.kitsu.tasks_for_shot(r.shot)})
+        return sorted({t.task_type_name for t in self._tasks(r.pctx, r.shot)})
 
     def default_task_for(self, project: str, sequence: str, shot: str) -> str:
         tt = self.task_types(project, sequence, shot)
@@ -82,14 +96,28 @@ class NukeOps:
         return self._proj_cache[project]
 
     def _shots(self, project: str) -> list:
-        pctx = self._pctx(project)
-        return pctx.kitsu.shots(pctx.project)
+        if project not in self._shots_cache:
+            pctx = self._pctx(project)
+            self._shots_cache[project] = pctx.kitsu.shots(pctx.project)
+        return self._shots_cache[project]
+
+    def _tasks(self, pctx, shot) -> list:
+        key = getattr(shot, "id", None) or id(shot)
+        if key not in self._tasks_cache:
+            self._tasks_cache[key] = pctx.kitsu.tasks_for_shot(shot)
+        return self._tasks_cache[key]
+
+    def _outputs(self, pctx, shot, media_type: str) -> list:
+        key = (getattr(shot, "id", None) or id(shot), media_type)
+        if key not in self._outputs_cache:
+            self._outputs_cache[key] = work.outputs(pctx, shot, media_type)
+        return self._outputs_cache[key]
 
     def _resolve(self, t: Target, *, need_task: bool = True) -> Resolved:
         if not (t.project and t.sequence and t.shot):
             raise OpsError("Pick a project, sequence and shot first.")
         pctx = self._pctx(t.project)
-        shot = next((s for s in pctx.kitsu.shots(pctx.project)
+        shot = next((s for s in self._shots(t.project)
                      if s.code == t.shot and (s.sequence_code or "") == t.sequence), None)
         if shot is None:
             raise OpsError(f"{t.sequence}/{t.shot} isn't in {t.project} yet — "
@@ -100,7 +128,7 @@ class NukeOps:
         if need_task:
             if not t.task_type:
                 raise OpsError("Pick a task.")
-            task = next((tk for tk in pctx.kitsu.tasks_for_shot(shot)
+            task = next((tk for tk in self._tasks(pctx, shot)
                          if tk.task_type_name == t.task_type), None)
             if task is None:
                 raise OpsError(f"No {t.task_type} task on {t.shot} — add it in the "
@@ -152,7 +180,7 @@ class NukeOps:
 
     def output_versions(self, t: Target, media_type: str) -> list:
         r = self._resolve(t, need_task=False)
-        return work.outputs(r.pctx, r.shot, media_type)
+        return self._outputs(r.pctx, r.shot, media_type)
 
     def workfile_major(self, t: Target, *, name: str = "main") -> int:
         r = self._resolve(t)
@@ -168,7 +196,7 @@ class NukeOps:
         Returns the #### path, the version, and whether it is locked.
         """
         r = self._resolve(t)
-        existing = {o.revision: o for o in work.outputs(r.pctx, r.shot, media_type)}
+        existing = {o.revision: o for o in self._outputs(r.pctx, r.shot, media_type)}
         if version in (None, NEW_VERSION, ""):
             rev = (work.current_workfile_major(r.pctx, r.task, name=name)
                    or media.next_version(r.pctx, r.shot, media_type, r.task))
@@ -192,21 +220,28 @@ class NukeOps:
         rev = version or major or media.next_version(r.pctx, r.shot, media_type, r.task)
         wf = next((w for w in r.pctx.kitsu.working_files(r.task)
                    if (w.name or "main") == name and w.revision == major), None)
-        for o in work.outputs(r.pctx, r.shot, media_type):
+        for o in self._outputs(r.pctx, r.shot, media_type):
             if o.revision == rev and work.output_locked(o):
                 raise OpsError(f"{media_type} v{rev:03d} is locked (reviewed / delivered) "
                                "— save a new workfile major and re-render.")
-        return work.publish_output(r.pctx, r.shot, r.task, media_type=media_type, name=name,
-                                   frames=[str(f) for f in frames], version=rev,
-                                   comment=comment, source_workfile=wf,
-                                   make_review_proxy=make_preview,
-                                   proxy_dry_run=proxy_dry_run)
+        result = work.publish_output(r.pctx, r.shot, r.task, media_type=media_type, name=name,
+                                     frames=[str(f) for f in frames], version=rev,
+                                     comment=comment, source_workfile=wf,
+                                     make_review_proxy=make_preview,
+                                     proxy_dry_run=proxy_dry_run)
+        # this just created (or re-rendered) an output version -- the cached
+        # list for this (shot, media_type) is now stale (wrong max version,
+        # possibly a lock that just got set); drop it so the next resolve
+        # sees the real state instead of the pre-publish snapshot.
+        key = (getattr(r.shot, "id", None) or id(r.shot), media_type)
+        self._outputs_cache.pop(key, None)
+        return result
 
     # ---- plates (SquareRead) --------------------------------
 
     def resolve_read_path(self, t: Target, media_type: str, version) -> dict:
         r = self._resolve(t, need_task=False)
-        outs = {o.revision: o for o in work.outputs(r.pctx, r.shot, media_type)}
+        outs = {o.revision: o for o in self._outputs(r.pctx, r.shot, media_type)}
         if not outs:
             raise OpsError(f"no {media_type} published on {t.shot}")
         rev = max(outs) if version in (None, "", "latest") else int(version)

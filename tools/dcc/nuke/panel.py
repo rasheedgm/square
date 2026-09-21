@@ -32,10 +32,10 @@ def get_ops() -> NukeOps:
             raise OpsError(
                 "Not signed in to Kitsu — Square -> Sign In…, or run any other Square tool.")
     if was_unset:
-        # the cached token turned out to still be valid -- the status item
-        # (built before we knew that) still says "Not signed in"; catch it
-        # up now that we actually have a name to show.
-        _refresh_status()
+        # the cached token turned out to still be valid -- the menu title
+        # (built before we knew that) still just says "Square"; catch it up
+        # now that we actually have a name to show.
+        _rebuild_menu()
     return _ops
 
 
@@ -55,22 +55,31 @@ def _user_label(user) -> str:
     return user.name or user.email or user.id
 
 
-def status_label() -> str:
-    """The Square menu's status item label -- never makes a live Kitsu call
-    (Nuke startup must not block on the network): if `ops` is already
-    resolved in this session, the real signed-in name; otherwise a cheap
+def menu_title() -> str:
+    """The Square menu's own top-level label -- never makes a live Kitsu
+    call (Nuke startup must not block on the network): if `ops` is already
+    resolved in this session, "Square — <real name>"; otherwise a cheap
     LOCAL check of whether some cached token exists at all, with no way to
-    know whose it is without asking the server."""
+    know whose it is without asking the server; otherwise plain "Square"."""
     if _ops is not None:
-        return f"Signed in as {_user_label(_ops._ctx.user)}"
+        return f"Square — {_user_label(_ops._ctx.user)}"
     from square_core.kitsu import auth
-    return "Signed in (cached)" if auth.cached_session(_pipeline_host()) else "Not signed in"
+    return "Square — signed in" if auth.cached_session(_pipeline_host()) else "Square"
 
 
-def _refresh_status() -> None:
+def is_signed_in() -> bool:
+    """Same no-live-call rule as menu_title() -- drives whether the Square
+    menu offers Sign In… or Sign Out (never both at once)."""
+    if _ops is not None:
+        return True
+    from square_core.kitsu import auth
+    return bool(auth.cached_session(_pipeline_host()))
+
+
+def _rebuild_menu() -> None:
     try:
         from tools.dcc.nuke import menu
-        menu.refresh_status()
+        menu.build()
     except Exception:
         pass          # outside Nuke (e.g. unit tests), or menu.py hasn't run yet
 
@@ -87,11 +96,6 @@ def _guard(fn):
 
 
 @_guard
-def show_status():
-    _msg(status_label())
-
-
-@_guard
 def sign_in():
     from tools.qt_compat import exec_dialog
     from tools.widgets.login_dialog import LoginDialog
@@ -100,7 +104,7 @@ def sign_in():
         return
     _ops = None                       # drop any stale session, force a fresh one
     try:
-        ops = get_ops()               # reconnect now (also refreshes the status item)
+        ops = get_ops()               # reconnect now (also rebuilds the menu)
     except OpsError as e:
         _msg(str(e))
         return
@@ -113,7 +117,7 @@ def sign_out():
     global _ops
     auth.forget(_pipeline_host())
     _ops = None
-    _refresh_status()
+    _rebuild_menu()
     _msg("Signed out.")
 
 

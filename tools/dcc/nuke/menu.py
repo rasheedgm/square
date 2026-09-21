@@ -8,24 +8,41 @@ import nuke
 from tools.dcc.nuke import gizmos
 
 _P = "from tools.dcc.nuke import panel; panel.{}()"
-_status_item = None
+
+
+def _remove_existing(top) -> None:
+    """Find and remove whatever Square menu is ACTUALLY there right now --
+    not a name this module separately tracked in a Python variable. An
+    earlier version trusted its own bookkeeping (`_current_title`) to stay
+    exactly in sync with Menu.removeItem()'s required exact-match name; it
+    didn't, removeItem() started missing on the very next rename, and a
+    second "Square..." menu got added alongside the first instead of
+    replacing it. Asking Nuke itself what's on the menu bar sidesteps
+    whatever the exact cause of that mismatch was."""
+    for item in top.items():
+        try:
+            name = item.name()
+        except Exception:
+            continue
+        if name == "Square" or name.startswith("Square "):
+            top.removeItem(name)
 
 
 def build() -> None:
-    """Builds the Square menu ONCE, at Nuke start (below) -- the menu's own
-    title never changes again. An earlier version renamed the top-level
-    "Square" menu itself to show who's signed in, removing and re-adding it
-    on every Sign In / Sign Out via `Menu.removeItem(name)`. That lookup
-    needs the EXACT current label, and since the label was exactly what
-    kept changing, removeItem() started missing -- leaving the old menu in
-    place and adding a second "Square" alongside it every time. The login
-    status now lives on one ordinary menu ITEM instead (see refresh_status()
-    below), mutated in place via MenuItem.setLabel() -- no add/remove of
-    anything, so there is nothing left to leave behind or duplicate."""
-    global _status_item
+    """Rebuilds the WHOLE top-level Square menu: once at Nuke start (below),
+    and again from panel.sign_in() / sign_out() (or the first command that
+    authenticates from an already-cached token) so its title reflects who's
+    signed in -- Nuke's classic menu API has no live-updating label.
+    Gizmo knobChanged callbacks are registered exactly once, at the bottom
+    of this module, never in here -- a rebuild calling that again would
+    double-fire every one of them (the same class of bug a doubled plugin
+    load once caused for xStudio)."""
     from tools.dcc.nuke import panel
 
-    menu = nuke.menu("Nuke").addMenu("Square")
+    top = nuke.menu("Nuke")
+    _remove_existing(top)
+
+    menu = top.addMenu(panel.menu_title())
     menu.addCommand("Save Version…", _P.format("save_version"), "ctrl+alt+s")
     menu.addCommand("Open Version…", _P.format("open_version"), "ctrl+alt+o")
     menu.addSeparator()
@@ -35,21 +52,10 @@ def build() -> None:
     menu.addCommand("Render && Publish", _P.format("render_and_publish_selected"))
     menu.addCommand("Publish Output…", _P.format("publish_dialog"))
     menu.addSeparator()
-    _status_item = menu.addCommand(panel.status_label(), _P.format("show_status"))
-    menu.addCommand("Sign In…", _P.format("sign_in"))
-    menu.addCommand("Sign Out", _P.format("sign_out"))
-
-
-def refresh_status() -> None:
-    """Update the status item's label in place -- called once by build()
-    (above) and again whenever panel.sign_in() / sign_out() changes the
-    login state, or the first command that authenticates from an
-    already-cached token. Safe to call before build() has run (e.g. from a
-    test): just a no-op."""
-    if _status_item is None:
-        return
-    from tools.dcc.nuke import panel
-    _status_item.setLabel(panel.status_label())
+    if panel.is_signed_in():
+        menu.addCommand("Sign Out", _P.format("sign_out"))
+    else:
+        menu.addCommand("Sign In…", _P.format("sign_in"))
 
 
 build()

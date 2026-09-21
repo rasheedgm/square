@@ -297,6 +297,10 @@ def _register_builtins() -> None:
              description="named NAS roots; a project picks one by name")
     register("kitsu_project_templates", "list", item_kind="str", scope="studio",
              default=[], description="Kitsu project templates offered at project create")
+    register("dcc.xstudio_exe", "path", scope="studio", default="",
+             description="xStudio executable -- the square_xstudio launcher runs this")
+    register("dcc.nuke_exe", "path", scope="studio", default="",
+             description="Nuke executable -- the square_nuke launcher runs this")
     register("project_defaults", "dict", scope="studio", default={}, hidden=True,
              description="a ProjectConfig template copied into each new project -- "
                          "redundant as its own row: every sub-key it holds is "

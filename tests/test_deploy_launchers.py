@@ -53,5 +53,28 @@ class TestLauncherBat(unittest.TestCase):
             self.assertIn(r"%PIPELINE_ROOT%\current\tools\pipeline_deploy\rollback_cli.py",
                           invoke_lines[0])
 
+    def test_dcc_launchers_written_when_the_integration_ships(self):
+        with tempfile.TemporaryDirectory() as td:
+            release = Path(td) / "release"
+            (release / "tools" / "dcc" / "xstudio").mkdir(parents=True)
+            (release / "tools" / "dcc" / "nuke").mkdir(parents=True)
+            launchers = Path(td) / "launchers"
+            write_launchers(launchers, release)
+            for dcc in ("xstudio", "nuke"):
+                bat = (launchers / f"square_{dcc}.bat").read_text(encoding="utf-8")
+                self.assertIn(r"tools\pipeline_deploy\dcc_launch.py", bat)
+                self.assertIn(f'dcc_launch.py" {dcc} ', bat)
+                self.assertIn("if errorlevel 1", bat)
+
+    def test_no_dcc_launcher_without_the_integration(self):
+        with tempfile.TemporaryDirectory() as td:
+            release = Path(td) / "release"
+            (release / "tools" / "config_editor").mkdir(parents=True)
+            (release / "tools" / "config_editor" / "main.py").write_text("", encoding="utf-8")
+            launchers = Path(td) / "launchers"
+            write_launchers(launchers, release)
+            self.assertFalse((launchers / "square_xstudio.bat").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

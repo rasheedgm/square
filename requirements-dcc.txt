@@ -1,0 +1,9 @@
+# Pure-Python deps injected onto the sys.path of embedded DCC interpreters
+# (xStudio's CPython 3.11, Nuke's Python) -- NEVER the studio `env/` venv,
+# whose compiled extensions (numpy, Qt, ...) clash with the host's own.
+#
+# Keep this list PURE PYTHON. The deploy step installs it with
+#   pip install --target <pipeline>/envs/dcc-deps --no-deps? -- no, with deps,
+# but audit that nothing pulls a binary wheel.
+gazu==1.2.1
+requests>=2.28

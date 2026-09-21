@@ -4,6 +4,10 @@
         "default": "X:/projects"
     },
     "kitsu_project_templates": [],
+    "dcc": {
+        "xstudio_exe": "",
+        "nuke_exe": ""
+    },
     "project_defaults": {
         "schema_version": 1,
         "fps": 24.0,

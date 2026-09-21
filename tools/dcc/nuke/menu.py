@@ -1,5 +1,6 @@
 """Adds the **Square** menu to Nuke and installs the gizmo callbacks. Nuke runs
-this automatically when this repo's root is on `NUKE_PATH`.
+this automatically when THIS FILE'S OWN DIRECTORY (`tools/dcc/nuke`, not just
+the repo root) is on `NUKE_PATH` -- see `docs/nuke_integration.md`.
 """
 
 import nuke

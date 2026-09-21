@@ -6,12 +6,20 @@ Tool #3. Runs inside Nuke's own Python (14+, i.e. Python 3.9+). It imports
 
 ## Install
 
-Put the repo root on Nuke's path so `menu.py` runs on start (`NUKE_PATH`, or
-`sys.path.insert(0, ...)` in a studio `~/.nuke/init.py`). The **Square** menu
-appears and the SquareRead / SquareWrite callbacks are installed.
+**Deployed studio:** `tools.pipeline_deploy.deploy` writes
+`launchers/square_nuke.bat` → `dcc_launch.py`, which reads the Nuke exe from
+`config/studio_config.json` (`dcc.nuke_exe`, or `SQUARE_NUKE_EXE`), prepends
+`current/tools/dcc/nuke` (so Nuke runs its `menu.py`) and `current` (imports)
+to `NUKE_PATH`, points `SQUARE_DEPS` at the shared `envs/dcc-deps` (pure-Python
+`gazu`), and launches Nuke.
 
-A user must have signed in once through any Square tool so the JWT is cached;
-Nuke doesn't prompt for a password.
+**From a checkout:** put `tools/dcc/nuke` **and** the repo root on `NUKE_PATH`
+(Nuke runs the first `menu.py` on a path entry; the imports need the repo root
+on `sys.path`).
+
+The **Square** menu appears and the SquareRead / SquareWrite callbacks are
+installed. A user must have signed in once through any Square tool so the JWT
+is cached; Nuke doesn't prompt for a password.
 
 ## The Square menu
 

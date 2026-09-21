@@ -35,6 +35,7 @@ def default_template() -> dict:
         "kitsu_host": "http://kitsu-host/api",
         "nas_roots": {"default": "X:/projects"},
         "kitsu_project_templates": [],
+        "dcc": {"xstudio_exe": "", "nuke_exe": ""},
         "project_defaults": json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)),
     }
 
@@ -44,8 +45,12 @@ class PipelineConfig:
     kitsu_host: str = _DEFAULT_HOST
     nas_roots: dict = field(default_factory=lambda: {"default": _DEFAULT_NAS})
     kitsu_project_templates: list = field(default_factory=list)
+    dcc: dict = field(default_factory=dict)          # {"xstudio_exe": ..., "nuke_exe": ...}
     project_defaults: dict = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)))
     source_path: str = ""
+
+    def dcc_exe(self, name: str) -> str:
+        return str((self.dcc or {}).get(f"{name}_exe", "") or "")
 
     # ------------------------------------------------------------------
 
@@ -90,6 +95,9 @@ class PipelineConfig:
             elif data.get("nas_root"):
                 cfg.nas_roots = {"default": data["nas_root"]}
             cfg.kitsu_project_templates = list(data.get("kitsu_project_templates") or [])
+            dcc = data.get("dcc")
+            if isinstance(dcc, dict):
+                cfg.dcc = dcc
             pd = data.get("project_defaults")
             if isinstance(pd, dict) and pd:
                 # deep merge -- a studio that overrides only colorspace.working
@@ -104,6 +112,7 @@ class PipelineConfig:
             "kitsu_host": self.kitsu_host,
             "nas_roots": dict(self.nas_roots),
             "kitsu_project_templates": list(self.kitsu_project_templates),
+            "dcc": dict(self.dcc or {}),
             "project_defaults": self.project_defaults,
         }
 

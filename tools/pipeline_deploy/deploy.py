@@ -111,6 +111,23 @@ if errorlevel 1 (
 )
 """
 
+_DCC_LAUNCHER = """@echo off
+title Square VFX - {title} v{ver}
+set PIPELINE_ROOT=%~dp0..
+set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\python.exe
+if not exist "%PYTHON_EXE%" set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\Scripts\\python.exe
+if not exist "%PYTHON_EXE%" set PYTHON_EXE=python.exe
+rem dcc_launch.py is stdlib-only -- runs by path, reads config/studio_config.json
+rem for the exe, wires SQUARE_ROOT / SQUARE_DEPS / plugin paths, then execs {dcc}
+"%PYTHON_EXE%" "%PIPELINE_ROOT%\\current\\tools\\pipeline_deploy\\dcc_launch.py" {dcc} "%PIPELINE_ROOT%" %*
+if errorlevel 1 (
+    echo.
+    echo [Square] could not launch {title} -- check config\\studio_config.json (dcc.{dcc}_exe)
+    echo.
+    pause
+)
+"""
+
 _ROLLBACK_LAUNCHER = """@echo off
 title Square VFX - Pipeline Version Switcher
 set PIPELINE_ROOT=%~dp0..
@@ -139,8 +156,36 @@ def write_launchers(launchers_dir: Path, release_dir: Path):
                 entry=r"%PIPELINE_ROOT%\current\tools\{}\main.py".format(name),
             ), encoding="utf-8")
             found.append(bat.name)
+
+    # DCC launchers -- go through dcc_launch.py (reads the exe from studio config)
+    for dcc, sub in (("xstudio", "dcc/xstudio"), ("nuke", "dcc/nuke")):
+        if (tools_dir / sub).exists():
+            bat = launchers_dir / f"square_{dcc}.bat"
+            bat.write_text(_DCC_LAUNCHER.format(
+                title=dcc.title(), ver=__version__, dcc=dcc), encoding="utf-8")
+            found.append(bat.name)
+
     (launchers_dir / "square_rollback.bat").write_text(_ROLLBACK_LAUNCHER, encoding="utf-8")
     print(f"[deploy] launchers: {found + ['square_rollback.bat']}")
+
+
+def build_dcc_deps(envs_dir: Path, rebuild: bool) -> None:
+    """A pure-Python dep set injected onto embedded DCC interpreters' sys.path
+    (xStudio's 3.11, Nuke's Python) -- never the compiled `win_x64_python311`
+    venv, whose extensions clash with the host's own."""
+    target = envs_dir / "dcc-deps"
+    req = repo_root / "requirements-dcc.txt"
+    if not req.exists():
+        return
+    if target.exists() and not rebuild:
+        return
+    print(f"[deploy] building dcc-deps -> {target}")
+    shutil.rmtree(target, ignore_errors=True)
+    try:
+        subprocess.run([sys.executable, "-m", "pip", "install",
+                        "--target", str(target), "-r", str(req)], check=True)
+    except Exception as e:
+        print(f"[WARN] dcc-deps build failed: {e}")
 
 
 # --------------------------------------------------------------------------
@@ -240,6 +285,8 @@ def deploy(nas_root_path, target_tool=None, deploy_env=False, update_config=Fals
                 subprocess.run([str(pip), "install", "-r", str(req)], check=True)
         except Exception as e:
             print(f"[WARN] venv build failed: {e}")
+
+    build_dcc_deps(envs_dir, rebuild=deploy_env)
 
     # code
     if target_tool:

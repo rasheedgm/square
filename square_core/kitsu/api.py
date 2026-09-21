@@ -100,6 +100,16 @@ class KitsuApi:
         self._b.set_minimal_file_tree(raw)
         return _map.project(self._b.get_project(raw["id"]) or raw)
 
+    def ensure_file_tree(self, project) -> bool:
+        """Best-effort repair for a project that never went through
+        `create_project()` (made directly in Kitsu's web UI, migrated from
+        another studio, ...) and so has no file_tree -- `record_output_file` /
+        `record_working_file` reject outright without one, even though we
+        overwrite Kitsu's computed path immediately after. A no-op (returns
+        False) if the project already has a tree of its own; returns whether
+        it actually set one."""
+        return self._b.ensure_minimal_file_tree(_id(project))
+
     def project_templates(self) -> list:
         return [t.get("name", "") for t in self._b.all_project_templates()]
 

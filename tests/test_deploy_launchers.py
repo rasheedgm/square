@@ -53,6 +53,5 @@ class TestLauncherBat(unittest.TestCase):
             self.assertIn(r"%PIPELINE_ROOT%\current\tools\pipeline_deploy\rollback_cli.py",
                           invoke_lines[0])
 
-
 if __name__ == "__main__":
     unittest.main()

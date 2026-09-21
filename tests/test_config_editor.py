@@ -309,5 +309,65 @@ class TestAuth(unittest.TestCase):
                 s.save_studio()
 
 
+class _FakeKitsuForFileTree:
+    """Just enough of KitsuApi for ConfigStore._ensure_kitsu_file_tree():
+    .project(code) -> something with .id, .ensure_file_tree(project)."""
+    def __init__(self, *, unreachable=False):
+        self.calls: list = []
+        self.unreachable = unreachable
+
+    def project(self, code):
+        if self.unreachable:
+            raise RuntimeError("kitsu unreachable")
+        from types import SimpleNamespace
+        return SimpleNamespace(code=code, id=f"proj-{code}")
+
+    def ensure_file_tree(self, project):
+        self.calls.append(project.id)
+        return True
+
+
+class TestKitsuFileTreeRepair(unittest.TestCase):
+    """A project's config might be the FIRST time anyone touches it through
+    Square's own tools (made straight in Kitsu's web UI, migrated from
+    another studio, ...) -- saving its config is a live, authenticated
+    Kitsu session already touching this exact project, so piggyback the
+    file_tree repair onto it instead of requiring a separate step."""
+
+    def test_save_project_best_effort_ensures_a_file_tree(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            _project(td, "ABC")
+            kitsu = _FakeKitsuForFileTree()
+            s = ConfigStore(pc, user=_User("admin"), studio_path=sp, kitsu=kitsu)
+            s.open_project(Path(td) / "nas" / "ABC", "ABC")
+            s.set("project", "fps", 30.0)
+            s.save_project()
+            self.assertEqual(kitsu.calls, ["proj-ABC"])
+
+    def test_save_project_survives_kitsu_being_unreachable(self):
+        """The local file save already succeeded -- Kitsu being unreachable
+        for this best-effort extra step must not turn that into a failure."""
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            _project(td, "ABC")
+            kitsu = _FakeKitsuForFileTree(unreachable=True)
+            s = ConfigStore(pc, user=_User("admin"), studio_path=sp, kitsu=kitsu)
+            s.open_project(Path(td) / "nas" / "ABC", "ABC")
+            s.set("project", "fps", 30.0)
+            path, bak = s.save_project()          # must not raise
+            self.assertTrue(path.exists())
+
+    def test_save_project_without_a_kitsu_handle_is_unaffected(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, sp = _pipeline(td)
+            _project(td, "ABC")
+            s = ConfigStore(pc, user=_User("admin"), studio_path=sp)   # kitsu=None
+            s.open_project(Path(td) / "nas" / "ABC", "ABC")
+            s.set("project", "fps", 30.0)
+            path, bak = s.save_project()
+            self.assertTrue(path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

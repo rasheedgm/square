@@ -11,7 +11,9 @@ next `connect()` raised `NeedsLogin` again as if nothing had happened.
 """
 
 import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -112,6 +114,40 @@ class TestSessionKeyConsistency(_IsolatedStateDir):
         auth.store_session("http://kitsu//api", {"access_token": "AT", "refresh_token": "RT"})
         auth.forget("http://kitsu/api")
         self.assertIsNone(auth.cached_session("http://kitsu//api"))
+
+
+def _fake_keyring(store: dict) -> types.ModuleType:
+    mod = types.ModuleType("keyring")
+    mod.get_password = lambda service, name: store.get((service, name))
+    mod.set_password = lambda service, name, value: store.__setitem__((service, name), value)
+    return mod
+
+
+class TestFileFallbackAlwaysWritten(_IsolatedStateDir):
+    """Regression: a login in an environment WITH `keyring` (the studio's own
+    venv) used to write ONLY to keyring and skip the file entirely -- so an
+    embedded DCC interpreter that can never have `keyring` (Nuke, xStudio;
+    see requirements-dcc.txt: pure-Python only) could never find a session
+    that plainly existed, and every menu command reported "not logged in"
+    despite a perfectly valid cached login sitting in Credential Manager."""
+
+    def test_store_session_writes_the_file_even_when_keyring_succeeds(self):
+        keyring_store: dict = {}
+        with patch.dict(sys.modules, {"keyring": _fake_keyring(keyring_store)}):
+            auth.store_session("http://kitsu/api", {"access_token": "AT", "refresh_token": "RT"})
+        self.assertTrue(keyring_store)                     # keyring did get it...
+        # ...but simulate an interpreter that CANNOT import keyring at all
+        # (like Nuke's) reading right after -- it must still find the session
+        with patch.dict(sys.modules, {"keyring": None}):
+            sess = auth.cached_session("http://kitsu/api")
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess["access_token"], "AT")
+
+    def test_load_falls_back_to_the_file_when_keyring_has_no_entry(self):
+        auth.store_session("http://kitsu/api", {"access_token": "AT", "refresh_token": "RT"})
+        empty_keyring_store: dict = {}          # importable, but nothing stored under it
+        with patch.dict(sys.modules, {"keyring": _fake_keyring(empty_keyring_store)}):
+            self.assertIsNotNone(auth.cached_session("http://kitsu/api"))
 
 
 class TestLogin(_IsolatedStateDir):

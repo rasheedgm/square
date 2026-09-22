@@ -551,36 +551,57 @@ def render_and_publish_node(node):
     node["sq_preview"].setValue(panel.k_preview.value())
     node["sq_do_publish"].setValue(panel.k_publish.value())
 
+    # save IN PLACE before rendering -- Nuke renders from the live node
+    # graph regardless of save state, but .000 snapshots whatever's on
+    # DISK at nuke.root().name(); without this, an unsaved edit would make
+    # .000 a copy of an already-superseded script, not the one that
+    # actually produced the render.
+    if nuke.root().name() and nuke.root().modified():
+        nuke.scriptSave()
+
     first, last = panel.first(), panel.last()
     n_frames = last - first + 1
     task = _progress("Square: Render & Publish")
     _step(task, f"Rendering {n_frames} frame(s)...")
     nuke.execute(node, first, last)
 
-    if not panel.k_publish.value():
-        _step(task, "Render complete.", pct=100)
-        _msg(f"Rendered {n_frames} frame(s).\n"
-             "Publish later: Square -> Publish Output.")
-        return
-
-    frames = _node_frames(nuke, node, first=first, last=last)
     # node_version carries a "vNNN" prefix for an explicit pick (as shown in
     # the dropdown) but not for the (new)/(sync) sentinels -- strip it the
     # same way gizmos._apply_file() does before resolve_output_path/
     # publish_render see it, or an explicit pick would crash on int("v005").
     version = node_version.lstrip("v") if node_version else ""
-    # this next call blocks until it's fully done -- render, publish record,
-    # THEN (if previewing) an ffmpeg encode and a Kitsu upload, both with no
+    # .000 is the RENDER's own provenance record, not the publish's --
+    # always snapshot it here, whether or not this render is published
+    # right now: it might be published later via the standalone Publish
+    # button, from a different, further-edited script state, and .000 must
+    # still reflect what actually rendered, not whatever's open by then.
+    rev = get_ops().snapshot_render(
+        t, media_type=mtype, name=name, version=version or SYNC_VERSION,
+        source_script_path=nuke.root().name())
+
+    if not panel.k_publish.value():
+        _step(task, f"Render complete (v{rev:03d}).", pct=100)
+        _msg(f"Rendered {n_frames} frame(s) -- v{rev:03d}.\n"
+             "Publish later: Square -> Publish Output.")
+        return
+
+    frames = _node_frames(nuke, node, first=first, last=last)
+    # this next call blocks until it's fully done -- publish record, THEN
+    # (if previewing) an ffmpeg encode and a Kitsu upload, both with no
     # further feedback of their own from here. Nuke can look frozen for that
     # whole stretch with nothing to say otherwise, so: a stage message here,
     # plus square_core's own INFO-level logging (see menu.py) for the finer
     # encode/upload steps in between, in whatever terminal Nuke was
-    # launched from.
+    # launched from. version=str(rev) (not the sentinel) so this targets
+    # the EXACT version snapshot_render() just resolved and snapshotted --
+    # publish_render() will call snapshot_render() again internally, but
+    # against the same already-registered major it's a no-op refresh, not
+    # a second registration.
     _step(task, f"Publishing {mtype}"
           + (" + encoding/uploading a review preview (this can take a while)..."
              if panel.k_preview.value() else "..."), pct=40)
     res = get_ops().publish_render(
-        t, frames, media_type=mtype, name=name, version=version or SYNC_VERSION,
+        t, frames, media_type=mtype, name=name, version=str(rev),
         make_preview=bool(panel.k_preview.value()),
         comment=panel.k_comment.value() or f"from {nuke.root().name()}",
         source_script_path=nuke.root().name())
@@ -741,11 +762,17 @@ class _PublishPanel:
         _step(task, f"Publishing {self.k_mtype.value()}"
               + (" + encoding/uploading a review preview (this can take a while)..."
                  if self.k_preview.value() else "..."), pct=20)
+        # no source_script_path here, deliberately: this is a standalone
+        # publish of frames that may have rendered earlier (or from a
+        # different session, or outside Square entirely) -- .000 for that
+        # version was already snapshotted accurately AT RENDER TIME (see
+        # render_and_publish_node()); overwriting it now with whatever
+        # happens to be open in THIS session would replace an accurate
+        # provenance record with an unrelated one.
         res = get_ops().publish_render(
             t, frames, media_type=self.k_mtype.value(), name=name, version=version,
             make_preview=bool(self.k_preview.value()),
-            comment=self.k_comment.value() or f"from {self.nuke.root().name()}",
-            source_script_path=self.nuke.root().name())
+            comment=self.k_comment.value() or f"from {self.nuke.root().name()}")
         to_env(t)
         _step(task, f"Published v{res.version:03d}.", pct=100)
         _msg(f"Published {self.k_mtype.value()} v{res.version:03d}"

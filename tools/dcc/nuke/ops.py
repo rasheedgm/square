@@ -313,10 +313,20 @@ class NukeOps:
         return {"path": hashed, "version": rev, "locked": locked,
                 "colorspace": r.pctx.config.media_type(media_type).get("colorspace", "")}
 
-    def publish_render(self, t: Target, frames, *, media_type: str = DEFAULT_OUTPUT_TYPE,
-                       name: str = "main", version: str | int | None = None, comment: str = "",
-                       make_preview: bool = True, proxy_dry_run: bool = False,
-                       source_script_path: str = ""):
+    def snapshot_render(self, t: Target, *, media_type: str = DEFAULT_OUTPUT_TYPE,
+                       name: str = "main", version: str | int | None = None,
+                       source_script_path: str = "") -> int:
+        """Resolves the version this render targets (same NEW_VERSION /
+        SYNC_VERSION / explicit rules as resolve_output_path()) and, if
+        `source_script_path` is given, snapshots it into that major's
+        read-only `.000` minor -- ALWAYS, on every render, whether or not it
+        goes on to be published: `.000` is the RENDER's own provenance
+        record ("the script that produced this"), not the publish's, so a
+        render that's only published later (or never) still needs its own
+        accurate snapshot taken at render time, not whatever happens to be
+        open whenever someone eventually publishes it. Refuses a locked
+        target the same way rendering into one is refused anywhere else.
+        Returns the resolved version number."""
         r = self._resolve(t)
         if version == NEW_VERSION:
             rev = media.next_version(r.pctx, r.shot, media_type, r.task, name=name)
@@ -331,9 +341,9 @@ class NukeOps:
                 raise OpsError(f"{media_type} v{rev:03d} is locked (reviewed / delivered) "
                                "— save a new workfile major and re-render.")
 
-        wf = next((w for w in r.pctx.kitsu.working_files(r.task)
-                   if (w.name or "main") == name and w.revision == rev), None)
         if source_script_path:
+            wf = next((w for w in r.pctx.kitsu.working_files(r.task)
+                      if (w.name or "main") == name and w.revision == rev), None)
             if wf is None:
                 # a NEW_VERSION render is decoupled from the workfile's own
                 # major by design -- nothing may be registered at `rev` yet.
@@ -343,9 +353,9 @@ class NukeOps:
                 snap = work.snapshot_rendered_script(
                     r.pctx, r.shot, r.task, source_path=source_script_path,
                     major=rev, name=name, media_type=WORKFILE_MEDIA_TYPE)
-                wf = work.register_major_at(r.pctx, r.shot, r.task, rev, snap,
-                                            name=name, media_type=WORKFILE_MEDIA_TYPE,
-                                            software=SOFTWARE)
+                work.register_major_at(r.pctx, r.shot, r.task, rev, snap,
+                                       name=name, media_type=WORKFILE_MEDIA_TYPE,
+                                       software=SOFTWARE)
             else:
                 # already registered (a Sync render, or a NEW_VERSION that
                 # happened to land where the workfile already was) -- still
@@ -355,6 +365,17 @@ class NukeOps:
                 work.snapshot_rendered_script(
                     r.pctx, r.shot, r.task, source_path=source_script_path,
                     major=rev, name=name, media_type=WORKFILE_MEDIA_TYPE)
+        return rev
+
+    def publish_render(self, t: Target, frames, *, media_type: str = DEFAULT_OUTPUT_TYPE,
+                       name: str = "main", version: str | int | None = None, comment: str = "",
+                       make_preview: bool = True, proxy_dry_run: bool = False,
+                       source_script_path: str = ""):
+        r = self._resolve(t)
+        rev = self.snapshot_render(t, media_type=media_type, name=name, version=version,
+                                   source_script_path=source_script_path)
+        wf = next((w for w in r.pctx.kitsu.working_files(r.task)
+                   if (w.name or "main") == name and w.revision == rev), None)
 
         result = work.publish_output(r.pctx, r.shot, r.task, media_type=media_type, name=name,
                                      frames=[str(f) for f in frames], version=rev,

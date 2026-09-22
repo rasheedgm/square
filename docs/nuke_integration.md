@@ -138,12 +138,24 @@ between majors — `…_comp_main_v001.001.nk`, `…_v001.002.nk`, … The tool 
 the version folder to list them.
 
 **Minor `.000` is reserved** — never an artist WIP save. Every render (from
-either `(new)` or `(sync)`) overwrites `v{major}.000.nk` with an exact copy of
-the actually-open, already-saved script that produced it, then marks the file
-read-only on disk so an accidental `Ctrl+S` can't silently drift it away from
-the render it documents. The Open Version panel labels it **"(rendered)"**
-rather than hiding it — it's a real, openable script, just not one to keep
-working in.
+either `(new)` or `(sync)`, whether or not it goes on to be published)
+overwrites `v{major}.000.nk` with an exact copy of the actually-open script
+that produced it, then marks the file read-only on disk so an accidental
+`Ctrl+S` can't silently drift it away from the render it documents. The Open
+Version panel labels it **"(rendered)"** rather than hiding it — it's a real,
+openable script, just not one to keep working in.
+
+`.000` is captured at **render** time, not publish time — a render that's
+only published later (or never) still gets its own accurate snapshot right
+then, not whatever happens to be open whenever someone eventually publishes
+it. Before copying, the Render panel saves the open script **in place** if it
+has unsaved changes (Nuke renders from the live node graph regardless of save
+state, so without this an unsaved edit would make `.000` a copy of an
+already-superseded script, not the one that actually rendered). A later,
+standalone publish (the **Publish** button / *Publish Output…*) never
+re-touches `.000` — it reuses whichever workfile record render time already
+attached, since by then a different script could be open that has nothing to
+do with what actually produced those frames.
 
 - **Save Version panel** — pick the workfile name and *minor up* (WIP save, same
   major) or *major up* (milestone; resets minor to 1 and records the major in

@@ -460,6 +460,48 @@ class TestRenderedSnapshotIntegration(unittest.TestCase):
             self.assertEqual(Path(snap).read_text(encoding="utf-8"),
                              "edited past .001, rendering now")
 
+    def test_snapshot_render_writes_000_without_publishing(self):
+        """.000 is the RENDER's own provenance record, not the publish's --
+        a render that's never published (or published much later, from a
+        different script state) must still get an accurate snapshot at
+        render time."""
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            src = self._open_script(td)
+            before = len(api.workfiles)
+
+            rev = ops.snapshot_render(_t(), version=NEW_VERSION, source_script_path=src)
+
+            self.assertEqual(rev, 1)
+            self.assertEqual(len(api.workfiles), before + 1)
+            self.assertEqual(ops.workfile_major(_t()), 1)
+            r_ = ops._resolve(_t())
+            snap = work.workfile_path(r_.pctx, r_.shot, r_.task, major=1, minor=0)
+            self.assertTrue(Path(snap).is_file())
+            self.assertEqual(Path(snap).read_text(encoding="utf-8"), "script state")
+            # no output was actually published -- snapshot_render() only
+            # resolves the version + snapshots .000, it never registers or
+            # publishes anything to CompRender itself
+            self.assertEqual(ops.output_versions(_t(), "CompRender"), [])
+
+    def test_publish_render_after_snapshot_render_does_not_double_register(self):
+        """The render-time snapshot_render() call and a LATER publish_render()
+        for the SAME already-resolved version must land on the one working_files
+        record, not two."""
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            src = self._open_script(td)
+            before = len(api.workfiles)
+
+            rev = ops.snapshot_render(_t(), version=NEW_VERSION, source_script_path=src)
+            r = Path(td) / "r"; r.mkdir()
+            (r / "c.1001.exr").write_bytes(b"x" * 10)
+            res = ops.publish_render(_t(), [str(r / "c.1001.exr")], version=str(rev),
+                                     source_script_path=src, proxy_dry_run=True)
+
+            self.assertEqual(res.version, rev)
+            self.assertEqual(len(api.workfiles), before + 1)      # still just the one
+
 
 class TestNameScopedOutputs(unittest.TestCase):
     """Two different name-streams under the same media_type on the same shot

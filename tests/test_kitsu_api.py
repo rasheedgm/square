@@ -340,6 +340,55 @@ class TestStatusAndReview(unittest.TestCase):
         self.assertEqual(data["original_width"], 1920)         # zou's key preserved
         self.assertEqual(data["square"]["shot_code"], "SH")
 
+    def test_preview_data_retries_a_transient_404_then_succeeds(self):
+        """Regression: right after add_preview()/set_main_preview() create a
+        preview file, reading it straight back (stamp_provenance() does
+        exactly that) can 404 on a real Kitsu server for a moment before the
+        write is visible to reads -- preview_data() must retry that instead
+        of surfacing it as if the whole preview had failed."""
+        try:
+            import gazu.exception
+        except ImportError:
+            self.skipTest("gazu not installed")
+        api = _api()
+        proj = api.create_project(code="ABC")
+        shot = api.ensure_shot(proj, api.ensure_sequence(proj, "S"), "SH")
+        [task] = api.ensure_tasks(shot, ["Ingest"])
+        prev = api.upload_preview(task, "/tmp/p.mov", comment="v1")
+
+        real_get = api._b.get_preview_file
+        calls = []
+
+        def flaky(pid):
+            calls.append(pid)
+            if len(calls) < 3:
+                raise gazu.exception.RouteNotFoundException(f"data/preview-files/{pid}")
+            return real_get(pid)
+
+        api._b.get_preview_file = flaky
+        with patch("time.sleep"):
+            data = api.preview_data(prev)
+        self.assertEqual(len(calls), 3)
+        self.assertIsInstance(data, dict)
+
+    def test_preview_data_gives_up_after_persistent_404s(self):
+        try:
+            import gazu.exception
+        except ImportError:
+            self.skipTest("gazu not installed")
+        api = _api()
+        proj = api.create_project(code="ABC")
+        shot = api.ensure_shot(proj, api.ensure_sequence(proj, "S"), "SH")
+        [task] = api.ensure_tasks(shot, ["Ingest"])
+        prev = api.upload_preview(task, "/tmp/p.mov", comment="v1")
+
+        def always_404(pid):
+            raise gazu.exception.RouteNotFoundException(f"data/preview-files/{pid}")
+
+        api._b.get_preview_file = always_404
+        with patch("time.sleep"), self.assertRaises(gazu.exception.RouteNotFoundException):
+            api.preview_data(prev)
+
     def test_annotations_round_trip(self):
         api = _api()
         proj = api.create_project(code="ABC")

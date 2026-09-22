@@ -257,7 +257,28 @@ class KitsuApi:
         self._b.set_main_preview(_id(preview))
 
     def preview_data(self, preview) -> dict:
-        return dict(self._b.get_preview_file(_pid(preview)).get("data") or {})
+        """A preview file's `data` blob. Retries briefly on a 404 --
+        immediately after add_preview()/set_main_preview() create the
+        record, a live Kitsu server's read path for it can lag the write by
+        a moment; reading it back in the very same call (stamp_provenance()
+        does exactly that) can otherwise 404 even though the preview itself
+        was created and set successfully. A no-op against the offline/fake
+        backend, which never raises this."""
+        try:
+            import gazu.exception
+            transient: tuple = (gazu.exception.RouteNotFoundException,)
+        except ImportError:
+            transient = ()
+        last = None
+        for attempt in range(3):
+            try:
+                return dict(self._b.get_preview_file(_pid(preview)).get("data") or {})
+            except transient as e:
+                last = e
+                if attempt < 2:
+                    import time
+                    time.sleep(0.5)
+        raise last
 
     def merge_preview_data(self, preview, data: dict) -> None:
         existing = self.preview_data(preview)

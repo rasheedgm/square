@@ -73,10 +73,12 @@ def make_proxy(source, out_path, *, fps: float = 24.0, is_video: bool = False,
                "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",
                out_path]
 
+    logger.info("running ffmpeg (%d source file(s)) -> %s", len(files), out_path)
     try:
         subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
     except Exception as e:
         raise ProxyError(f"ffmpeg failed: {e}") from e
+    logger.info("ffmpeg done -> %s", out_path)
     return out_path
 
 

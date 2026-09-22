@@ -189,6 +189,24 @@ class TestMediaPublish(unittest.TestCase):
                 r.preview_future.result(timeout=5)
             self.assertEqual(len(pctx.kitsu.previews), 1)
 
+    def test_review_proxy_encode_and_upload_are_logged(self):
+        """A publish with a review preview blocks the caller for the whole
+        encode-then-upload stretch when it's not run through a preview_pool
+        (exactly what a DCC calling publish() straight from its own main
+        thread does) -- these are the only feedback a caller with no
+        progress UI of its own gets that it isn't frozen."""
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            exr = Path(td) / "c.1001.exr"; exr.write_bytes(b"x" * 20)
+            with self.assertLogs("square.services.media", level="INFO") as cm:
+                media.publish(pctx, shot, "CompRender", comp, files=[str(exr)],
+                              proxy_dry_run=True)
+            joined = "\n".join(cm.output)
+            self.assertIn("encoding review proxy", joined)
+            self.assertIn("uploading", joined.lower())
+
 
 class TestReview(unittest.TestCase):
     def test_submit_record_approve(self):

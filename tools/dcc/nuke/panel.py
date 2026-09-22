@@ -46,6 +46,33 @@ def _msg(text: str) -> None:
         print(f"Square: {text}")
 
 
+def _progress(title: str):
+    """A nuke.ProgressTask if one's available, else None -- render/publish
+    still runs fine without it (_step() no-ops on None), this is purely the
+    "does this look frozen" feedback layer."""
+    try:
+        return _nuke().ProgressTask(title)
+    except Exception:
+        return None
+
+
+def _step(task, message: str, *, pct: int | None = None) -> None:
+    """Advance a _progress() task (if any) and ALWAYS print to whatever
+    terminal Nuke was launched from -- the one guarantee that doesn't
+    depend on a progress dialog being visible, or on logging being
+    configured, for a render/publish that can otherwise look frozen during
+    a review-preview encode + upload with no feedback of its own."""
+    print(f"[Square] {message}")
+    if task is None:
+        return
+    try:
+        task.setMessage(message)
+        if pct is not None:
+            task.setProgress(pct)
+    except Exception:
+        pass
+
+
 def _pipeline_host() -> str:
     from square_core.config import PipelineConfig
     return PipelineConfig.load().kitsu_host
@@ -525,10 +552,14 @@ def render_and_publish_node(node):
     node["sq_do_publish"].setValue(panel.k_publish.value())
 
     first, last = panel.first(), panel.last()
+    n_frames = last - first + 1
+    task = _progress("Square: Render & Publish")
+    _step(task, f"Rendering {n_frames} frame(s)...")
     nuke.execute(node, first, last)
 
     if not panel.k_publish.value():
-        _msg(f"Rendered {last - first + 1} frame(s).\n"
+        _step(task, "Render complete.", pct=100)
+        _msg(f"Rendered {n_frames} frame(s).\n"
              "Publish later: Square -> Publish Output.")
         return
 
@@ -538,12 +569,23 @@ def render_and_publish_node(node):
     # same way gizmos._apply_file() does before resolve_output_path/
     # publish_render see it, or an explicit pick would crash on int("v005").
     version = node_version.lstrip("v") if node_version else ""
+    # this next call blocks until it's fully done -- render, publish record,
+    # THEN (if previewing) an ffmpeg encode and a Kitsu upload, both with no
+    # further feedback of their own from here. Nuke can look frozen for that
+    # whole stretch with nothing to say otherwise, so: a stage message here,
+    # plus square_core's own INFO-level logging (see menu.py) for the finer
+    # encode/upload steps in between, in whatever terminal Nuke was
+    # launched from.
+    _step(task, f"Publishing {mtype}"
+          + (" + encoding/uploading a review preview (this can take a while)..."
+             if panel.k_preview.value() else "..."), pct=40)
     res = get_ops().publish_render(
         t, frames, media_type=mtype, name=name, version=version or SYNC_VERSION,
         make_preview=bool(panel.k_preview.value()),
         comment=panel.k_comment.value() or f"from {nuke.root().name()}",
         source_script_path=nuke.root().name())
     to_env(t)
+    _step(task, f"Published v{res.version:03d}.", pct=100)
     _msg(f"Rendered + published {mtype} v{res.version:03d}"
          + (" + review preview" if getattr(res, "preview", None) else "")
          + f"\n{res.dir}")
@@ -695,12 +737,17 @@ class _PublishPanel:
         else:
             version = int(str(v).lstrip("v"))
         name = (self.picker.k_name.value() if self.picker.k_name else "main") or "main"
+        task = _progress("Square: Publish")
+        _step(task, f"Publishing {self.k_mtype.value()}"
+              + (" + encoding/uploading a review preview (this can take a while)..."
+                 if self.k_preview.value() else "..."), pct=20)
         res = get_ops().publish_render(
             t, frames, media_type=self.k_mtype.value(), name=name, version=version,
             make_preview=bool(self.k_preview.value()),
             comment=self.k_comment.value() or f"from {self.nuke.root().name()}",
             source_script_path=self.nuke.root().name())
         to_env(t)
+        _step(task, f"Published v{res.version:03d}.", pct=100)
         _msg(f"Published {self.k_mtype.value()} v{res.version:03d}"
              + (" + review preview" if getattr(res, "preview", None) else "")
              + f"\n{res.dir}")

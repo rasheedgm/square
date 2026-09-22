@@ -184,11 +184,20 @@ def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run,
     proxy = Path(dest_dir) / "_review" / f"{name}_v{rev:03d}.mp4"
     fps = getattr(media_info, "fps", None) or pctx.config.fps or 24.0
     is_video = len(files) == 1 and not any(c.isdigit() for c in Path(files[0]).stem[-6:])
+    # this runs on whatever thread called publish() -- for a DCC calling it
+    # straight from the main/GUI thread (no preview_pool), the ffmpeg
+    # subprocess + the upload below are the whole reason the app can look
+    # frozen with zero feedback; these are the only signal a caller with no
+    # progress UI of its own (e.g. a terminal Nuke was launched from) gets.
+    logger.info("encoding review proxy (%d frame(s)) -> %s", len(files), proxy)
     path = make_proxy(files, proxy, fps=float(fps), is_video=is_video, dry_run=dry_run)
+    logger.info("review proxy encoded, uploading to Kitsu: %s", path)
     # the preview's own Kitsu revision floats (many previews per version) -- the
     # comment names the media version it is a review of.
     label = f"{media_type} v{rev:03d}".strip() or f"v{rev:03d}"
-    return pctx.kitsu.upload_preview(task, path, comment=f"Preview — {label}")
+    result = pctx.kitsu.upload_preview(task, path, comment=f"Preview — {label}")
+    logger.info("review proxy uploaded")
+    return result
 
 
 def make_review_proxy_for(pctx, entity, media_type: str, task, *, files, name: str = "main",

@@ -107,6 +107,18 @@ below) — this is the actual provenance record of "the script that produced
 this," independent of whatever major/minor the artist happened to have last
 saved to.
 
+**Publishing blocks** until the encode + Kitsu upload of a review preview
+finish -- Nuke isn't frozen, but a single `publish_render()` call covers
+render → publish record → ffmpeg encode → upload with nothing running in
+the background, so there's no live progress bar during any one step.
+`menu.py` configures the `square` logger (INFO level, plain `[Square] ...`
+lines) at Nuke startup, and the Render / Publish panels show a
+`nuke.ProgressTask` with stage messages ("Rendering…", "Publishing… this
+can take a while", "Published vNNN") — between the two, the terminal Nuke
+was launched from and the progress dialog both stay visibly alive through
+the whole thing, even without a live percentage during the encode/upload
+themselves.
+
 ## Context
 
 Every panel and gizmo tab has the same **project → episode → sequence → shot →

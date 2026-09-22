@@ -3,11 +3,28 @@ this automatically when THIS FILE'S OWN DIRECTORY (`tools/dcc/nuke`, not just
 the repo root) is on `NUKE_PATH` -- see `docs/nuke_integration.md`.
 """
 
+import logging
+
 import nuke
 
 from tools.dcc.nuke import gizmos
 
 _P = "from tools.dcc.nuke import panel; panel.{}()"
+
+
+def _configure_logging() -> None:
+    """square_core's service-layer logging (encode/upload progress, etc.) is
+    INFO level with no handler configured anywhere -- silently dropped by
+    default, which is exactly why a render+publish with a review preview
+    could look frozen for the whole ffmpeg-encode-then-Kitsu-upload stretch:
+    there was no feedback even in the terminal Nuke was launched from."""
+    log = logging.getLogger("square")
+    if log.handlers:
+        return
+    log.setLevel(logging.INFO)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("[Square] %(message)s"))
+    log.addHandler(handler)
 
 
 def _remove_existing(top) -> None:
@@ -60,6 +77,7 @@ def build() -> None:
         menu.addCommand("Sign In…", _P.format("sign_in"))
 
 
+_configure_logging()
 build()
 
 # keep every SquareRead / SquareWrite's file path in sync with its Square tab

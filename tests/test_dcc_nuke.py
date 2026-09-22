@@ -233,6 +233,7 @@ class _Knob:
         self._values = list(values) if values else []
         self._v = self._values[0] if self._values else ""
         self._enabled = True
+        self._startline = True     # real Nuke's own default for most knob types
 
     def name(self):
         return self._name
@@ -257,6 +258,12 @@ class _Knob:
     def setEnabled(self, b):
         self._enabled = b
 
+    def setFlag(self, flag):
+        self._startline = True
+
+    def clearFlag(self, flag):
+        self._startline = False
+
 
 class _Node:
     def __init__(self, cls):
@@ -277,6 +284,8 @@ class _Node:
 
 
 class _FakeNuke:
+    STARTLINE = 1  # real nuke.STARTLINE's actual value doesn't matter to _Knob's no-op
+
     def __init__(self):
         self.created = []
         self._this_node = None
@@ -377,6 +386,38 @@ class TestGizmos(unittest.TestCase):
             self.assertIn("sq_do_publish", node.knobs())
             self.assertTrue(node["sq_do_publish"].value())      # default on
             self.assertIn("sq_preview", node.knobs())
+
+    def test_context_knobs_share_one_line_task_onward_do_not(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertTrue(node["sq_project"]._startline)        # starts the row
+            for k in ("sq_episode", "sq_sequence", "sq_shot"):
+                self.assertFalse(node[k]._startline, f"{k} should share sq_project's line")
+            for k in ("sq_task", "sq_media_type", "sq_name", "sq_version"):
+                self.assertTrue(node[k]._startline, f"{k} should have its own line")
+
+    def test_write_checkboxes_each_get_their_own_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertTrue(node["sq_preview"]._startline)
+            self.assertTrue(node["sq_do_publish"]._startline)
+
+    def test_square_write_has_a_direct_publish_button(self):
+        """Publish rendered-but-not-yet-published frames without having to
+        re-render (sq_publish already does render + optionally publish)."""
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertIn("sq_publish_only", node.knobs())
+
+    def test_square_read_has_no_publish_toggle_or_button(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_read(_FakeNuke())
+            self.assertNotIn("sq_do_publish", node.knobs())
+            self.assertNotIn("sq_publish_only", node.knobs())
 
 
 class TestGizmosLazyCreation(unittest.TestCase):

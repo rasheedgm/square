@@ -58,18 +58,37 @@ def _create(nuke, node_class: str, kind: str):
               ("sq_sequence", "Sequence"), ("sq_shot", "Shot"), ("sq_task", "Task"),
               ("sq_media_type", "Media type"), ("sq_name", "Name"),
               ("sq_version", "Version")]
+    # project / episode / sequence / shot read as one unit -- "the context"
+    # -- far more often than any of them is looked at alone, so they share
+    # one line; task onward each keep their own (task names and version
+    # labels can run long, and media type / version is a different kind of
+    # decision from "which shot").
+    _SAME_LINE_AS_PREVIOUS = {"sq_episode", "sq_sequence", "sq_shot"}
     for name, label in labels:
-        node.addKnob(nuke.Enumeration_Knob(name, label, [""]))
+        knob = nuke.Enumeration_Knob(name, label, [""])
+        if name in _SAME_LINE_AS_PREVIOUS:
+            knob.clearFlag(nuke.STARTLINE)
+        node.addKnob(knob)
     if kind == "write":
         prev = nuke.Boolean_Knob("sq_preview", "Make review preview")
         prev.setValue(True)
+        prev.setFlag(nuke.STARTLINE)
         node.addKnob(prev)
         dop = nuke.Boolean_Knob("sq_do_publish", "Publish after render")
         dop.setValue(True)
+        dop.setFlag(nuke.STARTLINE)
         node.addKnob(dop)
         node.addKnob(nuke.PyScript_Knob(
             "sq_publish", "Render",
             "from tools.dcc.nuke import panel; panel.render_and_publish_node(nuke.thisNode())"))
+        # for frames that already exist (rendered with "Publish after
+        # render" off, or via Nuke's own Render) -- publish them without
+        # re-rendering. Always shown for now; whether/when to hide it once
+        # a version is already published is part of the version-handling
+        # pass to come, not this UI-layout one.
+        node.addKnob(nuke.PyScript_Knob(
+            "sq_publish_only", "Publish",
+            "from tools.dcc.nuke import panel; panel.publish_dialog(nuke.thisNode())"))
     status = nuke.Text_Knob("sq_status", "")
     node.addKnob(status)
 

@@ -193,7 +193,25 @@ Picking `(new)` — or any other, unlocked version — clears the block.
 
 Stock Read / Write nodes with a **Square** tab. Its knobs (project … task, media
 type, name, version) drive the node's `file`; a `knobChanged` callback keeps it
-in sync.
+in sync. Laid out in sections, divider lines between them:
+
+```
+Project
+Episode   Seq
+Shot
+──────────────
+Task      Media type
+Name
+──────────────
+Version   [Refresh]
+<status>
+──────────────          (SquareWrite only from here down)
+[x] Make preview
+[x] Publish after render
+[Render] [Publish]
+──────────────
+[Create Read]
+```
 
 Creating a node is lazy, one cascade level at a time: it costs one Kitsu call
 (the project list) unless the launch context (`SQUARE_PROJECT` / `_SEQUENCE`

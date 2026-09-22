@@ -54,6 +54,10 @@ def create_square_read(nuke):
     return _create(nuke, "Read", "read")
 
 
+_DIVIDER = "─" * 30       # a plain static-text row, the closest thing to a
+                                # rule line the classic knob API offers
+
+
 def _create(nuke, node_class: str, kind: str):
     node = nuke.createNode(node_class, inpanel=False)
     node.addKnob(nuke.Tab_Knob("square", "Square"))
@@ -63,37 +67,44 @@ def _create(nuke, node_class: str, kind: str):
     mark.setVisible(False)
     node.addKnob(mark)
 
-    labels = [("sq_project", "Project"), ("sq_episode", "Episode"),
-              ("sq_sequence", "Sequence"), ("sq_shot", "Shot"), ("sq_task", "Task"),
-              ("sq_media_type", "Media type")]
-    # project / episode / sequence / shot read as one unit -- "the context"
-    # -- far more often than any of them is looked at alone, so they share
-    # one line; task onward each keep their own (task names and version
-    # labels can run long, and media type / version is a different kind of
-    # decision from "which shot").
-    _SAME_LINE_AS_PREVIOUS = {"sq_episode", "sq_sequence", "sq_shot"}
-    for name, label in labels:
-        knob = nuke.Enumeration_Knob(name, label, [""])
-        if name in _SAME_LINE_AS_PREVIOUS:
-            knob.clearFlag(nuke.STARTLINE)
-        node.addKnob(knob)
+    # -- context: project / episode+seq / shot ---------------------------
+    node.addKnob(nuke.Enumeration_Knob("sq_project", "Project", [""]))
+    node.addKnob(nuke.Enumeration_Knob("sq_episode", "Episode", [""]))
+    seq_knob = nuke.Enumeration_Knob("sq_sequence", "Seq", [""])
+    seq_knob.clearFlag(nuke.STARTLINE)     # shares Episode's line
+    node.addKnob(seq_knob)
+    node.addKnob(nuke.Enumeration_Knob("sq_shot", "Shot", [""]))
+    node.addKnob(nuke.Text_Knob("sq_div1", "", _DIVIDER))
 
-    # shares Media type's line, no label of its own -- a name-stream pick is
-    # part of "what media", not a separate decision. Editable so a brand new
-    # stream (no Kitsu record yet) can just be typed, not only picked.
-    name_knob = nuke.EditableEnumeration_Knob("sq_name", "", ["main"])
-    name_knob.clearFlag(nuke.STARTLINE)
-    node.addKnob(name_knob)
+    # -- what: task+media type / name -------------------------------------
+    node.addKnob(nuke.Enumeration_Knob("sq_task", "Task", [""]))
+    mt_knob = nuke.Enumeration_Knob("sq_media_type", "Media type", [""])
+    mt_knob.clearFlag(nuke.STARTLINE)      # shares Task's line
+    node.addKnob(mt_knob)
+    # editable so a brand new stream (no Kitsu record yet) can just be
+    # typed, not only picked from known name-streams for this media type.
+    node.addKnob(nuke.EditableEnumeration_Knob("sq_name", "Name", ["main"]))
+    node.addKnob(nuke.Text_Knob("sq_div2", "", _DIVIDER))
 
+    # -- version + status --------------------------------------------------
     node.addKnob(nuke.Enumeration_Knob("sq_version", "Version", [""]))
     refresh = nuke.PyScript_Knob(
         "sq_refresh", "Refresh",
         "from tools.dcc.nuke import gizmos; gizmos.refresh_node(nuke, nuke.thisNode())")
     refresh.clearFlag(nuke.STARTLINE)      # sits beside the version it refreshes
     node.addKnob(refresh)
+    node.addKnob(nuke.Text_Knob("sq_status", ""))
 
     if kind == "write":
-        prev = nuke.Boolean_Knob("sq_preview", "Make review preview")
+        node.addKnob(nuke.Text_Knob("sq_div3", "", _DIVIDER))
+
+        # -- preview / publish toggles + actions --------------------------
+        # explicit STARTLINE throughout, not left to each knob type's own
+        # default: PyScript_Knob's real default does NOT start a new line
+        # (confirmed against real Nuke), unlike most other knob types, so
+        # relying on defaults here previously put Render/Publish on the
+        # checkbox's own line by accident.
+        prev = nuke.Boolean_Knob("sq_preview", "Make preview")
         prev.setValue(True)
         prev.setFlag(nuke.STARTLINE)
         node.addKnob(prev)
@@ -114,13 +125,13 @@ def _create(nuke, node_class: str, kind: str):
             "from tools.dcc.nuke import panel; panel.publish_dialog(nuke.thisNode())")
         publish_only_btn.clearFlag(nuke.STARTLINE)
         node.addKnob(publish_only_btn)
+
+        node.addKnob(nuke.Text_Knob("sq_div4", "", _DIVIDER))
         create_read_btn = nuke.PyScript_Knob(
             "sq_create_read", "Create Read",
             "from tools.dcc.nuke import panel; panel.create_read_from_write(nuke.thisNode())")
         create_read_btn.setFlag(nuke.STARTLINE)
         node.addKnob(create_read_btn)
-    status = nuke.Text_Knob("sq_status", "")
-    node.addKnob(status)
 
     _populate(nuke, node, from_env())
     return node

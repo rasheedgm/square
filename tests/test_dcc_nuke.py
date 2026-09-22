@@ -640,8 +640,11 @@ class _FakeNuke:
     def String_Knob(self, name, label=None):
         return _Knob(name)
 
-    def Text_Knob(self, name, label=None):
-        return _Knob(name)
+    def Text_Knob(self, name, label=None, value=""):
+        k = _Knob(name)
+        if value:
+            k.setValue(value)
+        return k
 
     def Boolean_Knob(self, name, label=None):
         return _Knob(name)
@@ -748,6 +751,18 @@ class TestGizmos(unittest.TestCase):
             self.assertTrue(node["sq_publish"]._startline)
             self.assertFalse(node["sq_publish_only"]._startline)  # shares Render's line
 
+    def test_dividers_present_between_each_section(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            write_node = gizmos.create_square_write(_FakeNuke())
+            for k in ("sq_div1", "sq_div2", "sq_div3", "sq_div4"):
+                self.assertIn(k, write_node.knobs())
+            read_node = gizmos.create_square_read(_FakeNuke())
+            for k in ("sq_div1", "sq_div2"):
+                self.assertIn(k, read_node.knobs())
+            for k in ("sq_div3", "sq_div4"):
+                self.assertNotIn(k, read_node.knobs())     # write-only sections
+
     def test_write_has_create_read_button_on_its_own_line(self):
         with tempfile.TemporaryDirectory() as td:
             self._wire(td)
@@ -849,12 +864,11 @@ class TestGizmos(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self._wire(td)
             node = gizmos.create_square_write(_FakeNuke())
-            self.assertTrue(node["sq_project"]._startline)        # starts the row
-            for k in ("sq_episode", "sq_sequence", "sq_shot"):
-                self.assertFalse(node[k]._startline, f"{k} should share sq_project's line")
-            for k in ("sq_task", "sq_media_type", "sq_version"):
-                self.assertTrue(node[k]._startline, f"{k} should have its own line")
-            self.assertFalse(node["sq_name"]._startline, "sq_name should share Media type's line")
+            for k in ("sq_project", "sq_episode", "sq_shot",
+                      "sq_task", "sq_name", "sq_version"):
+                self.assertTrue(node[k]._startline, f"{k} should start its own line")
+            self.assertFalse(node["sq_sequence"]._startline, "sq_sequence should share Episode's line")
+            self.assertFalse(node["sq_media_type"]._startline, "sq_media_type should share Task's line")
             self.assertFalse(node["sq_refresh"]._startline, "sq_refresh should share Version's line")
 
     def test_write_checkboxes_each_get_their_own_line(self):

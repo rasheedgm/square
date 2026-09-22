@@ -36,6 +36,7 @@ def default_template() -> dict:
         "nas_roots": {"default": "X:/projects"},
         "kitsu_project_templates": [],
         "dcc": {"xstudio_exe": "", "nuke_exe": ""},
+        "ffmpeg_exe": "",
         "project_defaults": json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)),
     }
 
@@ -46,6 +47,9 @@ class PipelineConfig:
     nas_roots: dict = field(default_factory=lambda: {"default": _DEFAULT_NAS})
     kitsu_project_templates: list = field(default_factory=list)
     dcc: dict = field(default_factory=dict)          # {"xstudio_exe": ..., "nuke_exe": ...}
+    ffmpeg_exe: str = ""          # a shared ffmpeg (e.g. on the NAS) for review-proxy
+                                   # encoding -- not DCC-specific, so it's its own key,
+                                   # not another entry under `dcc`
     project_defaults: dict = field(default_factory=lambda: json.loads(json.dumps(DEFAULT_PROJECT_CONFIG)))
     source_path: str = ""
 
@@ -98,6 +102,7 @@ class PipelineConfig:
             dcc = data.get("dcc")
             if isinstance(dcc, dict):
                 cfg.dcc = dcc
+            cfg.ffmpeg_exe = str(data.get("ffmpeg_exe", "") or "")
             pd = data.get("project_defaults")
             if isinstance(pd, dict) and pd:
                 # deep merge -- a studio that overrides only colorspace.working
@@ -113,6 +118,7 @@ class PipelineConfig:
             "nas_roots": dict(self.nas_roots),
             "kitsu_project_templates": list(self.kitsu_project_templates),
             "dcc": dict(self.dcc or {}),
+            "ffmpeg_exe": self.ffmpeg_exe,
             "project_defaults": self.project_defaults,
         }
 

@@ -301,6 +301,10 @@ def _register_builtins() -> None:
              description="xStudio executable -- the square_xstudio launcher runs this")
     register("dcc.nuke_exe", "path", scope="studio", default="",
              description="Nuke executable -- the square_nuke launcher runs this")
+    register("ffmpeg_exe", "path", scope="studio", default="",
+             description="ffmpeg executable for review-proxy encoding (e.g. a shared "
+                         "copy on the NAS) -- empty falls back to imageio-ffmpeg's "
+                         "bundled binary, then plain 'ffmpeg' on PATH")
     register("project_defaults", "dict", scope="studio", default={}, hidden=True,
              description="a ProjectConfig template copied into each new project -- "
                          "redundant as its own row: every sub-key it holds is "

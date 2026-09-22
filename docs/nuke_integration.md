@@ -119,6 +119,14 @@ was launched from and the progress dialog both stay visibly alive through
 the whole thing, even without a live percentage during the encode/upload
 themselves.
 
+The encode itself needs a real `ffmpeg` -- resolved in order: `$FFMPEG_BINARY`,
+then `imageio-ffmpeg`'s bundled binary (usually not installable in the
+pure-Python-only `dcc-deps` environment Nuke's Python runs in), then bare
+`ffmpeg` on `PATH`. Set **`ffmpeg_exe`** in `studio_config.json` (a shared
+copy, e.g. on the NAS, via a UNC path) rather than installing ffmpeg on every
+workstation -- `dcc_launch.py` sets `FFMPEG_BINARY` from it (or
+`%SQUARE_FFMPEG_EXE%`) before launching Nuke.
+
 ## Context
 
 Every panel and gizmo tab has the same **project → episode → sequence → shot →

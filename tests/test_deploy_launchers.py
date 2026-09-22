@@ -2,6 +2,8 @@
 not detach the console (or a startup crash is invisible) and must pause on a
 non-zero exit so the user can read it."""
 
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -75,6 +77,61 @@ class TestLauncherBat(unittest.TestCase):
             launchers = Path(td) / "launchers"
             write_launchers(launchers, release)
             self.assertFalse((launchers / "square_xstudio.bat").exists())
+
+
+class TestDccLaunchFfmpeg(unittest.TestCase):
+    """dcc_launch.py sets FFMPEG_BINARY from studio_config.json's ffmpeg_exe
+    (or SQUARE_FFMPEG_EXE) before launching a DCC -- a shared ffmpeg (e.g. on
+    the NAS) shouldn't need installing on every workstation."""
+
+    def _root(self, td, *, ffmpeg_exe=""):
+        root = Path(td) / "pipeline"
+        (root / "config").mkdir(parents=True)
+        exe = str(Path(td) / "nuke.exe")
+        Path(exe).write_text("", encoding="utf-8")     # just needs to exist
+        cfg = {"dcc": {"nuke_exe": exe}}
+        if ffmpeg_exe:
+            cfg["ffmpeg_exe"] = ffmpeg_exe
+        (root / "config" / "studio_config.json").write_text(
+            json.dumps(cfg), encoding="utf-8")
+        (root / "current").mkdir()
+        return root
+
+    def test_ffmpeg_exe_from_config_sets_ffmpeg_binary(self):
+        from tools.pipeline_deploy import dcc_launch
+        with tempfile.TemporaryDirectory() as td:
+            root = self._root(td, ffmpeg_exe=r"\\nas\tools\ffmpeg\ffmpeg.exe")
+            with patch.dict(os.environ, {}, clear=True), patch("os.execv") as execv:
+                dcc_launch.main(["dcc_launch.py", "nuke", str(root)])
+                self.assertEqual(os.environ.get("FFMPEG_BINARY"),
+                                 r"\\nas\tools\ffmpeg\ffmpeg.exe")
+            execv.assert_called_once()
+
+    def test_no_ffmpeg_exe_configured_leaves_ffmpeg_binary_unset(self):
+        from tools.pipeline_deploy import dcc_launch
+        with tempfile.TemporaryDirectory() as td:
+            root = self._root(td)
+            with patch.dict(os.environ, {}, clear=True), patch("os.execv"):
+                dcc_launch.main(["dcc_launch.py", "nuke", str(root)])
+                self.assertNotIn("FFMPEG_BINARY", os.environ)
+
+    def test_square_ffmpeg_exe_env_override_wins_over_config(self):
+        from tools.pipeline_deploy import dcc_launch
+        with tempfile.TemporaryDirectory() as td:
+            root = self._root(td, ffmpeg_exe=r"\\nas\ffmpeg.exe")
+            with patch.dict(os.environ, {"SQUARE_FFMPEG_EXE": "C:/local/ffmpeg.exe"},
+                            clear=True), patch("os.execv"):
+                dcc_launch.main(["dcc_launch.py", "nuke", str(root)])
+                self.assertEqual(os.environ.get("FFMPEG_BINARY"), "C:/local/ffmpeg.exe")
+
+    def test_preexisting_ffmpeg_binary_env_var_is_not_overwritten(self):
+        from tools.pipeline_deploy import dcc_launch
+        with tempfile.TemporaryDirectory() as td:
+            root = self._root(td, ffmpeg_exe=r"\\nas\ffmpeg.exe")
+            with patch.dict(os.environ, {"FFMPEG_BINARY": "C:/already/set.exe"},
+                            clear=True), patch("os.execv"):
+                dcc_launch.main(["dcc_launch.py", "nuke", str(root)])
+                self.assertEqual(os.environ.get("FFMPEG_BINARY"), "C:/already/set.exe")
 
 
 class TestBuildDccDeps(unittest.TestCase):

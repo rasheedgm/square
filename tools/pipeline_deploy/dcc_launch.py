@@ -13,6 +13,9 @@ override), sets:
 * `SQUARE_ROOT`   -> `<pipeline>/current`         (square_core + tools)
 * `SQUARE_DEPS`   -> `<pipeline>/envs/dcc-deps`   (pure-python gazu + requests)
 * `STUDIO_CONFIG_PATH`
+* `FFMPEG_BINARY` -> `ffmpeg_exe` from studio_config.json (`%SQUARE_FFMPEG_EXE%`
+  overrides), if either is set -- e.g. one shared copy on the NAS, so a review
+  proxy encode doesn't depend on ffmpeg being installed on every workstation
 * xStudio: `XSTUDIO_PYTHON_PLUGIN_PATH` -> the bundled plugins dir
 * Nuke:    prepends the nuke integration dir + repo root to `NUKE_PATH`
 
@@ -57,6 +60,10 @@ def _exe(dcc: str, cfg: dict) -> str:
     return str((cfg.get("dcc") or {}).get(f"{dcc}_exe", "") or "")
 
 
+def _ffmpeg_exe(cfg: dict) -> str:
+    return os.environ.get("SQUARE_FFMPEG_EXE") or str(cfg.get("ffmpeg_exe", "") or "")
+
+
 def _prepend(var: str, *paths: str) -> None:
     have = os.environ.get(var, "")
     parts = [p for p in paths if p] + ([have] if have else [])
@@ -84,6 +91,10 @@ def main(argv=None) -> int:
     os.environ["SQUARE_ROOT"] = str(current)
     os.environ["SQUARE_DEPS"] = str(root / "envs" / "dcc-deps")
     os.environ.setdefault("STUDIO_CONFIG_PATH", str(root / "config" / "studio_config.json"))
+
+    ffmpeg = _ffmpeg_exe(cfg)
+    if ffmpeg:
+        os.environ.setdefault("FFMPEG_BINARY", ffmpeg)
 
     if dcc == "xstudio":
         os.environ["XSTUDIO_PYTHON_PLUGIN_PATH"] = str(

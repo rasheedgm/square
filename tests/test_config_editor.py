@@ -41,11 +41,29 @@ class TestReads(unittest.TestCase):
             keys = {f.key for f in store.fields("studio")}
             self.assertIn("kitsu_host", keys)
             self.assertIn("fps", keys)                 # scope=both shows in studio
+            self.assertIn("ffmpeg_exe", keys)
+            self.assertIn("dcc.nuke_exe", keys)
             self.assertNotIn("delivery_presets", keys)  # project-only
             # the container every scope=both key already writes into
             # individually -- showing it too would be a redundant raw-JSON
             # duplicate of every field already on screen
             self.assertNotIn("project_defaults", keys)
+
+    def test_ffmpeg_exe_round_trips_through_pipeline_config(self):
+        with tempfile.TemporaryDirectory() as td:
+            studio = Path(td) / "studio_config.json"
+            studio.write_text(json.dumps({
+                "kitsu_url": "http://localhost/api",
+                "ffmpeg_exe": r"\\nas\tools\ffmpeg\ffmpeg.exe",
+            }), encoding="utf-8")
+            pc = PipelineConfig.load(studio)
+            self.assertEqual(pc.ffmpeg_exe, r"\\nas\tools\ffmpeg\ffmpeg.exe")
+            self.assertEqual(pc.as_dict()["ffmpeg_exe"], r"\\nas\tools\ffmpeg\ffmpeg.exe")
+
+    def test_ffmpeg_exe_defaults_to_empty(self):
+        with tempfile.TemporaryDirectory() as td:
+            pc, _ = _pipeline(td)
+            self.assertEqual(pc.ffmpeg_exe, "")
 
     def test_project_value_provenance(self):
         with tempfile.TemporaryDirectory() as td:

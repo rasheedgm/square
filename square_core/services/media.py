@@ -148,7 +148,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
             return make_review_proxy_for(
                 pctx, entity, media_type, task, files=files, name=name,
                 version=rev, media_info=media_info, dest_dir=dest_dir,
-                provenance=prov, dry_run=proxy_dry_run,
+                provenance=prov, dry_run=proxy_dry_run, comment=comment,
             )
 
         if preview_pool is not None:
@@ -178,7 +178,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
 # --------------------------------------------------------------------------
 
 def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run,
-                  media_type=""):
+                  media_type="", comment=""):
     from square_core.media import make_proxy
 
     proxy = Path(dest_dir) / "_review" / f"{name}_v{rev:03d}.mp4"
@@ -192,17 +192,21 @@ def _review_proxy(pctx, task, files, dest_dir, rev, name, media_info, dry_run,
     logger.info("encoding review proxy (%d frame(s)) -> %s", len(files), proxy)
     path = make_proxy(files, proxy, fps=float(fps), is_video=is_video, dry_run=dry_run)
     logger.info("review proxy encoded, uploading to Kitsu: %s", path)
-    # the preview's own Kitsu revision floats (many previews per version) -- the
-    # comment names the media version it is a review of.
+    # the preview's own Kitsu revision floats (many previews per version) --
+    # the version label is always kept for scanning a task's review history,
+    # with the artist's own publish comment leading when one was given (it
+    # used to only ever land on the output file's own comment field, never
+    # on the review clip a supervisor actually watches and comments back on).
     label = f"{media_type} v{rev:03d}".strip() or f"v{rev:03d}"
-    result = pctx.kitsu.upload_preview(task, path, comment=f"Preview — {label}")
+    text = f"{comment} — {label}" if comment else f"Preview — {label}"
+    result = pctx.kitsu.upload_preview(task, path, comment=text)
     logger.info("review proxy uploaded")
     return result
 
 
 def make_review_proxy_for(pctx, entity, media_type: str, task, *, files, name: str = "main",
                           version: int, media_info=None, dest_dir: str = "",
-                          provenance=None, dry_run: bool = False):
+                          provenance=None, dry_run: bool = False, comment: str = ""):
     """Encode + upload the review proxy for a media that is ALREADY published
     -- the ingest tool resuming a session whose previews hadn't finished, a
     tool re-rendering a broken proxy. The Kitsu version already exists; this
@@ -223,9 +227,21 @@ def make_review_proxy_for(pctx, entity, media_type: str, task, *, files, name: s
                        representation=rep, ext=ext)
         dest_dir = pctx.paths.media_dir(media_type, ctx)
     preview = _review_proxy(pctx, task, files, dest_dir, version, name, media_info, dry_run,
-                            media_type=media_type)
+                            media_type=media_type, comment=comment)
     if preview:
         pctx.kitsu.set_main_preview(preview)
         if provenance is not None:
-            pctx.kitsu.stamp_provenance(preview, provenance, on="preview")
+            # separate from the encode/upload/set-main-preview above, which
+            # already succeeded by this point: stamping provenance data
+            # reads the preview record straight back (a real Kitsu server's
+            # read path for a just-created record can 404 for a moment --
+            # KitsuApi.preview_data() already retries that), so its failure
+            # shouldn't make a caller think the whole preview failed and
+            # discard an otherwise-successful upload.
+            try:
+                pctx.kitsu.stamp_provenance(preview, provenance, on="preview")
+            except Exception as e:
+                logger.warning("could not stamp provenance on the review preview "
+                               "for %s v%03d (the preview itself uploaded fine): %s",
+                               media_type, version, e)
     return preview

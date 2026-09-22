@@ -117,6 +117,34 @@ class TestMediaPublish(unittest.TestCase):
             self.assertEqual(pctx.kitsu.outputs[0]["data"]["square"]["kind"], "publish")
             self.assertEqual(len(pctx.kitsu.previews), 1)      # CompRender is previewable
 
+    def test_publish_comment_reaches_the_review_previews_comment(self):
+        """The comment field a publish (e.g. Nuke's Render/Publish panel) is
+        given used to land ONLY on the output file's own comment field --
+        never on the review clip a supervisor actually watches and comments
+        back on. The version label stays in the preview comment too, so
+        scanning a task's review history still shows what version each clip
+        is."""
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            exr = Path(td) / "c.1001.exr"; exr.write_bytes(b"x" * 20)
+            media.publish(pctx, shot, "CompRender", comp, files=[str(exr)],
+                          comment="fixed the edge per note #3", proxy_dry_run=True)
+            self.assertEqual(len(pctx.kitsu.previews), 1)
+            preview_comment = pctx.kitsu.previews[0]["comment"]
+            self.assertIn("fixed the edge per note #3", preview_comment)
+            self.assertIn("v001", preview_comment)
+
+    def test_no_comment_falls_back_to_the_default_preview_label(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            exr = Path(td) / "c.1001.exr"; exr.write_bytes(b"x" * 20)
+            media.publish(pctx, shot, "CompRender", comp, files=[str(exr)], proxy_dry_run=True)
+            self.assertEqual(pctx.kitsu.previews[0]["comment"], "Preview — CompRender v001")
+
     def test_second_publish_increments_version(self):
         with tempfile.TemporaryDirectory() as td:
             pctx = _pctx(td)
@@ -206,6 +234,29 @@ class TestMediaPublish(unittest.TestCase):
             joined = "\n".join(cm.output)
             self.assertIn("encoding review proxy", joined)
             self.assertIn("uploading", joined.lower())
+
+    def test_stamp_provenance_failure_does_not_lose_an_uploaded_preview(self):
+        """The preview upload + set-main-preview already succeeded by the
+        time provenance stamping runs -- its failure must be caught and
+        reported, not make the caller think the whole preview failed and
+        discard an otherwise-successful upload (make_review_proxy_for()'s
+        result.preview would silently come back None instead)."""
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            exr = Path(td) / "c.1001.exr"; exr.write_bytes(b"x" * 20)
+
+            def boom(preview, provenance, on="preview"):
+                raise RuntimeError("simulated persistent stamp failure")
+
+            pctx.kitsu.stamp_provenance = boom
+            with self.assertLogs("square.services.media", level="WARNING") as cm:
+                r = media.publish(pctx, shot, "CompRender", comp, files=[str(exr)],
+                                  proxy_dry_run=True)
+            self.assertIsNotNone(r.preview)           # the preview itself is NOT lost
+            self.assertIn("could not stamp provenance", "\n".join(cm.output))
+            self.assertEqual(len(pctx.kitsu.previews), 1)
 
 
 class TestReview(unittest.TestCase):

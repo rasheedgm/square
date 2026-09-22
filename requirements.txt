@@ -11,7 +11,6 @@ pillow>=10.0.0
 xxhash>=3.3.0
 imageio-ffmpeg>=0.4.8
 OpenImageIO>=2.4
-keyring>=24            # optional -- JWT cache falls back to a 0600 file without it
 pyyaml>=6.0
 
 # desktop tools (ingest_tool, config_editor, review_player, ...) additionally

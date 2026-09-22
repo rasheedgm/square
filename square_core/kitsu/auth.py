@@ -5,14 +5,19 @@ tokens; `cached_session(host)` returns them if still usable, else None. The
 *tool* is what prompts for credentials -- `PipelineContext.connect()` raises
 `NeedsLogin` and the tool calls `login()` then retries.
 
-Cache: always a 0600 JSON file under `$SQUARE_STATE_DIR` or `~/.square/`, PLUS
-the OS keyring when `keyring` is importable (preferred on read, when present).
-The file is never skipped just because keyring succeeded -- an embedded DCC
-interpreter (Nuke, xStudio) deliberately never gets `keyring` (see
-requirements-dcc.txt: pure-Python only), so it can only ever read a session
-through the file; a desktop tool's login, wherever it happens, has to leave
-one there too, not just in Credential Manager. Farm nodes set
-`SQUARE_KITSU_TOKEN` directly and never touch either store.
+Cache: a single 0600 JSON file under `$SQUARE_STATE_DIR` or `~/.square/` --
+that's it, no OS keyring. This used to also write/read the OS keyring
+(preferred on read, when importable) alongside the file, since an embedded
+DCC interpreter (Nuke, xStudio; see requirements-dcc.txt: pure-Python only)
+can never `import keyring` at all and would otherwise only ever see the file.
+That asymmetry was itself a real bug: a keyring-capable tool's sign_out()
+only clears the file's entry (this module's own forget()/store_session()
+always did), but a DIFFERENT keyring-capable tool's very next read re-merged
+the STALE, still-present keyring entry back on top of the now-cleared file --
+so signing out in one tool left every other tool still seeing the old user.
+One store means one truth for every tool, including the ones that can never
+see a keyring at all. Farm nodes set `SQUARE_KITSU_TOKEN` directly and never
+touch this file.
 """
 
 from __future__ import annotations
@@ -21,8 +26,6 @@ import json
 import os
 import stat
 from pathlib import Path
-
-_SERVICE = "square-pipeline"
 
 
 def _state_dir() -> Path:
@@ -63,44 +66,18 @@ def _load_all() -> dict:
     env = os.environ.get("SQUARE_KITSU_TOKEN")
     if env:
         return {"__env__": {"access_token": env, "refresh_token": ""}}
-    # file first (the portable baseline every interpreter can read -- no
-    # embedded-DCC interpreter, e.g. Nuke's or xStudio's, ships `keyring`;
-    # see requirements-dcc.txt), then keyring on top where it's available and
-    # actually has an entry -- it's the preferred store when both exist.
-    out: dict = {}
     try:
-        out.update(json.loads(_file().read_text(encoding="utf-8")))
+        return dict(json.loads(_file().read_text(encoding="utf-8")))
     except Exception:
-        pass
-    try:
-        import keyring  # type: ignore
-
-        blob = keyring.get_password(_SERVICE, "sessions")
-        if blob:
-            out.update(json.loads(blob))
-    except Exception:
-        pass
-    return out
+        return {}
 
 
 def _save_all(data: dict) -> None:
-    """Always write the file, keyring or not: a normal desktop tool's login
-    (in an environment with `keyring`, e.g. the studio's own venv) must still
-    leave something an embedded DCC interpreter WITHOUT keyring can read --
-    that gap is exactly why Nuke reported "not logged in" despite a perfectly
-    valid cached session sitting in Windows Credential Manager, unreachable
-    from a Python that can't `import keyring` at all."""
     payload = json.dumps({k: v for k, v in data.items() if k != "__env__"})
     f = _file()
     f.write_text(payload, encoding="utf-8")
     try:
         f.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    except Exception:
-        pass
-    try:
-        import keyring  # type: ignore
-
-        keyring.set_password(_SERVICE, "sessions", payload)
     except Exception:
         pass
 

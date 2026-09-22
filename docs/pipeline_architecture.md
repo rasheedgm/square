@@ -66,7 +66,7 @@ drives it). Status-driven follow-on effects are left to Kitsu's own automation.
 ┌───────────────┴──────────────────────────────────────────────┐
 │  square_core/kitsu/    the ONE package that imports gazu      │
 │    api.py     reads/writes, version tracking, upload          │
-│    auth.py    JWT cache / keyring (non-interactive)           │
+│    auth.py    JWT cache -- session file (non-interactive)     │
 │    offline.py no-op stand-in (work-to-NAS without Kitsu)      │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -171,7 +171,7 @@ Rough surface (grows as services need it — not built up front):
 
 ```
 kitsu/api.py
-  # identity  (auth.py owns the JWT cache / keyring; see §9, §13)
+  # identity  (auth.py owns the JWT cache -- session file; see §9, §13)
   attach(host, session) / current_user()
   # entities
   projects(status=) / project(ref)
@@ -290,7 +290,7 @@ parallel pipeline database.
 | Media type | Kitsu **output type** |
 | Task types / statuses / status automation | Kitsu — via a **project template** (§5.2) |
 | Naming templates, folder skeleton, ingest media-type map, client presets, colorspace | **ProjectConfig** — `{project_root}/_pipeline/project_config.json` |
-| Kitsu host, NAS roots, studio defaults | **StudioConfig** — per install (creds → OS keyring, §13) |
+| Kitsu host, NAS roots, studio defaults | **StudioConfig** — per install (creds → session file, §13) |
 
 `ProjectConfig` holds the naming/path templates the `PathResolver` consumes, the
 folder-skeleton list, per-media-type ingest landing paths, client delivery
@@ -475,7 +475,7 @@ class PipelineContext:
         if offline:
             api = kitsu.offline.OfflineApi()
         else:
-            sess = kitsu.auth.cached_session()          # keyring / ~/.square
+            sess = kitsu.auth.cached_session()          # ~/.square session file
             if sess is None:
                 raise NeedsLogin(studio.kitsu_host)     # tool catches, prompts, retries
             api = kitsu.api.attach(studio.kitsu_host, sess)
@@ -517,7 +517,7 @@ square_core/
   kitsu/
     api.py             the one gazu importer     (from kitsu_gateway + kitsu_recorder)
     offline.py         no-op stand-in            (from NullKitsuGateway)
-    auth.py            JWT cache / keyring (non-interactive)
+    auth.py            JWT cache -- session file (non-interactive)
   services/
     projects.py  breakdown.py  work.py  review.py  delivery.py  context.py
     ingest.py          (thin slice only; added when tool #8 needs it)

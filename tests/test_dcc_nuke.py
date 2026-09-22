@@ -121,6 +121,18 @@ class TestOpsCaching(unittest.TestCase):
             ops.output_versions(_t(), "CompRender")
             self.assertEqual(len(calls), 2)
 
+    def test_refresh_forces_a_live_fetch_on_the_next_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            calls = _count_calls(api, "output_files")
+            ops.output_versions(_t(), "CompRender")
+            self.assertEqual(len(calls), 1)
+            ops.output_versions(_t(), "CompRender")
+            self.assertEqual(len(calls), 1)             # still cached
+            ops.refresh(_t())
+            ops.output_versions(_t(), "CompRender")
+            self.assertEqual(len(calls), 2)             # forced a real re-fetch
+
 
 class TestOpsWorkfiles(unittest.TestCase):
     def test_minor_major_save_and_versions(self):
@@ -275,6 +287,78 @@ class TestNewVsSyncVersion(unittest.TestCase):
             info = ops.resolve_output_path(_t(), "CompRender", SYNC_VERSION)
             self.assertEqual(info["version"], 1)
             self.assertTrue(info["locked"])
+
+    def test_sync_targets_the_actually_open_script_not_kitsus_latest(self):
+        """Regression: (sync) used to always chase work.current_workfile_major()
+        (Kitsu's registered latest) regardless of what's actually open --
+        wrong the moment two majors exist and the artist still has the older
+        one open (e.g. a teammate bumped the major elsewhere, or this is a
+        second, older session)."""
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            t1 = ops.next_save(_t(), bump="major")          # major 1
+            Path(t1.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t1.path).write_text("v1", encoding="utf-8")
+            ops.register_major(_t(), t1)
+            t2 = ops.next_save(_t(), bump="major")          # major 2, registered separately
+            Path(t2.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t2.path).write_text("v2", encoding="utf-8")
+            ops.register_major(_t(), t2)
+            self.assertEqual(ops.workfile_major(_t()), 2)   # Kitsu's own "latest"
+
+            info = ops.resolve_output_path(_t(), "CompRender", SYNC_VERSION,
+                                           open_script_path=t1.path)
+            self.assertEqual(info["version"], 1)            # matches what's actually open
+
+            # no open script given at all -- falls back to Kitsu's latest, same as before
+            info2 = ops.resolve_output_path(_t(), "CompRender", SYNC_VERSION)
+            self.assertEqual(info2["version"], 2)
+
+
+class TestNameStreamsAndIdentify(unittest.TestCase):
+    def test_name_streams_always_includes_main(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            self.assertEqual(ops.name_streams(_t(), "Precomp"), ["main"])
+
+    def test_name_streams_lists_published_names(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            api.outputs.append({"output_type": "Precomp", "revision": 1, "name": "fg",
+                                "representation": "exr", "path": "X:/o/fg_v001", "data": {}})
+            api.outputs.append({"output_type": "Precomp", "revision": 1, "name": "bg",
+                                "representation": "exr", "path": "X:/o/bg_v001", "data": {}})
+            self.assertEqual(ops.name_streams(_t(), "Precomp"), ["bg", "fg", "main"])
+
+    def test_identify_open_script_matches_the_right_name_stream(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            t = ops.next_save(_t(), name="fg", bump="major")
+            Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t.path).write_text("x", encoding="utf-8")
+            ops.register_major(_t(), t, name="fg")
+            ident = ops.identify_open_script(_t(), t.path)
+            self.assertEqual(ident, ("fg", 1, 1))
+
+    def test_identify_open_script_none_for_unsaved(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            self.assertIsNone(ops.identify_open_script(_t(), ""))
+            self.assertIsNone(ops.identify_open_script(_t(), "X:/scratch/untitled.nk"))
+
+
+class TestVersionFromOutputPath(unittest.TestCase):
+    def test_parses_the_version_directory_segment(self):
+        from tools.dcc.nuke.ops import version_from_output_path
+        self.assertEqual(version_from_output_path(
+            "X:/ABC/SQ010/SH0100/output/comp/v004/exr/x.1001.exr"), 4)
+        self.assertEqual(version_from_output_path(
+            "X:/ABC/SQ010/SH0100/output/comp/v004/exr/x.####.exr".replace("/", "\\")), 4)
+
+    def test_returns_none_when_not_found(self):
+        from tools.dcc.nuke.ops import version_from_output_path
+        self.assertIsNone(version_from_output_path(""))
+        self.assertIsNone(version_from_output_path("X:/no/version/here.exr"))
 
 
 class TestRenderedSnapshotIntegration(unittest.TestCase):
@@ -474,6 +558,16 @@ class _Node:
         self._knobs[knob.name()] = knob
 
 
+class _FakeRoot:
+    """Stands in for nuke.root() -- only .name() (the open script's path) is
+    needed by anything gizmos.py touches."""
+    def __init__(self):
+        self._name = ""
+
+    def name(self):
+        return self._name
+
+
 class _FakeNuke:
     STARTLINE = 1  # real nuke.STARTLINE's actual value doesn't matter to _Knob's no-op
 
@@ -481,6 +575,10 @@ class _FakeNuke:
         self.created = []
         self._this_node = None
         self._this_knob = None
+        self._root = _FakeRoot()
+
+    def root(self):
+        return self._root
 
     # node creation / knob factories
     def createNode(self, cls, inpanel=False):
@@ -555,6 +653,96 @@ class TestGizmos(unittest.TestCase):
             gizmos.on_knob_changed(nk)
             self.assertIn("SH0110", node["file"].value())
 
+    def test_shot_change_cascades_all_the_way_to_media_and_version(self):
+        """Regression: changing sq_shot resets sq_task programmatically (via
+        _repopulate_next_level), which never raises its own knobChanged in
+        real Nuke -- media type / name / version used to stay stale until
+        the artist happened to touch media type by hand. Before the fix,
+        only _repopulate_next_level ran here and output_files() was never
+        called at all until a separate media-type knobChanged came in."""
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            nk = _FakeNuke()
+            node = gizmos.create_square_write(nk)      # seeds for SH0100 already
+            calls = _count_calls(api, "output_files")
+
+            node["sq_shot"].setValue("SH0110")
+            nk._this_node, nk._this_knob = node, node["sq_shot"]
+            gizmos.on_knob_changed(nk)
+            self.assertGreaterEqual(len(calls), 1)
+
+    def test_sq_name_dropdown_lists_known_name_streams(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            api.outputs.append({"output_type": "CompRender", "revision": 1, "name": "fg",
+                                "representation": "exr", "path": "X:/o/fg_v001", "data": {}})
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertIn("fg", node["sq_name"].values())
+            self.assertIn("main", node["sq_name"].values())
+
+    def test_sq_name_typed_value_survives_repopulate(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            nk = _FakeNuke()
+            node = gizmos.create_square_write(nk)
+            node["sq_name"].setValue("keying")
+            nk._this_node, nk._this_knob = node, node["sq_name"]
+            gizmos.on_knob_changed(nk)
+            self.assertEqual(node["sq_name"].value(), "keying")
+            self.assertIn("keying", node["sq_name"].values())
+
+    def test_render_button_starts_its_own_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertTrue(node["sq_publish"]._startline)
+            self.assertFalse(node["sq_publish_only"]._startline)  # shares Render's line
+
+    def test_write_has_create_read_button_on_its_own_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertIn("sq_create_read", node.knobs())
+            self.assertTrue(node["sq_create_read"]._startline)
+
+    def test_refresh_button_exists_on_both_kinds(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            self.assertIn("sq_refresh", gizmos.create_square_write(_FakeNuke()).knobs())
+            self.assertIn("sq_refresh", gizmos.create_square_read(_FakeNuke()).knobs())
+
+    def test_refresh_node_drops_cache_and_reapplies(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            nk = _FakeNuke()
+            node = gizmos.create_square_write(nk)
+            self.assertNotIn("v007", node["sq_version"].values())
+            # simulate a publish that happened OUTSIDE this Nuke session --
+            # nothing in this session touches ops's cache for it
+            api.outputs.append({"output_type": "CompRender", "revision": 7, "name": "main",
+                                "representation": "exr", "path": "X:/o/v007", "data": {}})
+            nk._this_node = node
+            gizmos.refresh_node(nk, node)
+            self.assertIn("v007", node["sq_version"].values())
+
+    def test_apply_file_syncs_to_the_actually_open_script_not_kitsus_latest(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            t1 = ops.next_save(_t(), bump="major")           # major 1
+            Path(t1.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t1.path).write_text("v1", encoding="utf-8")
+            ops.register_major(_t(), t1)
+            t2 = ops.next_save(_t(), bump="major")           # major 2, Kitsu's "latest"
+            Path(t2.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t2.path).write_text("v2", encoding="utf-8")
+            ops.register_major(_t(), t2)
+
+            nk = _FakeNuke()
+            nk._root._name = t1.path                          # artist has v1 open
+            node = gizmos.create_square_write(nk)
+            self.assertEqual(node["sq_version"].value(), SYNC_VERSION)
+            self.assertIn("v001", node["file"].value().replace("\\", "/"))
+
     def test_create_square_read_resolves_a_published_plate(self):
         with tempfile.TemporaryDirectory() as td:
             _, api = self._wire(td)
@@ -585,8 +773,10 @@ class TestGizmos(unittest.TestCase):
             self.assertTrue(node["sq_project"]._startline)        # starts the row
             for k in ("sq_episode", "sq_sequence", "sq_shot"):
                 self.assertFalse(node[k]._startline, f"{k} should share sq_project's line")
-            for k in ("sq_task", "sq_media_type", "sq_name", "sq_version"):
+            for k in ("sq_task", "sq_media_type", "sq_version"):
                 self.assertTrue(node[k]._startline, f"{k} should have its own line")
+            self.assertFalse(node["sq_name"]._startline, "sq_name should share Media type's line")
+            self.assertFalse(node["sq_refresh"]._startline, "sq_refresh should share Version's line")
 
     def test_write_checkboxes_each_get_their_own_line(self):
         with tempfile.TemporaryDirectory() as td:

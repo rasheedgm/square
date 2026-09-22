@@ -11,12 +11,16 @@ a task loads media types + versions. Node creation seeds the cascade from the
 launch context (`SQUARE_PROJECT` / `_SEQUENCE` / `_SHOT` / `_TASK`) but only
 walks as far as that context actually specifies -- a bare project with
 nothing else set costs exactly one Kitsu call (the project list) to create
-the node, not the whole tree underneath it.
+the node, not the whole tree underneath it. Any knob change anywhere in the
+cascade re-triggers everything below it -- picking a new shot refreshes media
+type / name / version right away, not only once media type is next touched
+by hand -- plus a manual **Refresh** button for state that changed outside
+this Nuke session entirely (a teammate's publish, a new lock).
 
-`sq_name` is free text, not a fixed dropdown -- a shot can have more than one
-parallel name-stream under the same media type (a Precomp "fg" / "bg" /
-"keying", not just "main"), and there's no fixed list of what those are ahead
-of time.
+`sq_name` lists known name-streams for the current (shot, media type) --
+e.g. a Precomp shot might have `fg` / `bg` / `keying`, not just `main` -- but
+accepts any typed value too, since a brand new stream has no Kitsu record to
+list yet.
 
 `menu.py` calls `register_callbacks()` once so hand-built or loaded nodes keep
 working.
@@ -74,11 +78,18 @@ def _create(nuke, node_class: str, kind: str):
             knob.clearFlag(nuke.STARTLINE)
         node.addKnob(knob)
 
-    name_knob = nuke.String_Knob("sq_name", "Name")
-    name_knob.setValue("main")
+    # shares Media type's line, no label of its own -- a name-stream pick is
+    # part of "what media", not a separate decision.
+    name_knob = nuke.Enumeration_Knob("sq_name", "", ["main"])
+    name_knob.clearFlag(nuke.STARTLINE)
     node.addKnob(name_knob)
 
     node.addKnob(nuke.Enumeration_Knob("sq_version", "Version", [""]))
+    refresh = nuke.PyScript_Knob(
+        "sq_refresh", "Refresh",
+        "from tools.dcc.nuke import gizmos; gizmos.refresh_node(nuke, nuke.thisNode())")
+    refresh.clearFlag(nuke.STARTLINE)      # sits beside the version it refreshes
+    node.addKnob(refresh)
 
     if kind == "write":
         prev = nuke.Boolean_Knob("sq_preview", "Make review preview")
@@ -89,15 +100,24 @@ def _create(nuke, node_class: str, kind: str):
         dop.setValue(True)
         dop.setFlag(nuke.STARTLINE)
         node.addKnob(dop)
-        node.addKnob(nuke.PyScript_Knob(
+        render_btn = nuke.PyScript_Knob(
             "sq_publish", "Render",
-            "from tools.dcc.nuke import panel; panel.render_and_publish_node(nuke.thisNode())"))
+            "from tools.dcc.nuke import panel; panel.render_and_publish_node(nuke.thisNode())")
+        render_btn.setFlag(nuke.STARTLINE)
+        node.addKnob(render_btn)
         # for frames that already exist (rendered with "Publish after
         # render" off, or via Nuke's own Render) -- publish them without
-        # re-rendering.
-        node.addKnob(nuke.PyScript_Knob(
+        # re-rendering. Shares Render's line.
+        publish_only_btn = nuke.PyScript_Knob(
             "sq_publish_only", "Publish",
-            "from tools.dcc.nuke import panel; panel.publish_dialog(nuke.thisNode())"))
+            "from tools.dcc.nuke import panel; panel.publish_dialog(nuke.thisNode())")
+        publish_only_btn.clearFlag(nuke.STARTLINE)
+        node.addKnob(publish_only_btn)
+        create_read_btn = nuke.PyScript_Knob(
+            "sq_create_read", "Create Read",
+            "from tools.dcc.nuke import panel; panel.create_read_from_write(nuke.thisNode())")
+        create_read_btn.setFlag(nuke.STARTLINE)
+        node.addKnob(create_read_btn)
     status = nuke.Text_Knob("sq_status", "")
     node.addKnob(status)
 
@@ -123,9 +143,26 @@ def on_knob_changed(nuke) -> None:
         return
     name = knob.name()
     if name in _HAS_NEXT_LEVEL:
+        # a cascade level changing (e.g. shot) reseeds every level below it
+        # (task) purely by script, which never raises its OWN knobChanged --
+        # so media type / name / version must be re-run here too, not just
+        # when the user happens to touch one of those knobs directly.
         _guard(node, _repopulate_next_level, nuke, node, name)
-    if name in ("sq_task", "sq_media_type", "sq_name"):
         _guard(node, _repopulate_media, nuke, node)
+    elif name in ("sq_task", "sq_media_type", "sq_name"):
+        _guard(node, _repopulate_media, nuke, node)
+    _guard(node, _apply_file, nuke, node)
+
+
+def refresh_node(nuke, node) -> None:
+    """The manual Refresh button: drops this shot's cached output-file lists
+    (another artist's publish or lock since this node was last touched
+    wouldn't otherwise be seen for the rest of the Nuke session) and
+    re-resolves media type / name / version / file from a live fetch."""
+    t = _target(node)
+    if t.complete:
+        _guard(node, lambda: _ops().refresh(t))
+    _guard(node, _repopulate_media, nuke, node)
     _guard(node, _apply_file, nuke, node)
 
 
@@ -156,6 +193,13 @@ def _kind(node) -> str:
 
 def _name(node) -> str:
     return (node["sq_name"].value() if "sq_name" in node.knobs() else "") or "main"
+
+
+def _open_script_path(nuke) -> str:
+    try:
+        return nuke.root().name() or ""
+    except Exception:
+        return ""
 
 
 def _populate(nuke, node, t: Target) -> None:
@@ -239,6 +283,7 @@ def _repopulate_media(nuke, node) -> None:
     mt = node["sq_media_type"].value()
     if not mt:
         return
+    _set_name_values(node, ops.name_streams(t, mt))
     stream = _name(node)
     if kind == "write":
         vs = [f"v{o.revision:03d}" for o in reversed(ops.output_versions(t, mt, name=stream))]
@@ -262,7 +307,8 @@ def _apply_file(nuke, node) -> None:
     stream = _name(node)
     ver = node["sq_version"].value().lstrip("v") if "sq_version" in node.knobs() else ""
     if _kind(node) == "write":
-        info = ops.resolve_output_path(t, mt, ver or SYNC_VERSION, name=stream)
+        info = ops.resolve_output_path(t, mt, ver or SYNC_VERSION, name=stream,
+                                       open_script_path=_open_script_path(nuke))
         if info["locked"]:
             # a locked revision must not be renderable at all: blank `file`
             # so Nuke's OWN native render / farm submit can't silently
@@ -313,3 +359,16 @@ def _set_values(node, knob, values, selected="") -> None:
     node[knob].setValues([str(v) for v in (values or [""])])
     if selected and selected in values:
         node[knob].setValue(str(selected))
+
+
+def _set_name_values(node, names: list) -> None:
+    """Like _set_values(), but for sq_name specifically: whatever's already
+    typed/selected is kept even when it's not (yet) one of the known
+    streams `names` lists -- a brand new stream the artist just typed has no
+    Kitsu record to appear in that list until something publishes under it."""
+    if "sq_name" not in node.knobs():
+        return
+    current = node["sq_name"].value() or "main"
+    values = list(dict.fromkeys([current] + list(names or ["main"])))
+    node["sq_name"].setValues(values)
+    node["sq_name"].setValue(current)

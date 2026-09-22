@@ -47,6 +47,8 @@ whichever matches the current state.
 |---|---|
 | **Save Version…** (`Ctrl+Alt+S`) | the Save Version panel |
 | **Open Version…** (`Ctrl+Alt+O`) | the Open Version panel |
+| **Minor Up** | save the currently open script as the next minor, in place -- no picker |
+| **Major Up** | save the currently open script as a new major, in place -- no picker |
 | **SquareWrite** | a Write node with a Square tab |
 | **SquareRead** | a Read node with a Square tab |
 | **Render && Publish** | render the selected Write, then open the Publish panel |
@@ -54,13 +56,22 @@ whichever matches the current state.
 | **Sign In…** | the shared Kitsu login dialog -- shown only when signed out |
 | **Sign Out** | forgets the cached session (this machine only) -- shown only when signed in |
 
+**Minor Up** / **Major Up** act on whatever script is open right now, under
+whichever of its known name-streams that script's own path matches (falling
+back to `main` if it doesn't match any) -- the fast path for the common case;
+**Save Version…** remains for saving under a different project/shot/name than
+what's currently open.
+
 ## Publish
 
 Publishing always goes through the **Publish Output** panel — the cascade +
-media type + name + version (`(new)` / `(sync)` / re-render an existing one)
-+ a comment + a *make review preview* toggle, all pre-populated from the
-selected node (matching whatever it already resolved `file` to) and editable.
-It publishes:
+media type + name + version + a comment + a *make review preview* toggle,
+all editable. The version defaults to whatever's **already embedded in the
+source's own path** (every output nests under `.../v{version}/...`) — the
+frames are already sitting at that number, so that's what gets published,
+not a re-resolved guess; the panel says whether that version is already
+published (a re-publish) or brand new. `(new)` is still offered explicitly
+for claiming a fresh number instead. It publishes:
 
 - a **Write** — its `file` pattern over the script frame range
 - a **Read** — its `file` over the Read's range (register an external / delivered
@@ -69,8 +80,11 @@ It publishes:
 A SquareWrite's **Render** button renders over the script range then opens the
 panel; untick its **Publish after render** knob to just render (publish later
 via *Publish Output…*, or its own direct **Publish** button for frames that
-are already on disk). A locked target version is refused, and refused before
-you even get to render it — see *Locking* below.
+are already on disk). Its **Create Read** button drops a SquareRead pointed at
+exactly what it just rendered/published (same shot/task/media type/name/
+version) -- no re-navigating the cascade to check your own render. A locked
+target version is refused, and refused before you even get to render it — see
+*Locking* below.
 
 Every publish snapshots the currently-open script into that render's `.000`
 minor (see *Versions* below) — this is the actual provenance record of "the
@@ -114,14 +128,20 @@ working in.
 
 ### `(new)` vs `(sync)`
 
-The SquareWrite version dropdown (and the Publish panel's own version picker)
-offers two sentinels instead of one:
+The SquareWrite version dropdown offers two sentinels instead of one:
 
-- **`(sync)`** — the render/publish version always equals the *current
-  workfile major*; repeated test renders while iterating on the same major
-  just refresh that version's frames and its `.000` snapshot in place. Refused
-  outright if that major is **locked** (see below). This is the default, and
-  the closest match to "day to day" comping.
+- **`(sync)`** — the render version always equals the **actually open
+  script's own major** (parsed from its path, not just trusted from Kitsu);
+  repeated test renders while iterating on the same major just refresh that
+  version's frames and its `.000` snapshot in place. If the open script isn't
+  a recognized workfile for this shot/task, or Kitsu has no registered
+  major yet, it falls back to whatever Kitsu has registered as latest.
+  Refused outright if that major is **locked** (see below). This is the
+  default, and the closest match to "day to day" comping. This is why it's
+  "sync to the workfile I have open," not "sync to whatever Kitsu calls
+  latest" — those can differ, e.g. a teammate (or an earlier session of your
+  own) bumped the major elsewhere while this script stayed open on an older
+  one.
 - **`(new)`** — always the next-after-highest version for this
   `(shot, media type, name)`, ignoring the workfile major entirely — genuinely
   new numbers for genuinely new work, never blocked by a lock (nothing occupies
@@ -167,24 +187,32 @@ actually specifies -- a bare project stops after loading episode + sequence;
 picking a sequence by hand loads shots; picking a shot loads tasks; picking a
 task loads media types and versions. The usual case (launched from the
 workfile manager with a full target already known) still resolves the whole
-node in one pass. `NukeOps` also caches each project's shot list, each shot's
-task list, and each shot's output-file list for the life of the Nuke
-session -- the same shot/task data used to get re-fetched from Kitsu 5-7
-times over for a single node, which was the actual cause of "creating a Read
-or Write node is slow."
+node in one pass. Changing any knob in that chain re-resolves everything
+below it automatically (picking a new shot immediately refreshes media type /
+name / version, not only once media type is next touched by hand), plus a
+**Refresh** button next to Version for state that changed outside this Nuke
+session entirely -- another artist's publish, a new lock -- which no knob
+change in this session would otherwise surface. `NukeOps` also caches each
+project's shot list, each shot's task list, and each shot's output-file list
+for the life of the Nuke session -- the same shot/task data used to get
+re-fetched from Kitsu 5-7 times over for a single node, which was the actual
+cause of "creating a Read or Write node is slow"; **Refresh** is the explicit
+escape hatch from that caching.
 
 - **SquareWrite** — media type lists only `renderable` types (`CompRender`,
-  `Precomp`, …); **Name** is free text (default `main`) for shots with more
-  than one parallel stream under the same media type. Version is `(new)` /
-  `(sync)` / an explicit existing version to re-render in place — see
-  *Versions* above for what each means and how locking blocks a render.
-  `Make preview on publish` toggles the review proxy. A **Render** button
-  renders locally and (unless *Publish after render* is off) publishes in one
-  step; a separate **Publish** button publishes frames that are already on
-  disk without re-rendering.
+  `Precomp`, …); **Name** shares Media type's line and lists known
+  name-streams already published under that media type (`main`, `fg`, `bg`,
+  …) but accepts any typed value too, since a brand new stream has no Kitsu
+  record to list yet. Version is `(new)` / `(sync)` / an explicit existing
+  version to re-render in place — see *Versions* above for what each means
+  and how locking blocks a render. `Make preview on publish` toggles the
+  review proxy. A **Render** button renders locally and (unless *Publish
+  after render* is off) publishes in one step; **Publish** publishes frames
+  that are already on disk without re-rendering; **Create Read** drops a
+  SquareRead pointed at exactly what this Write is currently resolved to.
 - **SquareRead** — media type lists delivery + publish types (plates, elements,
-  renders); **Name** is the same free-text stream selector. Resolves the path,
-  colorspace, and frame range for the chosen version.
+  renders); **Name** is the same known-streams-plus-free-text selector.
+  Resolves the path, colorspace, and frame range for the chosen version.
 
 ## Layout
 

@@ -45,6 +45,8 @@ def build() -> None:
     menu = top.addMenu(panel.menu_title())
     menu.addCommand("Save Version…", _P.format("save_version"), "ctrl+alt+s")
     menu.addCommand("Open Version…", _P.format("open_version"), "ctrl+alt+o")
+    menu.addCommand("Minor Up", _P.format("minor_up"))
+    menu.addCommand("Major Up", _P.format("major_up"))
     menu.addSeparator()
     menu.addCommand("SquareWrite", _P.format("create_square_write"))
     menu.addCommand("SquareRead", _P.format("create_square_read"))

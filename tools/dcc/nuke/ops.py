@@ -23,6 +23,20 @@ DEFAULT_OUTPUT_TYPE = "CompRender"
 NEW_VERSION = "(new)"     # always the next-after-highest number, ignoring workfile major
 SYNC_VERSION = "(sync)"   # always the current workfile major, re-rendering in place
 
+_VERSION_DIR = re.compile(r"[\\/]v(\d+)[\\/]")
+
+
+def version_from_output_path(path: str) -> "int | None":
+    """The version embedded in a resolved output path's own directory segment
+    -- every output template nests files under `.../v{version}/...` -- so a
+    caller that already has a rendered/resolved path (e.g. a Write node's
+    `file` knob) can read back which version it's actually sitting at
+    without re-resolving one of its own that might not agree."""
+    if not path:
+        return None
+    m = _VERSION_DIR.search(path)
+    return int(m.group(1)) if m else None
+
 
 class OpsError(RuntimeError):
     """A pipeline operation could not complete -- the panel shows the message."""
@@ -114,6 +128,16 @@ class NukeOps:
             self._outputs_cache[key] = work.outputs(pctx, shot, media_type, name=name)
         return self._outputs_cache[key]
 
+    def refresh(self, t: Target) -> None:
+        """Drops this shot's cached output-file lists so the next lookup is a
+        live Kitsu fetch -- an explicit escape hatch for state that changed
+        outside this Nuke session (a teammate's publish, a new lock) that no
+        knobChanged in this session would ever see otherwise."""
+        r = self._resolve(t, need_task=False)
+        shot_id = getattr(r.shot, "id", None) or id(r.shot)
+        self._outputs_cache = {k: v for k, v in self._outputs_cache.items()
+                               if k[0] != shot_id}
+
     def _resolve(self, t: Target, *, need_task: bool = True) -> Resolved:
         if not (t.project and t.sequence and t.shot):
             raise OpsError("Pick a project, sequence and shot first.")
@@ -187,6 +211,43 @@ class NukeOps:
         r = self._resolve(t)
         return work.current_workfile_major(r.pctx, r.task, name=name)
 
+    def name_streams(self, t: Target, media_type: str) -> list[str]:
+        """Known name-streams already published under (shot, media_type) --
+        e.g. a Precomp shot with `fg`/`bg`/`keying` renders. Always includes
+        `main`, even on a shot with nothing published yet, since that's
+        still the natural first pick."""
+        r = self._resolve(t, need_task=False)
+        names = {o.name or "main" for o in self._outputs(r.pctx, r.shot, media_type, "")}
+        names.add("main")
+        return sorted(names)
+
+    def identify_open_script(self, t: Target, open_script_path: str):
+        """(name, major, minor) for the currently open Nuke script, if it
+        matches one of this task's known name-streams. None if unsaved,
+        foreign, or unrecognized -- callers fall back to a default name."""
+        if not open_script_path:
+            return None
+        r = self._resolve(t)
+        for name in self.workfile_names(t) or ["main"]:
+            parsed = work.verify_open_script(r.pctx, r.shot, r.task, open_script_path,
+                                             name=name, media_type=WORKFILE_MEDIA_TYPE)
+            if parsed is not None:
+                return name, parsed[0], parsed[1]
+        return None
+
+    def _sync_major(self, r: Resolved, name: str, open_script_path: str) -> int:
+        """The number `(sync)` targets: the ACTUALLY open script's own major
+        when it's a real, verified workfile for this shot/task/name -- not
+        just whatever Kitsu happens to have registered as latest, which can
+        be a different, newer major someone else (or an earlier session)
+        already bumped to while this script stayed open on an older one."""
+        if open_script_path:
+            parsed = work.verify_open_script(r.pctx, r.shot, r.task, open_script_path,
+                                             name=name, media_type=WORKFILE_MEDIA_TYPE)
+            if parsed is not None:
+                return parsed[0]
+        return work.current_workfile_major(r.pctx, r.task, name=name)
+
     def verify_workfile_for_render(self, t: Target, *, name: str = "main",
                                    open_script_path: str = "", sync: bool = False) -> str:
         """Empty string if `open_script_path` is fine to render from; otherwise
@@ -211,15 +272,17 @@ class NukeOps:
         return ""
 
     def resolve_output_path(self, t: Target, media_type: str, version, *,
-                            name: str = "main") -> dict:
+                            name: str = "main", open_script_path: str = "") -> dict:
         """Where a SquareWrite should render.
 
         `version` = NEW_VERSION -> always the next-after-highest number for
         (shot, media_type, name), ignoring the workfile major entirely --
         can never collide with a lock, nothing occupies that number yet.
-        `version` = SYNC_VERSION (or empty/None) -> the current workfile
-        major, re-rendering in place if that revision already has output,
-        refused if it's locked. `version` = an int -> that existing version
+        `version` = SYNC_VERSION (or empty/None) -> the ACTUALLY open
+        script's own major when `open_script_path` verifies as one (falling
+        back to whatever Kitsu has registered as latest otherwise),
+        re-rendering in place if that revision already has output, refused
+        if it's locked. `version` = an int -> that existing version
         explicitly (a re-render). Returns the #### path, the version, and
         whether it is locked.
         """
@@ -229,7 +292,7 @@ class NukeOps:
             rev = media.next_version(r.pctx, r.shot, media_type, r.task, name=name)
             locked = False
         elif version in (None, SYNC_VERSION, ""):
-            rev = (work.current_workfile_major(r.pctx, r.task, name=name)
+            rev = (self._sync_major(r, name, open_script_path)
                    or media.next_version(r.pctx, r.shot, media_type, r.task, name=name))
             locked = rev in existing and work.output_locked(existing[rev])
         else:
@@ -251,7 +314,7 @@ class NukeOps:
         if version == NEW_VERSION:
             rev = media.next_version(r.pctx, r.shot, media_type, r.task, name=name)
         elif version in (None, SYNC_VERSION, ""):
-            rev = (work.current_workfile_major(r.pctx, r.task, name=name)
+            rev = (self._sync_major(r, name, source_script_path)
                    or media.next_version(r.pctx, r.shot, media_type, r.task, name=name))
         else:
             rev = int(version)

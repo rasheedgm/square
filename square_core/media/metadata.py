@@ -4,7 +4,6 @@ import shutil
 import subprocess
 import json
 import logging
-from PIL import Image
 
 logger = logging.getLogger("SquareMetadata")
 
@@ -132,6 +131,10 @@ class MetadataExtractor:
     @staticmethod
     def _extract_with_pillow(filepath):
         """Standard raster formats Pillow can actually decode (EXR/DPX are NOT among them)."""
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
         ext = os.path.splitext(filepath)[1].lower()
         try:
             with Image.open(filepath) as img:

@@ -12,7 +12,7 @@ from square_core.errors import NeedsLogin
 
 from . import gizmos
 from .context import from_env, to_env
-from .ops import NEW_VERSION, SYNC_VERSION, NukeOps, OpsError
+from .ops import NEW_VERSION, SYNC_VERSION, NukeOps, OpsError, version_from_output_path
 
 _ops: NukeOps | None = None
 
@@ -348,6 +348,37 @@ class _SaveVersionPanel:
 
 
 # ---------------------------------------------------------------------------
+# Minor Up / Major Up -- one-click bumps on the CURRENTLY open script, no
+# picker needed (unlike Save Version…, which is for saving somewhere else)
+# ---------------------------------------------------------------------------
+
+@_guard
+def minor_up():
+    _bump_open_workfile("minor")
+
+
+@_guard
+def major_up():
+    _bump_open_workfile("major")
+
+
+def _bump_open_workfile(bump: str) -> None:
+    nuke = _nuke()
+    t = from_env()
+    if not t.complete:
+        raise OpsError("No Square context yet -- open or save a workfile via Square first.")
+    open_path = nuke.root().name()
+    ident = get_ops().identify_open_script(t, open_path)
+    name = ident[0] if ident else "main"
+    target = get_ops().next_save(t, name=name, bump=bump)
+    nuke.scriptSaveAs(target.path.replace("\\", "/"))
+    if target.is_new_major:
+        get_ops().register_major(t, target, name=name)
+    to_env(t)
+    _msg(f"Saved {target.label()}\n{target.path}")
+
+
+# ---------------------------------------------------------------------------
 # gizmos + render (menu commands)
 # ---------------------------------------------------------------------------
 
@@ -359,6 +390,33 @@ def create_square_write():
 @_guard
 def create_square_read():
     gizmos.create_square_read(_nuke())
+
+
+@_guard
+def create_read_from_write(node):
+    """A SquareRead pointed straight at what `node` (a SquareWrite) just
+    rendered/published -- same shot/task/media type/name, and the SPECIFIC
+    version `node["file"]` is resolved to right now (never (new)/(sync): a
+    Read needs a concrete, already-existing version to point at)."""
+    nuke = _nuke()
+    if gizmos.MARK not in node.knobs() or node[gizmos.MARK].value() != "write":
+        raise OpsError("Create Read needs a Square Write node.")
+    t, media_type, name, _preview, _v = _node_context(nuke, node)
+    if not (t.complete and media_type):
+        raise OpsError("Pick project / sequence / shot / task on the Write first.")
+    version = version_from_output_path(node["file"].value() or "")
+    if not version:
+        raise OpsError("This Write hasn't rendered or published yet -- no version to read.")
+
+    read = gizmos.create_square_read(nuke)
+    read["sq_media_type"].setValue(media_type)
+    read["sq_name"].setValue(name)
+    read["sq_version"].setValue(f"v{version:03d}")
+    gizmos._guard(read, gizmos._seed_cascade, nuke, read, t)
+    try:
+        read.setXYpos(node.xpos() + 120, node.ypos() + 80)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +451,16 @@ def _node_context(nuke, node):
     else:
         t, media_type, name, make_preview, version = from_env(), "CompRender", "main", True, ""
     return t, media_type, name, make_preview, version
+
+
+def _rendered_version_label(node) -> str:
+    """The version already embedded in `node`'s own `file` path (every output
+    template nests under `.../v{version}/...`), as a "vNNN" label -- or ""
+    if there's nothing resolved yet (a fresh node, or a Read)."""
+    if node is None or "file" not in node.knobs():
+        return ""
+    v = version_from_output_path(node["file"].value() or "")
+    return f"v{v:03d}" if v else ""
 
 
 def _node_frames(nuke, node):
@@ -457,12 +525,12 @@ class _PublishPanel:
         import nukescripts
         self.nuke, self.node = nuke, node
         ops = get_ops()
-        seed, mtype, name, preview, node_version = _node_context(nuke, node)
+        seed, mtype, name, preview, _node_version = _node_context(nuke, node)
 
         self.p = nukescripts.PythonPanel("Square — Publish Output", "com.square.publish")
         self.picker = _Picker(self.p, nuke, ops, with_name=True)
         self.k_mtype = nuke.Enumeration_Knob("mtype", "Media type", [""])
-        self.k_version = nuke.Enumeration_Knob("version", "Version", [NEW_VERSION, SYNC_VERSION])
+        self.k_version = nuke.Enumeration_Knob("version", "Version", [NEW_VERSION])
         self.k_comment = nuke.Multiline_Eval_String_Knob("comment", "Comment")
         self.k_preview = nuke.Boolean_Knob("preview", "Make review preview")
         self.k_src = nuke.Text_Knob("src", "Source")
@@ -475,11 +543,11 @@ class _PublishPanel:
             self.picker.k_name.setValue(name)
         self.p.knobChanged = self._changed
         self._want_mtype = mtype
-        # match whatever the node's own Square tab already resolved to
-        # (new)/(sync)/an explicit version -- the render that just happened
-        # (if any) landed at that version, and publish must target the same
-        # one rather than silently drifting to a different number.
-        self._want_version = node_version
+        # the frames on disk are already sitting at whatever version their
+        # OWN path says -- default to that directly (not (new)/(sync),
+        # which are for deciding where to RENDER, a question that's already
+        # settled by the time there's something on disk to publish).
+        self._want_version = _rendered_version_label(node)
         self._reload_types()
 
     def run(self):
@@ -519,17 +587,21 @@ class _PublishPanel:
                       reversed(get_ops().output_versions(t, mt, name=name))]
         except OpsError:
             pass
-        values = [NEW_VERSION, SYNC_VERSION] + vs
+        values = [NEW_VERSION] + vs
         # consumed once: after the artist picks their own version by hand,
         # further reloads (task/media-type edits) must respect that choice
-        # instead of snapping back to the node's original one every time.
+        # instead of snapping back to the rendered path's version every time.
         want = self._want_version if self._want_version else self.k_version.value()
         self._want_version = ""
         self.picker._set(self.k_version, values, want)
-        self.k_info.setValue({
-            NEW_VERSION: "(new) = a brand new version, ignoring the workfile major",
-            SYNC_VERSION: "(sync) = the current workfile major",
-        }.get(self.k_version.value(), "re-render of an existing version"))
+        v = self.k_version.value()
+        if v == NEW_VERSION:
+            info = "(new) = a brand new version"
+        elif v in vs:
+            info = f"{v} is already published -- this will re-publish it"
+        else:
+            info = f"{v} -- not yet published"
+        self.k_info.setValue(info)
 
     # ---- do it ----
     def _publish(self):
@@ -543,7 +615,7 @@ class _PublishPanel:
         if missing:
             raise OpsError(f"{len(missing)} frame(s) not on disk yet (e.g. {missing[0]}).")
         v = self.k_version.value()
-        if v in (NEW_VERSION, SYNC_VERSION):
+        if v == NEW_VERSION:
             version = v
         elif v in ("", None):
             version = None

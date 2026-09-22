@@ -82,6 +82,13 @@ def _pctx(nas, kitsu=None):
     return ctx.project("ABC")
 
 
+def _task(td):
+    pctx = _pctx(td)
+    shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+    task = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+    return pctx, shot, task
+
+
 class TestMediaPublish(unittest.TestCase):
     def test_publish_copies_frames_and_records(self):
         with tempfile.TemporaryDirectory() as td:
@@ -203,10 +210,7 @@ class TestReview(unittest.TestCase):
 
 class TestWorkfiles(unittest.TestCase):
     def _task(self, td):
-        pctx = _pctx(td)
-        shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
-        task = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
-        return pctx, shot, task
+        return _task(td)
 
     def _save_minor(self, target):
         Path(target.path).parent.mkdir(parents=True, exist_ok=True)
@@ -328,6 +332,105 @@ class TestWorkfiles(unittest.TestCase):
                                 make_review_proxy=False)
             deps = pctx.kitsu.outputs[0]["data"]["square"]["inputs"]
             self.assertIn({"kind": "working", "id": "wf-7"}, deps)
+
+
+class TestOpenScriptVerification(unittest.TestCase):
+    """verify_open_script() -- is the script actually open really OUR
+    workfile for this shot/task, at some real major/minor? Used before
+    trusting Kitsu's "current major" for a Sync render."""
+
+    def _task(self, td):
+        return _task(td)
+
+    def test_parse_workfile_version(self):
+        self.assertEqual(work.parse_workfile_version("X:/j/ABC_SQ010_SH0100_comp_main_v004.002.nk"),
+                         (4, 2))
+        self.assertIsNone(work.parse_workfile_version("X:/j/not_our_naming.nk"))
+
+    def test_verify_open_script_matches_a_real_registered_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            tmpl = Path(td) / "t.nk"; tmpl.write_text("x", encoding="utf-8")
+            slot = work.new_workfile(pctx, shot, task, template=str(tmpl))
+            self.assertEqual(work.verify_open_script(pctx, shot, task, slot.path),
+                             (1, 1))
+
+    def test_verify_open_script_rejects_a_foreign_looking_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            # matches the bare _vNNN.NNN. pattern but for a DIFFERENT shot --
+            # must not be accepted just because the shape looks right
+            foreign = Path(td) / "OTHER_SQ999_SH9999_comp_main_v001.001.nk"
+            foreign.write_text("x", encoding="utf-8")
+            self.assertIsNone(work.verify_open_script(pctx, shot, task, str(foreign)))
+
+    def test_verify_open_script_rejects_unsaved_or_unrelated_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            self.assertIsNone(work.verify_open_script(pctx, shot, task, ""))
+            self.assertIsNone(work.verify_open_script(pctx, shot, task, "X:/scratch/untitled.nk"))
+
+
+class TestRenderedSnapshot(unittest.TestCase):
+    """snapshot_rendered_script() (the read-only v{major}.000) and
+    register_major_at() (registering an explicit, possibly skipped-ahead,
+    major so a "(new)" render's output has a real workfile to point at)."""
+
+    def _task(self, td):
+        return _task(td)
+
+    def test_snapshot_is_written_and_made_read_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            src = Path(td) / "open_script_v001.004.nk"
+            src.write_text("state at .004", encoding="utf-8")
+
+            dest = work.snapshot_rendered_script(pctx, shot, task, source_path=str(src), major=1)
+
+            self.assertTrue(Path(dest).name.endswith("v001.000.nk"))
+            self.assertEqual(Path(dest).read_text(encoding="utf-8"), "state at .004")
+            # a plain write must fail -- read-only actually took effect
+            with self.assertRaises(OSError):
+                Path(dest).write_text("accidental ctrl+s", encoding="utf-8")
+
+    def test_snapshot_overwrite_goes_writable_then_back_to_read_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            src1 = Path(td) / "s1.nk"; src1.write_text("first render", encoding="utf-8")
+            src2 = Path(td) / "s2.nk"; src2.write_text("second render", encoding="utf-8")
+
+            work.snapshot_rendered_script(pctx, shot, task, source_path=str(src1), major=1)
+            dest = work.snapshot_rendered_script(pctx, shot, task, source_path=str(src2), major=1)
+
+            self.assertEqual(Path(dest).read_text(encoding="utf-8"), "second render")
+            with self.assertRaises(OSError):
+                Path(dest).write_text("still protected", encoding="utf-8")
+
+    def test_register_major_at_explicit_number_skips_ahead(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            tmpl = Path(td) / "t.nk"; tmpl.write_text("x", encoding="utf-8")
+            work.new_workfile(pctx, shot, task, template=str(tmpl))   # major 1
+            self.assertEqual(work.current_workfile_major(pctx, task), 1)
+
+            snap = work.snapshot_rendered_script(
+                pctx, shot, task, source_path=str(tmpl), major=6)
+            rec = work.register_major_at(pctx, shot, task, 6, snap)
+
+            self.assertEqual(work.current_workfile_major(pctx, task), 6)
+            self.assertEqual(rec.revision, 6)
+            self.assertEqual(rec.path, snap)
+
+    def test_register_major_at_is_a_no_op_if_already_registered(self):
+        with tempfile.TemporaryDirectory() as td:
+            pctx, shot, task = self._task(td)
+            tmpl = Path(td) / "t.nk"; tmpl.write_text("x", encoding="utf-8")
+            slot = work.new_workfile(pctx, shot, task, template=str(tmpl))   # major 1
+
+            before = len(pctx.kitsu.workfiles)
+            rec = work.register_major_at(pctx, shot, task, 1, slot.path)
+            self.assertEqual(len(pctx.kitsu.workfiles), before)     # nothing new registered
+            self.assertEqual(rec.revision, 1)
 
 
 if __name__ == "__main__":

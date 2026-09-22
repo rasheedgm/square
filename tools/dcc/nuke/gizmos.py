@@ -13,6 +13,11 @@ walks as far as that context actually specifies -- a bare project with
 nothing else set costs exactly one Kitsu call (the project list) to create
 the node, not the whole tree underneath it.
 
+`sq_name` is free text, not a fixed dropdown -- a shot can have more than one
+parallel name-stream under the same media type (a Precomp "fg" / "bg" /
+"keying", not just "main"), and there's no fixed list of what those are ahead
+of time.
+
 `menu.py` calls `register_callbacks()` once so hand-built or loaded nodes keep
 working.
 """
@@ -20,7 +25,7 @@ working.
 from __future__ import annotations
 
 from .context import Target, from_env
-from .ops import NEW_VERSION, OpsError
+from .ops import NEW_VERSION, SYNC_VERSION, OpsError
 
 MARK = "sq_kind"                    # hidden String knob: "read" | "write"
 _CASCADE = ["sq_project", "sq_episode", "sq_sequence", "sq_shot", "sq_task"]
@@ -56,8 +61,7 @@ def _create(nuke, node_class: str, kind: str):
 
     labels = [("sq_project", "Project"), ("sq_episode", "Episode"),
               ("sq_sequence", "Sequence"), ("sq_shot", "Shot"), ("sq_task", "Task"),
-              ("sq_media_type", "Media type"), ("sq_name", "Name"),
-              ("sq_version", "Version")]
+              ("sq_media_type", "Media type")]
     # project / episode / sequence / shot read as one unit -- "the context"
     # -- far more often than any of them is looked at alone, so they share
     # one line; task onward each keep their own (task names and version
@@ -69,6 +73,13 @@ def _create(nuke, node_class: str, kind: str):
         if name in _SAME_LINE_AS_PREVIOUS:
             knob.clearFlag(nuke.STARTLINE)
         node.addKnob(knob)
+
+    name_knob = nuke.String_Knob("sq_name", "Name")
+    name_knob.setValue("main")
+    node.addKnob(name_knob)
+
+    node.addKnob(nuke.Enumeration_Knob("sq_version", "Version", [""]))
+
     if kind == "write":
         prev = nuke.Boolean_Knob("sq_preview", "Make review preview")
         prev.setValue(True)
@@ -83,9 +94,7 @@ def _create(nuke, node_class: str, kind: str):
             "from tools.dcc.nuke import panel; panel.render_and_publish_node(nuke.thisNode())"))
         # for frames that already exist (rendered with "Publish after
         # render" off, or via Nuke's own Render) -- publish them without
-        # re-rendering. Always shown for now; whether/when to hide it once
-        # a version is already published is part of the version-handling
-        # pass to come, not this UI-layout one.
+        # re-rendering.
         node.addKnob(nuke.PyScript_Knob(
             "sq_publish_only", "Publish",
             "from tools.dcc.nuke import panel; panel.publish_dialog(nuke.thisNode())"))
@@ -115,7 +124,7 @@ def on_knob_changed(nuke) -> None:
     name = knob.name()
     if name in _HAS_NEXT_LEVEL:
         _guard(node, _repopulate_next_level, nuke, node, name)
-    if name in ("sq_task", "sq_media_type"):
+    if name in ("sq_task", "sq_media_type", "sq_name"):
         _guard(node, _repopulate_media, nuke, node)
     _guard(node, _apply_file, nuke, node)
 
@@ -143,6 +152,10 @@ def _target(node) -> Target:
 
 def _kind(node) -> str:
     return node[MARK].value() if MARK in node.knobs() else ""
+
+
+def _name(node) -> str:
+    return (node["sq_name"].value() if "sq_name" in node.knobs() else "") or "main"
 
 
 def _populate(nuke, node, t: Target) -> None:
@@ -226,13 +239,14 @@ def _repopulate_media(nuke, node) -> None:
     mt = node["sq_media_type"].value()
     if not mt:
         return
+    stream = _name(node)
     if kind == "write":
-        vs = [f"v{o.revision:03d}" for o in reversed(ops.output_versions(t, mt))]
-        _set_values(node, "sq_version", [NEW_VERSION] + vs, node["sq_version"].value() or NEW_VERSION)
-        _set_values(node, "sq_name", ["main"], "main")
+        vs = [f"v{o.revision:03d}" for o in reversed(ops.output_versions(t, mt, name=stream))]
+        _set_values(node, "sq_version", [NEW_VERSION, SYNC_VERSION] + vs,
+                    node["sq_version"].value() or SYNC_VERSION)
     else:
         try:
-            info = ops.resolve_read_path(t, mt, "latest")
+            info = ops.resolve_read_path(t, mt, "latest", name=stream)
             vs = [f"v{n:03d}" for n in info["versions"]]
         except OpsError:
             vs = [""]
@@ -245,18 +259,31 @@ def _apply_file(nuke, node) -> None:
     if not (t.complete and mt):
         return
     ops = _ops()
+    stream = _name(node)
     ver = node["sq_version"].value().lstrip("v") if "sq_version" in node.knobs() else ""
     if _kind(node) == "write":
-        info = ops.resolve_output_path(t, mt, ver or NEW_VERSION)
+        info = ops.resolve_output_path(t, mt, ver or SYNC_VERSION, name=stream)
+        if info["locked"]:
+            # a locked revision must not be renderable at all: blank `file`
+            # so Nuke's OWN native render / farm submit can't silently
+            # overwrite it either, not just our Render/Publish buttons
+            # (which already refuse via publish_render()'s own lock check).
+            _set(node, "file", "")
+            _set(node, "sq_status", f"[Square] v{info['version']:03d} is LOCKED — "
+                 "pick (new) or a different version")
+            _set_enabled(node, "sq_publish", False)
+            _set_enabled(node, "sq_publish_only", False)
+            return
+        _set_enabled(node, "sq_publish", True)
+        _set_enabled(node, "sq_publish_only", True)
         _set(node, "file", info["path"].replace("\\", "/"))
         _set(node, "file_type", "exr")
         _set(node, "create_directories", True)
         if info["colorspace"]:
             _set(node, "colorspace", info["colorspace"])
-        _set(node, "sq_status", "[Square] LOCKED — pick (new)" if info["locked"]
-             else f"[Square] -> v{info['version']:03d}")
+        _set(node, "sq_status", f"[Square] -> v{info['version']:03d}")
     else:
-        info = ops.resolve_read_path(t, mt, ver or "latest")
+        info = ops.resolve_read_path(t, mt, ver or "latest", name=stream)
         _set(node, "file", info["path"].replace("\\", "/"))
         if info["colorspace"]:
             _set(node, "colorspace", info["colorspace"])
@@ -270,6 +297,14 @@ def _set(node, knob, value) -> None:
         node[knob].setValue(value)
     except Exception:
         pass
+
+
+def _set_enabled(node, knob, enabled: bool) -> None:
+    if knob in node.knobs():
+        try:
+            node[knob].setEnabled(enabled)
+        except Exception:
+            pass
 
 
 def _set_values(node, knob, values, selected="") -> None:

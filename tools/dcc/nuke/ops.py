@@ -20,7 +20,8 @@ from .context import Target
 WORKFILE_MEDIA_TYPE = "NukeScript"
 SOFTWARE = "nuke"
 DEFAULT_OUTPUT_TYPE = "CompRender"
-NEW_VERSION = "(new)"
+NEW_VERSION = "(new)"     # always the next-after-highest number, ignoring workfile major
+SYNC_VERSION = "(sync)"   # always the current workfile major, re-rendering in place
 
 
 class OpsError(RuntimeError):
@@ -107,10 +108,10 @@ class NukeOps:
             self._tasks_cache[key] = pctx.kitsu.tasks_for_shot(shot)
         return self._tasks_cache[key]
 
-    def _outputs(self, pctx, shot, media_type: str) -> list:
-        key = (getattr(shot, "id", None) or id(shot), media_type)
+    def _outputs(self, pctx, shot, media_type: str, name: str) -> list:
+        key = (getattr(shot, "id", None) or id(shot), media_type, name)
         if key not in self._outputs_cache:
-            self._outputs_cache[key] = work.outputs(pctx, shot, media_type)
+            self._outputs_cache[key] = work.outputs(pctx, shot, media_type, name=name)
         return self._outputs_cache[key]
 
     def _resolve(self, t: Target, *, need_task: bool = True) -> Resolved:
@@ -178,34 +179,64 @@ class NukeOps:
         r = self._resolve(t, need_task=False)
         return r.pctx.config.media_type(media_type).get("colorspace", "")
 
-    def output_versions(self, t: Target, media_type: str) -> list:
+    def output_versions(self, t: Target, media_type: str, *, name: str = "main") -> list:
         r = self._resolve(t, need_task=False)
-        return self._outputs(r.pctx, r.shot, media_type)
+        return self._outputs(r.pctx, r.shot, media_type, name)
 
     def workfile_major(self, t: Target, *, name: str = "main") -> int:
         r = self._resolve(t)
         return work.current_workfile_major(r.pctx, r.task, name=name)
 
+    def verify_workfile_for_render(self, t: Target, *, name: str = "main",
+                                   open_script_path: str = "", sync: bool = False) -> str:
+        """Empty string if `open_script_path` is fine to render from; otherwise
+        a human-readable reason it isn't. Checked BEFORE rendering starts, so
+        the caller can warn (save first, or explicitly proceed anyway)
+        instead of discovering the mismatch only after frames exist."""
+        r = self._resolve(t)
+        if not open_script_path:
+            return "This script hasn't been saved as a workfile yet — save it first."
+        parsed = work.verify_open_script(r.pctx, r.shot, r.task, open_script_path,
+                                         name=name, media_type=WORKFILE_MEDIA_TYPE)
+        if parsed is None:
+            return (f"This script doesn't look like a saved workfile for "
+                    f"{t.sequence}/{t.shot} ({name}) — save it first.")
+        if sync:
+            major, _ = parsed
+            current = work.current_workfile_major(r.pctx, r.task, name=name)
+            if current and major != current:
+                return (f"This script is v{major:03d}, but v{current:03d} is the latest "
+                        "workfile major registered for this task — Sync may not do what "
+                        "you expect.")
+        return ""
+
     def resolve_output_path(self, t: Target, media_type: str, version, *,
                             name: str = "main") -> dict:
         """Where a SquareWrite should render.
 
-        `version` = `(new)` -> the current workfile major (so output version ==
-        workfile major), or the next output revision if the script isn't a saved
-        workfile yet.  `version` = an int -> that existing version (a re-render).
-        Returns the #### path, the version, and whether it is locked.
+        `version` = NEW_VERSION -> always the next-after-highest number for
+        (shot, media_type, name), ignoring the workfile major entirely --
+        can never collide with a lock, nothing occupies that number yet.
+        `version` = SYNC_VERSION (or empty/None) -> the current workfile
+        major, re-rendering in place if that revision already has output,
+        refused if it's locked. `version` = an int -> that existing version
+        explicitly (a re-render). Returns the #### path, the version, and
+        whether it is locked.
         """
         r = self._resolve(t)
-        existing = {o.revision: o for o in self._outputs(r.pctx, r.shot, media_type)}
-        if version in (None, NEW_VERSION, ""):
+        existing = {o.revision: o for o in self._outputs(r.pctx, r.shot, media_type, name)}
+        if version == NEW_VERSION:
+            rev = media.next_version(r.pctx, r.shot, media_type, r.task, name=name)
+            locked = False
+        elif version in (None, SYNC_VERSION, ""):
             rev = (work.current_workfile_major(r.pctx, r.task, name=name)
-                   or media.next_version(r.pctx, r.shot, media_type, r.task))
+                   or media.next_version(r.pctx, r.shot, media_type, r.task, name=name))
             locked = rev in existing and work.output_locked(existing[rev])
         else:
             rev = int(version)
             locked = rev in existing and work.output_locked(existing[rev])
         ctx = r.pctx.ctx(**_coords(r.shot, t), task=t.task_type.lower(),
-                         version=rev, name="main", representation="exr", ext="exr")
+                         version=rev, name=name, representation="exr", ext="exr")
         one = r.pctx.paths.media_path(media_type, ctx.with_(frame=1001))
         hashed = re.sub(r"\.(\d+)(\.\w+)$",
                         lambda m: "." + "#" * len(m.group(1)) + m.group(2), one)
@@ -213,35 +244,67 @@ class NukeOps:
                 "colorspace": r.pctx.config.media_type(media_type).get("colorspace", "")}
 
     def publish_render(self, t: Target, frames, *, media_type: str = DEFAULT_OUTPUT_TYPE,
-                       name: str = "main", version: int | None = None, comment: str = "",
-                       make_preview: bool = True, proxy_dry_run: bool = False):
+                       name: str = "main", version: str | int | None = None, comment: str = "",
+                       make_preview: bool = True, proxy_dry_run: bool = False,
+                       source_script_path: str = ""):
         r = self._resolve(t)
-        major = work.current_workfile_major(r.pctx, r.task, name=name)
-        rev = version or major or media.next_version(r.pctx, r.shot, media_type, r.task)
-        wf = next((w for w in r.pctx.kitsu.working_files(r.task)
-                   if (w.name or "main") == name and w.revision == major), None)
-        for o in self._outputs(r.pctx, r.shot, media_type):
+        if version == NEW_VERSION:
+            rev = media.next_version(r.pctx, r.shot, media_type, r.task, name=name)
+        elif version in (None, SYNC_VERSION, ""):
+            rev = (work.current_workfile_major(r.pctx, r.task, name=name)
+                   or media.next_version(r.pctx, r.shot, media_type, r.task, name=name))
+        else:
+            rev = int(version)
+
+        for o in self._outputs(r.pctx, r.shot, media_type, name):
             if o.revision == rev and work.output_locked(o):
                 raise OpsError(f"{media_type} v{rev:03d} is locked (reviewed / delivered) "
                                "— save a new workfile major and re-render.")
+
+        wf = next((w for w in r.pctx.kitsu.working_files(r.task)
+                   if (w.name or "main") == name and w.revision == rev), None)
+        if source_script_path:
+            if wf is None:
+                # a NEW_VERSION render is decoupled from the workfile's own
+                # major by design -- nothing may be registered at `rev` yet.
+                # Give the output something real to point at: snapshot the
+                # actually-open script as this major's read-only v{rev}.000
+                # and register it, rather than leave the output orphaned.
+                snap = work.snapshot_rendered_script(
+                    r.pctx, r.shot, r.task, source_path=source_script_path,
+                    major=rev, name=name, media_type=WORKFILE_MEDIA_TYPE)
+                wf = work.register_major_at(r.pctx, r.shot, r.task, rev, snap,
+                                            name=name, media_type=WORKFILE_MEDIA_TYPE,
+                                            software=SOFTWARE)
+            else:
+                # already registered (a Sync render, or a NEW_VERSION that
+                # happened to land where the workfile already was) -- still
+                # refresh .000 so it stays the exact, current record of what
+                # produced THIS render, even if the artist rendered from a
+                # later real minor than whatever registered it originally.
+                work.snapshot_rendered_script(
+                    r.pctx, r.shot, r.task, source_path=source_script_path,
+                    major=rev, name=name, media_type=WORKFILE_MEDIA_TYPE)
+
         result = work.publish_output(r.pctx, r.shot, r.task, media_type=media_type, name=name,
                                      frames=[str(f) for f in frames], version=rev,
                                      comment=comment, source_workfile=wf,
                                      make_review_proxy=make_preview,
                                      proxy_dry_run=proxy_dry_run)
         # this just created (or re-rendered) an output version -- the cached
-        # list for this (shot, media_type) is now stale (wrong max version,
-        # possibly a lock that just got set); drop it so the next resolve
-        # sees the real state instead of the pre-publish snapshot.
-        key = (getattr(r.shot, "id", None) or id(r.shot), media_type)
+        # list for this (shot, media_type, name) is now stale (wrong max
+        # version, possibly a lock that just got set); drop it so the next
+        # resolve sees the real state instead of the pre-publish snapshot.
+        key = (getattr(r.shot, "id", None) or id(r.shot), media_type, name)
         self._outputs_cache.pop(key, None)
         return result
 
     # ---- plates (SquareRead) --------------------------------
 
-    def resolve_read_path(self, t: Target, media_type: str, version) -> dict:
+    def resolve_read_path(self, t: Target, media_type: str, version, *,
+                          name: str = "main") -> dict:
         r = self._resolve(t, need_task=False)
-        outs = {o.revision: o for o in self._outputs(r.pctx, r.shot, media_type)}
+        outs = {o.revision: o for o in self._outputs(r.pctx, r.shot, media_type, name)}
         if not outs:
             raise OpsError(f"no {media_type} published on {t.shot}")
         rev = max(outs) if version in (None, "", "latest") else int(version)

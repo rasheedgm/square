@@ -57,9 +57,10 @@ whichever matches the current state.
 ## Publish
 
 Publishing always goes through the **Publish Output** panel — the cascade +
-media type + version (`(new)` = the current workfile major, or re-render an
-existing one) + a comment + a *make review preview* toggle, all pre-populated
-from the selected node and editable. It publishes:
+media type + name + version (`(new)` / `(sync)` / re-render an existing one)
++ a comment + a *make review preview* toggle, all pre-populated from the
+selected node (matching whatever it already resolved `file` to) and editable.
+It publishes:
 
 - a **Write** — its `file` pattern over the script frame range
 - a **Read** — its `file` over the Read's range (register an external / delivered
@@ -67,7 +68,14 @@ from the selected node and editable. It publishes:
 
 A SquareWrite's **Render** button renders over the script range then opens the
 panel; untick its **Publish after render** knob to just render (publish later
-via *Publish Output…*). A locked target version is refused.
+via *Publish Output…*, or its own direct **Publish** button for frames that
+are already on disk). A locked target version is refused, and refused before
+you even get to render it — see *Locking* below.
+
+Every publish snapshots the currently-open script into that render's `.000`
+minor (see *Versions* below) — this is the actual provenance record of "the
+script that produced this," independent of whatever major/minor the artist
+happened to have last saved to.
 
 ## Context
 
@@ -79,26 +87,71 @@ opening a version writes those back.
 
 ## Versions: major vs minor
 
-A workfile has a **name** (a stream — `main`, `precomp`, `final`, …), a
-**major**, and a **minor**. Only **majors** are recorded in Kitsu. **Minors**
-are plain `.nk` saves on disk between majors —
-`…_comp_main_v001.001.nk`, `…_v001.002.nk`, … The tool globs the version folder
-to list them.
+A workfile has a **name** (a stream — `main`, `precomp`, `final`, — and on a
+SquareWrite/SquareRead node it's free text, not a fixed list: a shot can carry
+more than one parallel stream under the same media type, e.g. Precomp `fg` /
+`bg` / `keying`, not just `main`), a **major**, and a **minor**. Only
+**majors** are recorded in Kitsu. **Minors** are plain `.nk` saves on disk
+between majors — `…_comp_main_v001.001.nk`, `…_v001.002.nk`, … The tool globs
+the version folder to list them.
+
+**Minor `.000` is reserved** — never an artist WIP save. Every render (from
+either `(new)` or `(sync)`) overwrites `v{major}.000.nk` with an exact copy of
+the actually-open, already-saved script that produced it, then marks the file
+read-only on disk so an accidental `Ctrl+S` can't silently drift it away from
+the render it documents. The Open Version panel labels it **"(rendered)"**
+rather than hiding it — it's a real, openable script, just not one to keep
+working in.
 
 - **Save Version panel** — pick the workfile name and *minor up* (WIP save, same
   major) or *major up* (milestone; resets minor to 1 and records the major in
   Kitsu). Shows the destination path before you commit. No comment field —
   comments belong on the task at publish/review time.
 - **Open Version panel** — the cascade + name, then a flat version list
-  (`v003.002`, `v003.001`, `v002.001 (offline)` …). "Offline" = the file isn't
-  on this machine's NAS path. Opening prompts *clear & open here* / *open in a
-  new Nuke* if the session already has nodes.
+  (`v003.002`, `v003.001 (rendered)`, `v002.001 (offline)` …). "Offline" = the
+  file isn't on this machine's NAS path. Opening prompts *clear & open here* /
+  *open in a new Nuke* if the session already has nodes.
 
-**Version alignment.** Workfile major **N** ⇔ published output **vN**, by
-construction (publish uses the workfile major, not "next output revision"; a
-re-render replaces vN unless it's locked). Review **previews** float — you may
-post several per version — but each preview's comment names the version it
-reviews (`Preview — CompRender v003`).
+### `(new)` vs `(sync)`
+
+The SquareWrite version dropdown (and the Publish panel's own version picker)
+offers two sentinels instead of one:
+
+- **`(sync)`** — the render/publish version always equals the *current
+  workfile major*; repeated test renders while iterating on the same major
+  just refresh that version's frames and its `.000` snapshot in place. Refused
+  outright if that major is **locked** (see below). This is the default, and
+  the closest match to "day to day" comping.
+- **`(new)`** — always the next-after-highest version for this
+  `(shot, media type, name)`, ignoring the workfile major entirely — genuinely
+  new numbers for genuinely new work, never blocked by a lock (nothing occupies
+  a fresh number yet). If the workfile's own major isn't already at the number
+  it just rendered, Square registers a `working_files` record there
+  automatically (jumping straight to that number, not incrementing by one) so
+  the output is never left without a matching workfile entry in Kitsu.
+
+Before a SquareWrite actually renders, Square checks that the open script is a
+real, saved workfile matching this shot/task/name (not an unsaved scratch
+session, and not a file that merely looks right but belongs to a different
+shot) — and, for `(sync)` specifically, that its major isn't already behind
+the latest one registered in Kitsu. Either problem shows a warning with the
+option to render anyway.
+
+**Version alignment.** `(sync)` keeps output version **N** ⇔ workfile major
+**N** by construction. `(new)` deliberately breaks that equivalence at render
+time and then repairs it by fast-forwarding the workfile record to match.
+Review **previews** float — you may post several per version — but each
+preview's comment names the version it reviews (`Preview — CompRender v003`).
+
+### Locking
+
+A **locked** output version (reviewed / delivered) can't be re-rendered.
+`(sync)` resolving to a locked major refuses at the Write node itself, before
+any Kitsu round trip at render time: the node's `file` knob is left blank (so
+Nuke's own native Render / farm submit can't silently overwrite it either, not
+just Square's own Render/Publish buttons) and both **Render** and **Publish**
+buttons are disabled, with the status knob saying which version is locked.
+Picking `(new)` — or any other, unlocked version — clears the block.
 
 ## SquareRead / SquareWrite
 
@@ -121,15 +174,17 @@ times over for a single node, which was the actual cause of "creating a Read
 or Write node is slow."
 
 - **SquareWrite** — media type lists only `renderable` types (`CompRender`,
-  `Precomp`, …). Version **(new)** = the current workfile major, so the
-  published output version always equals the workfile major it came from;
-  picking an existing version re-renders it in place (blocked if that version
-  is **locked** — reviewed / delivered — with the status knob saying so).
-  `Make preview on publish` toggles the review proxy. A **Render & Publish**
-  button renders locally and publishes in one step.
+  `Precomp`, …); **Name** is free text (default `main`) for shots with more
+  than one parallel stream under the same media type. Version is `(new)` /
+  `(sync)` / an explicit existing version to re-render in place — see
+  *Versions* above for what each means and how locking blocks a render.
+  `Make preview on publish` toggles the review proxy. A **Render** button
+  renders locally and (unless *Publish after render* is off) publishes in one
+  step; a separate **Publish** button publishes frames that are already on
+  disk without re-rendering.
 - **SquareRead** — media type lists delivery + publish types (plates, elements,
-  renders). Resolves the path, colorspace, and frame range for the chosen
-  version.
+  renders); **Name** is the same free-text stream selector. Resolves the path,
+  colorspace, and frame range for the chosen version.
 
 ## Layout
 

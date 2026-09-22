@@ -12,7 +12,7 @@ from square_core.errors import NeedsLogin
 
 from . import gizmos
 from .context import from_env, to_env
-from .ops import NukeOps, OpsError
+from .ops import NEW_VERSION, SYNC_VERSION, NukeOps, OpsError
 
 _ops: NukeOps | None = None
 
@@ -217,6 +217,16 @@ class _OpenVersionPanel:
             self.picker.reload(knob.name() if self.picker.handles(knob) else "task")
             self._reload_versions()
 
+    @staticmethod
+    def _label(mv, minor) -> str:
+        if minor is None:
+            return f"v{mv.major:03d}  (offline)"
+        label = f"v{mv.major:03d}.{minor.minor:03d}"
+        # minor 0 is the auto-managed snapshot of the script that actually
+        # produced a render (see square_core.services.work.snapshot_rendered_script)
+        # -- never an artist WIP save, so it's called out distinctly here.
+        return label + " (rendered)" if minor.is_rendered_snapshot else label
+
     def _reload_versions(self):
         self._versions = []
         try:
@@ -229,10 +239,10 @@ class _OpenVersionPanel:
         labels = []
         for mv in reversed(majors):
             for m in mv.minors:
-                labels.append(f"v{mv.major:03d}.{m.minor:03d}")
+                labels.append(self._label(mv, m))
                 self._versions.append((mv, m))
             if not mv.minors:
-                labels.append(f"v{mv.major:03d}  (offline)")
+                labels.append(self._label(mv, None))
                 self._versions.append((mv, None))
         self.k_version.setValues(labels or ["(none)"])
         self.k_info.setValue(f"{len(self._versions)} version(s)")
@@ -241,8 +251,7 @@ class _OpenVersionPanel:
         idx = self.k_version.value()
         try:
             mv, minor = self._versions[
-                [f"v{m.major:03d}.{f.minor:03d}" if f else f"v{m.major:03d}  (offline)"
-                 for m, f in self._versions].index(idx)]
+                [self._label(m, f) for m, f in self._versions].index(idx)]
         except (ValueError, IndexError):
             return
         if minor is None or not minor.online:
@@ -367,8 +376,10 @@ def _selected_square_node(nuke):
 
 
 def _node_context(nuke, node):
-    """(Target, media_type, name, make_preview) seeded from the node's Square
-    tab, falling back to the launch env."""
+    """(Target, media_type, name, make_preview, sq_version) seeded from the
+    node's Square tab, falling back to the launch env. `sq_version` is the
+    raw knob value ((new) / (sync) / "vNNN" / "") so callers can match what
+    the node actually resolved `file` to."""
     from .context import Target
     k = node.knobs()
     if gizmos.MARK in k:
@@ -378,9 +389,10 @@ def _node_context(nuke, node):
         media_type = node["sq_media_type"].value() or "CompRender"
         name = (node["sq_name"].value() if "sq_name" in k else "") or "main"
         make_preview = bool(node["sq_preview"].value()) if "sq_preview" in k else True
+        version = node["sq_version"].value() if "sq_version" in k else ""
     else:
-        t, media_type, name, make_preview = from_env(), "CompRender", "main", True
-    return t, media_type, name, make_preview
+        t, media_type, name, make_preview, version = from_env(), "CompRender", "main", True, ""
+    return t, media_type, name, make_preview, version
 
 
 def _node_frames(nuke, node):
@@ -424,6 +436,12 @@ def render_and_publish_node(node):
     nuke = _nuke()
     if node.Class() != "Write":
         raise OpsError("Render & Publish needs a Write node.")
+    t, _mtype, name, _preview, node_version = _node_context(nuke, node)
+    sync = node_version == SYNC_VERSION
+    warning = get_ops().verify_workfile_for_render(
+        t, name=name, open_script_path=nuke.root().name(), sync=sync)
+    if warning and not nuke.ask(f"{warning}\n\nRender anyway?"):
+        return
     first = int(nuke.root()["first_frame"].value())
     last = int(nuke.root()["last_frame"].value())
     nuke.execute(node, first, last)
@@ -439,12 +457,12 @@ class _PublishPanel:
         import nukescripts
         self.nuke, self.node = nuke, node
         ops = get_ops()
-        seed, mtype, name, preview = _node_context(nuke, node)
+        seed, mtype, name, preview, node_version = _node_context(nuke, node)
 
         self.p = nukescripts.PythonPanel("Square — Publish Output", "com.square.publish")
         self.picker = _Picker(self.p, nuke, ops, with_name=True)
         self.k_mtype = nuke.Enumeration_Knob("mtype", "Media type", [""])
-        self.k_version = nuke.Enumeration_Knob("version", "Version", [NEW_VERSION])
+        self.k_version = nuke.Enumeration_Knob("version", "Version", [NEW_VERSION, SYNC_VERSION])
         self.k_comment = nuke.Multiline_Eval_String_Knob("comment", "Comment")
         self.k_preview = nuke.Boolean_Knob("preview", "Make review preview")
         self.k_src = nuke.Text_Knob("src", "Source")
@@ -457,6 +475,11 @@ class _PublishPanel:
             self.picker.k_name.setValue(name)
         self.p.knobChanged = self._changed
         self._want_mtype = mtype
+        # match whatever the node's own Square tab already resolved to
+        # (new)/(sync)/an explicit version -- the render that just happened
+        # (if any) landed at that version, and publish must target the same
+        # one rather than silently drifting to a different number.
+        self._want_version = node_version
         self._reload_types()
 
     def run(self):
@@ -491,13 +514,22 @@ class _PublishPanel:
         vs = []
         try:
             if t.complete and mt:
-                vs = [f"v{o.revision:03d}" for o in reversed(get_ops().output_versions(t, mt))]
+                name = self.picker.k_name.value() or "main"
+                vs = [f"v{o.revision:03d}" for o in
+                      reversed(get_ops().output_versions(t, mt, name=name))]
         except OpsError:
             pass
-        self.picker._set(self.k_version, [NEW_VERSION] + vs, self.k_version.value())
-        self.k_info.setValue("(new) = the current workfile major"
-                             if self.k_version.value() == NEW_VERSION else
-                             "re-render of an existing version")
+        values = [NEW_VERSION, SYNC_VERSION] + vs
+        # consumed once: after the artist picks their own version by hand,
+        # further reloads (task/media-type edits) must respect that choice
+        # instead of snapping back to the node's original one every time.
+        want = self._want_version if self._want_version else self.k_version.value()
+        self._want_version = ""
+        self.picker._set(self.k_version, values, want)
+        self.k_info.setValue({
+            NEW_VERSION: "(new) = a brand new version, ignoring the workfile major",
+            SYNC_VERSION: "(sync) = the current workfile major",
+        }.get(self.k_version.value(), "re-render of an existing version"))
 
     # ---- do it ----
     def _publish(self):
@@ -511,12 +543,18 @@ class _PublishPanel:
         if missing:
             raise OpsError(f"{len(missing)} frame(s) not on disk yet (e.g. {missing[0]}).")
         v = self.k_version.value()
-        version = None if v in (NEW_VERSION, "", None) else int(str(v).lstrip("v"))
+        if v in (NEW_VERSION, SYNC_VERSION):
+            version = v
+        elif v in ("", None):
+            version = None
+        else:
+            version = int(str(v).lstrip("v"))
         name = (self.picker.k_name.value() if self.picker.k_name else "main") or "main"
         res = get_ops().publish_render(
             t, frames, media_type=self.k_mtype.value(), name=name, version=version,
             make_preview=bool(self.k_preview.value()),
-            comment=self.k_comment.value() or f"from {self.nuke.root().name()}")
+            comment=self.k_comment.value() or f"from {self.nuke.root().name()}",
+            source_script_path=self.nuke.root().name())
         to_env(t)
         _msg(f"Published {self.k_mtype.value()} v{res.version:03d}"
              + (" + review preview" if getattr(res, "preview", None) else "")

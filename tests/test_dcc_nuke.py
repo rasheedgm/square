@@ -9,10 +9,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from square_core.services import work
 from tests.test_workfile_manager import _hub
 from tools.dcc.nuke import gizmos
 from tools.dcc.nuke.context import Target, from_env, to_env
-from tools.dcc.nuke.ops import NEW_VERSION, NukeOps, OpsError
+from tools.dcc.nuke.ops import NEW_VERSION, SYNC_VERSION, NukeOps, OpsError
 
 
 def _ops(td):
@@ -179,7 +180,7 @@ class TestOpsOutputs(unittest.TestCase):
                 Path(t.path).parent.mkdir(parents=True, exist_ok=True)
                 Path(t.path).write_text("x", encoding="utf-8")
                 ops.register_major(_t(), t)
-            info = ops.resolve_output_path(_t(), "CompRender", NEW_VERSION)
+            info = ops.resolve_output_path(_t(), "CompRender", SYNC_VERSION)
             self.assertEqual(info["version"], 3)             # == workfile major
 
             r = Path(td) / "r"; r.mkdir()
@@ -221,6 +222,196 @@ class TestOpsOutputs(unittest.TestCase):
             self.assertEqual(info["version"], 3)
             self.assertEqual(info["colorspace"], "ACEScg")
             self.assertEqual(info["versions"], [3])
+
+
+class TestNewVsSyncVersion(unittest.TestCase):
+    """NEW_VERSION (always the next-after-highest number, ignoring workfile
+    major, never locked -- nothing occupies a fresh number yet) vs
+    SYNC_VERSION (the current workfile major, re-rendering in place, refused
+    if locked)."""
+
+    def test_new_version_ignores_workfile_major_entirely(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            # workfile is at major 5, but only rev 1-2 have actually been
+            # published -- NEW_VERSION must give 3 (next after highest
+            # EXISTING output), not 5 (the workfile major -- that's Sync's job)
+            for _ in range(5):
+                t = ops.next_save(_t(), bump="major")
+                Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+                Path(t.path).write_text("x", encoding="utf-8")
+                ops.register_major(_t(), t)
+            # published through the real flow (not api.outputs.append) so the
+            # fake's next-revision counter actually advances, same as Kitsu's
+            # own next_output_revision would
+            r = Path(td) / "r"; r.mkdir()
+            for rev in (1, 2):
+                f = r / f"c{rev}.1001.exr"; f.write_bytes(b"x" * 10)
+                ops.publish_render(_t(), [str(f)], version=str(rev), proxy_dry_run=True)
+            for o in api.outputs:
+                if o["output_type"] == "CompRender" and o["revision"] == 2:
+                    o["data"] = {"square": {"locked": True}}
+            info = ops.resolve_output_path(_t(), "CompRender", NEW_VERSION)
+            self.assertEqual(info["version"], 3)
+            self.assertFalse(info["locked"])   # a fresh number can never already be locked
+
+    def test_sync_falls_back_to_next_version_when_nothing_registered(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            self.assertEqual(ops.workfile_major(_t()), 0)     # never saved
+            info = ops.resolve_output_path(_t(), "CompRender", SYNC_VERSION)
+            self.assertEqual(info["version"], 1)
+
+    def test_sync_refuses_a_locked_current_major(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            t = ops.next_save(_t(), bump="major")          # major 1
+            Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t.path).write_text("x", encoding="utf-8")
+            ops.register_major(_t(), t)
+            api.outputs.append({"output_type": "CompRender", "revision": 1, "name": "main",
+                                "representation": "exr", "path": "X:/o/v001",
+                                "data": {"square": {"locked": True}}})
+            info = ops.resolve_output_path(_t(), "CompRender", SYNC_VERSION)
+            self.assertEqual(info["version"], 1)
+            self.assertTrue(info["locked"])
+
+
+class TestRenderedSnapshotIntegration(unittest.TestCase):
+    """publish_render()'s source_script_path wiring: a NEW_VERSION render
+    auto-registers a major (nothing may be registered at that number yet)
+    and writes the read-only v{major}.000 snapshot; a SYNC_VERSION render
+    just refreshes .000 at the already-registered major."""
+
+    def _open_script(self, td, text="script state"):
+        p = Path(td) / "open_script.nk"
+        p.write_text(text, encoding="utf-8")
+        return str(p)
+
+    def test_new_version_render_auto_registers_a_major_and_snapshots(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            src = self._open_script(td)
+            before = len(api.workfiles)
+
+            r = Path(td) / "r"; r.mkdir()
+            (r / "c.1001.exr").write_bytes(b"x" * 10)
+            res = ops.publish_render(_t(), [str(r / "c.1001.exr")], version=NEW_VERSION,
+                                     source_script_path=src, proxy_dry_run=True)
+
+            self.assertEqual(res.version, 1)
+            self.assertEqual(len(api.workfiles), before + 1)      # a major got registered
+            self.assertEqual(ops.workfile_major(_t()), 1)
+
+            # rebuild the exact path the same way ops/work do, via the shot/task
+            r_ = ops._resolve(_t())
+            snap = work.workfile_path(r_.pctx, r_.shot, r_.task, major=1, minor=0)
+            self.assertTrue(Path(snap).is_file())
+            self.assertEqual(Path(snap).read_text(encoding="utf-8"), "script state")
+            with self.assertRaises(OSError):
+                Path(snap).write_text("oops", encoding="utf-8")
+
+    def test_sync_render_refreshes_snapshot_without_registering_again(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            t = ops.next_save(_t(), bump="major")          # major 1, real minor .001
+            Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t.path).write_text("minor .001", encoding="utf-8")
+            ops.register_major(_t(), t)
+            before = len(api.workfiles)
+
+            src = self._open_script(td, text="edited past .001, rendering now")
+            r = Path(td) / "r"; r.mkdir()
+            (r / "c.1001.exr").write_bytes(b"x" * 10)
+            res = ops.publish_render(_t(), [str(r / "c.1001.exr")], version=SYNC_VERSION,
+                                     source_script_path=src, proxy_dry_run=True)
+
+            self.assertEqual(res.version, 1)
+            self.assertEqual(len(api.workfiles), before)          # no NEW major registered
+
+            r_ = ops._resolve(_t())
+            snap = work.workfile_path(r_.pctx, r_.shot, r_.task, major=1, minor=0)
+            self.assertEqual(Path(snap).read_text(encoding="utf-8"),
+                             "edited past .001, rendering now")
+
+
+class TestNameScopedOutputs(unittest.TestCase):
+    """Two different name-streams under the same media_type on the same shot
+    (e.g. a Precomp "fg" and "bg") must not collide in lock checks or
+    version resolution -- the actual bug behind wanting per-stream names
+    (sq_name) to work at all."""
+
+    def test_locked_main_does_not_lock_a_different_name_stream(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            api.outputs.append({"output_type": "Precomp", "revision": 1, "name": "main",
+                                "representation": "exr", "path": "X:/o/main_v001",
+                                "data": {"square": {"locked": True}}})
+            api.outputs.append({"output_type": "Precomp", "revision": 1, "name": "fg",
+                                "representation": "exr", "path": "X:/o/fg_v001", "data": {}})
+            info = ops.resolve_output_path(_t(), "Precomp", "1", name="fg")
+            self.assertFalse(info["locked"])
+            info_main = ops.resolve_output_path(_t(), "Precomp", "1", name="main")
+            self.assertTrue(info_main["locked"])
+
+    def test_next_version_is_independent_per_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = _ops(td)
+            r = Path(td) / "r"; r.mkdir()
+            for rev in (1, 2, 3):
+                f = r / f"main{rev}.1001.exr"; f.write_bytes(b"x" * 10)
+                ops.publish_render(_t(), [str(f)], media_type="Precomp", version=str(rev),
+                                   name="main", proxy_dry_run=True)
+            info_fg = ops.resolve_output_path(_t(), "Precomp", NEW_VERSION, name="fg")
+            self.assertEqual(info_fg["version"], 1)         # "fg" has nothing published yet
+            info_main = ops.resolve_output_path(_t(), "Precomp", NEW_VERSION, name="main")
+            self.assertEqual(info_main["version"], 4)
+
+
+class TestVerifyWorkfileForRender(unittest.TestCase):
+    def test_no_open_script_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            reason = ops.verify_workfile_for_render(_t(), open_script_path="")
+            self.assertTrue(reason)
+
+    def test_unrelated_path_is_rejected(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            reason = ops.verify_workfile_for_render(_t(), open_script_path="X:/scratch/untitled.nk")
+            self.assertTrue(reason)
+
+    def test_a_real_registered_script_passes(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            t = ops.next_save(_t(), bump="major")
+            Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t.path).write_text("x", encoding="utf-8")
+            ops.register_major(_t(), t)
+            reason = ops.verify_workfile_for_render(_t(), open_script_path=t.path)
+            self.assertEqual(reason, "")
+
+    def test_sync_warns_when_open_script_is_behind_the_latest_major(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, _ = _ops(td)
+            t1 = ops.next_save(_t(), bump="major")             # major 1
+            Path(t1.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t1.path).write_text("x", encoding="utf-8")
+            ops.register_major(_t(), t1)
+            t2 = ops.next_save(_t(), bump="major")             # major 2
+            Path(t2.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t2.path).write_text("x", encoding="utf-8")
+            ops.register_major(_t(), t2)
+
+            # still have v1 open while v2 is Kitsu's latest
+            reason = ops.verify_workfile_for_render(_t(), open_script_path=t1.path, sync=True)
+            self.assertTrue(reason)
+            self.assertIn("v001", reason)
+            self.assertIn("v002", reason)
+
+            # not-sync (NEW_VERSION) doesn't care about major alignment at all
+            reason = ops.verify_workfile_for_render(_t(), open_script_path=t1.path, sync=False)
+            self.assertEqual(reason, "")
 
 
 # --------------------------------------------------------------------------
@@ -418,6 +609,63 @@ class TestGizmos(unittest.TestCase):
             node = gizmos.create_square_read(_FakeNuke())
             self.assertNotIn("sq_do_publish", node.knobs())
             self.assertNotIn("sq_publish_only", node.knobs())
+
+    def test_version_dropdown_offers_both_new_and_sync(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertIn(NEW_VERSION, node["sq_version"].values())
+            self.assertIn(SYNC_VERSION, node["sq_version"].values())
+            self.assertEqual(node["sq_version"].value(), SYNC_VERSION)  # default
+
+    def test_sq_name_is_free_text_defaulting_to_main(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertEqual(node["sq_name"].value(), "main")
+            # a fixed Enumeration_Knob can't be set to a value outside its
+            # list -- setValue() on the real String_Knob fake always sticks,
+            # which is what proves this is free text, not a dropdown.
+            node["sq_name"].setValue("fg")
+            self.assertEqual(node["sq_name"].value(), "fg")
+
+    def test_changing_sq_name_re_resolves_the_file_for_that_stream(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            node["sq_name"].setValue("fg")
+            nk = _FakeNuke()
+            nk._this_node, nk._this_knob = node, node["sq_name"]
+            gizmos.on_knob_changed(nk)
+            self.assertIn("_fg_", node["file"].value())
+
+    def test_locked_sync_version_blanks_file_and_disables_publish(self):
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            # register the workfile up to major 1, then lock CompRender v1 --
+            # (sync) resolves to the current workfile major, so this must
+            # refuse to point Write at a renderable path.
+            t = ops.next_save(_t(), bump="major")
+            Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t.path).write_text("x", encoding="utf-8")
+            ops.register_major(_t(), t)
+            api.outputs.append({"output_type": "CompRender", "revision": 1, "name": "main",
+                                "representation": "exr", "path": "X:/o/v001",
+                                "data": {"square": {"locked": True}}})
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertEqual(node["sq_version"].value(), SYNC_VERSION)
+            self.assertEqual(node["file"].value(), "")
+            self.assertFalse(node["sq_publish"]._enabled)
+            self.assertFalse(node["sq_publish_only"]._enabled)
+            self.assertIn("LOCKED", node["sq_status"].value())
+
+    def test_unlocked_version_keeps_publish_buttons_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            node = gizmos.create_square_write(_FakeNuke())
+            self.assertTrue(node["sq_publish"]._enabled)
+            self.assertTrue(node["sq_publish_only"]._enabled)
+            self.assertNotEqual(node["file"].value(), "")
 
 
 class TestGizmosLazyCreation(unittest.TestCase):

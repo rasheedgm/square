@@ -21,6 +21,25 @@ def _ops(td):
     return NukeOps(hub.ctx), api
 
 
+def _ops_with_overrides(td, overrides: dict):
+    """Like _ops(), but the project is created with project-config overrides
+    -- for cases that depend on non-default media_types entries (e.g. a
+    delivery-sourced type marked renderable)."""
+    from square_core.config.pipeline import PipelineConfig
+    from square_core.context import PipelineContext
+    from square_core.services import projects
+    from square_core.services.projects import ProjectSpec
+
+    from tests.test_workfile_manager import _NavKitsu
+
+    cfg = PipelineConfig(nas_roots={"default": td})
+    api = _NavKitsu()
+    ctx = PipelineContext(config=cfg, kitsu=api, user=api.current_user())
+    projects.create(ctx, ProjectSpec(code="ABC", fps=24.0, overrides=overrides))
+    api.add_shot("SQ010", "SH0100")
+    return NukeOps(ctx), api
+
+
 def _t():
     return Target("ABC", "", "SQ010", "SH0100", "Comp")
 
@@ -174,6 +193,29 @@ class TestOpsOutputs(unittest.TestCase):
             types = ops.output_types(_t())
             self.assertIn("CompRender", types)
             self.assertNotIn("Plate", types)             # not renderable
+
+    def test_output_types_includes_a_renderable_delivery_type(self):
+        """A shot can be missing its Plate delivery and need one generated
+        straight from Nuke -- renderable is the real gate, not source, so a
+        delivery-sourced type marked renderable belongs in the Write node's
+        list too, not just source="publish" ones.
+
+        A project's own media_types override is NOT deep-merged against the
+        built-in registry at the "which types exist" level (ProjectConfig's
+        media_types property is a presence-check, not a merge) -- so the
+        override here carries the full built-in registry forward, same as a
+        real project_config.json edit needs to, not just the one changed
+        leaf."""
+        import copy
+
+        from square_core.config.project import DEFAULT_PROJECT_CONFIG
+        with tempfile.TemporaryDirectory() as td:
+            media_types = copy.deepcopy(DEFAULT_PROJECT_CONFIG["media_types"])
+            media_types["Plate"]["renderable"] = True
+            ops, _ = _ops_with_overrides(td, {"media_types": media_types})
+            types = ops.output_types(_t())
+            self.assertIn("Plate", types)
+            self.assertIn("CompRender", types)           # still there too
 
     def test_resolve_output_path_new_and_hashed(self):
         with tempfile.TemporaryDirectory() as td:
@@ -603,6 +645,9 @@ class _FakeNuke:
         return _Knob(name)
 
     def Enumeration_Knob(self, name, label, values):
+        return _Knob(name, values)
+
+    def EditableEnumeration_Knob(self, name, label, values):
         return _Knob(name, values)
 
     def addKnobChanged(self, fn, nodeClass=None):

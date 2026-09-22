@@ -79,8 +79,9 @@ def _create(nuke, node_class: str, kind: str):
         node.addKnob(knob)
 
     # shares Media type's line, no label of its own -- a name-stream pick is
-    # part of "what media", not a separate decision.
-    name_knob = nuke.Enumeration_Knob("sq_name", "", ["main"])
+    # part of "what media", not a separate decision. Editable so a brand new
+    # stream (no Kitsu record yet) can just be typed, not only picked.
+    name_knob = nuke.EditableEnumeration_Knob("sq_name", "", ["main"])
     name_knob.clearFlag(nuke.STARTLINE)
     node.addKnob(name_knob)
 

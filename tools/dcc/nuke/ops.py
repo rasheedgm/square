@@ -187,9 +187,16 @@ class NukeOps:
 
     def output_types(self, t: Target, *, renderable_only: bool = True) -> list[str]:
         r = self._resolve(t, need_task=False)
-        names = media_names(r.pctx.config, "publish")
+        cfg = r.pctx.config
         if renderable_only:
-            names = [n for n in names if r.pctx.config.media_type(n).get("renderable")]
+            # renderable is the real gate for "can a DCC write this" -- not
+            # limited to source="publish". A shot can be missing its Plate
+            # delivery and need one generated straight from Nuke, so a
+            # delivery-sourced type marked renderable belongs here too.
+            names = sorted(set(media_names(cfg, "publish")) | set(media_names(cfg, "delivery")))
+            names = [n for n in names if cfg.media_type(n).get("renderable")]
+        else:
+            names = media_names(cfg, "publish")
         return names or [DEFAULT_OUTPUT_TYPE]
 
     def read_types(self, t: Target) -> list[str]:

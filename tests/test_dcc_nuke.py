@@ -622,6 +622,11 @@ class _FakeNuke:
     def root(self):
         return self._root
 
+    def allNodes(self, cls=None):
+        if cls is None:
+            return list(self.created)
+        return [n for n in self.created if n.Class() == cls]
+
     # node creation / knob factories
     def createNode(self, cls, inpanel=False):
         n = _Node(cls)
@@ -769,6 +774,35 @@ class TestGizmos(unittest.TestCase):
             nk._this_node = node
             gizmos.refresh_node(nk, node)
             self.assertIn("v007", node["sq_version"].values())
+
+    def test_refresh_all_square_nodes_catches_up_every_write_and_read(self):
+        """Regression: Minor Up / Major Up / Save Version... change the open
+        script via nuke.scriptSaveAs() directly, never touching any node's
+        own knobs -- a Write left on (sync) would otherwise keep resolving
+        against the major that was open BEFORE the bump."""
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            t1 = ops.next_save(_t(), bump="major")           # major 1
+            Path(t1.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t1.path).write_text("v1", encoding="utf-8")
+            ops.register_major(_t(), t1)
+
+            nk = _FakeNuke()
+            nk._root._name = t1.path
+            node = gizmos.create_square_write(nk)
+            self.assertIn("v001", node["file"].value().replace("\\", "/"))
+
+            # simulate Major Up: the open script becomes v2, but nothing on
+            # the node itself is touched
+            t2 = ops.next_save(_t(), bump="major")           # major 2
+            Path(t2.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t2.path).write_text("v2", encoding="utf-8")
+            ops.register_major(_t(), t2)
+            nk._root._name = t2.path
+
+            self.assertIn("v001", node["file"].value().replace("\\", "/"))    # still stale
+            gizmos.refresh_all_square_nodes(nk)
+            self.assertIn("v002", node["file"].value().replace("\\", "/"))    # caught up
 
     def test_apply_file_syncs_to_the_actually_open_script_not_kitsus_latest(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1006,6 +1040,16 @@ class TestPanelImports(unittest.TestCase):
         node = _Node("Read")
         node["file"].setValue("X:/sh/plate_v001.mov")
         self.assertEqual(panel._node_frames(_FakeNuke(), node), ["X:/sh/plate_v001.mov"])
+
+    def test_node_frames_honors_an_explicit_range_override(self):
+        """The Render panel's own (possibly-edited) frame range must be what
+        gets published too, not the script's root range -- otherwise a
+        custom render range and the frames actually published could differ."""
+        from tools.dcc.nuke import panel
+        node = _Node("Write")
+        node["file"].setValue("X:/sh/comp.####.exr")
+        frames = panel._node_frames(_FakeNuke(), node, first=2001, last=2002)
+        self.assertEqual(frames, ["X:/sh/comp.2001.exr", "X:/sh/comp.2002.exr"])
 
 
 class TestAccountState(unittest.TestCase):

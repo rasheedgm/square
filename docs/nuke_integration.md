@@ -60,36 +60,52 @@ whichever matches the current state.
 whichever of its known name-streams that script's own path matches (falling
 back to `main` if it doesn't match any) -- the fast path for the common case;
 **Save Version…** remains for saving under a different project/shot/name than
-what's currently open.
+what's currently open. All three refresh every Square Write/Read node already
+in the script afterward, since `nuke.scriptSaveAs()` changes what's open
+without going through any node's own knobs: a Write left on `(sync)` would
+otherwise keep resolving against the major that was open *before* the bump
+until something else happened to touch its knobs.
+
+## Render
+
+A SquareWrite's **Render** button opens the **Render** panel first: the
+resolved path, an editable frame range (defaulting to the script range), and
+the *Make review preview* / *Publish after render* toggles -- ticking
+*Publish after render* also reveals a comment field right there. Confirming
+it renders, then -- if publish was requested -- publishes immediately with no
+further dialog: **Publish after render** means an uninterrupted render then
+publish, not a render followed by a second confirmation asking for the same
+thing again (an earlier version of this flow opened the Publish panel
+*after* rendering even when publish was already confirmed up front). Untick
+*Publish after render* to just render (publish later via *Publish Output…*,
+or the node's own direct **Publish** button for frames that are already on
+disk). Its **Create Read** button drops a SquareRead pointed at exactly what
+it just rendered/published (same shot/task/media type/name/version) -- no
+re-navigating the cascade to check your own render. A locked target version
+is refused, and refused before you even get to render it — see *Locking*
+below.
 
 ## Publish
 
-Publishing always goes through the **Publish Output** panel — the cascade +
-media type + name + version + a comment + a *make review preview* toggle,
-all editable. The version defaults to whatever's **already embedded in the
-source's own path** (every output nests under `.../v{version}/...`) — the
-frames are already sitting at that number, so that's what gets published,
-not a re-resolved guess; the panel says whether that version is already
-published (a re-publish) or brand new. `(new)` is still offered explicitly
-for claiming a fresh number instead. It publishes:
+**Publish Output…**, or a SquareWrite/Read's own **Publish** button, opens
+the **Publish Output** panel for frames that are already on disk: the
+cascade + media type + name + version + a comment + a *make review preview*
+toggle, all editable. The version defaults to whatever's **already embedded
+in the source's own path** (every output nests under `.../v{version}/...`)
+— the frames are already sitting at that number, so that's what gets
+published, not a re-resolved guess; the panel says whether that version is
+already published (a re-publish) or brand new. `(new)` is still offered
+explicitly for claiming a fresh number instead. It publishes:
 
 - a **Write** — its `file` pattern over the script frame range
 - a **Read** — its `file` over the Read's range (register an external / delivered
   render as an output version)
 
-A SquareWrite's **Render** button renders over the script range then opens the
-panel; untick its **Publish after render** knob to just render (publish later
-via *Publish Output…*, or its own direct **Publish** button for frames that
-are already on disk). Its **Create Read** button drops a SquareRead pointed at
-exactly what it just rendered/published (same shot/task/media type/name/
-version) -- no re-navigating the cascade to check your own render. A locked
-target version is refused, and refused before you even get to render it — see
-*Locking* below.
-
-Every publish snapshots the currently-open script into that render's `.000`
-minor (see *Versions* below) — this is the actual provenance record of "the
-script that produced this," independent of whatever major/minor the artist
-happened to have last saved to.
+Every publish (from the Render panel or this one) snapshots the
+currently-open script into that render's `.000` minor (see *Versions*
+below) — this is the actual provenance record of "the script that produced
+this," independent of whatever major/minor the artist happened to have last
+saved to.
 
 ## Context
 

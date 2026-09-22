@@ -344,6 +344,7 @@ class _SaveVersionPanel:
         if t.is_new_major:
             get_ops().register_major(self.picker.target(), t, name=name)
         to_env(self.picker.target())
+        gizmos.refresh_all_square_nodes(nuke)
         _msg(f"Saved {t.label()}\n{t.path}")
 
 
@@ -375,6 +376,7 @@ def _bump_open_workfile(bump: str) -> None:
     if target.is_new_major:
         get_ops().register_major(t, target, name=name)
     to_env(t)
+    gizmos.refresh_all_square_nodes(nuke)
     _msg(f"Saved {target.label()}\n{target.path}")
 
 
@@ -463,18 +465,21 @@ def _rendered_version_label(node) -> str:
     return f"v{v:03d}" if v else ""
 
 
-def _node_frames(nuke, node):
-    """The source frame paths for `node` over its render range."""
+def _node_frames(nuke, node, *, first=None, last=None):
+    """The source frame paths for `node` over its render range -- `first`/
+    `last` override (the Render panel's own, possibly-edited range), else a
+    Read's own range, else the script's."""
     pattern = (node["file"].value() or "").strip()
     if not pattern:
         return []
     if "#" not in pattern and "%0" not in pattern:      # single file (mov, ...)
         return [pattern]
-    if node.Class() == "Read":
-        first, last = int(node["first"].value()), int(node["last"].value())
-    else:
-        first = int(nuke.root()["first_frame"].value())
-        last = int(nuke.root()["last_frame"].value())
+    if first is None or last is None:
+        if node.Class() == "Read":
+            first, last = int(node["first"].value()), int(node["last"].value())
+        else:
+            first = int(nuke.root()["first_frame"].value())
+            last = int(nuke.root()["last_frame"].value())
     return [_expand(pattern, f) for f in range(first, last + 1)]
 
 
@@ -499,25 +504,93 @@ def render_and_publish_selected():
 
 @_guard
 def render_and_publish_node(node):
-    """Render a Write over the script range, then open the Publish panel. If the
-    node's 'Publish after render' box is off, just render."""
+    """Confirm render + publish details in ONE panel BEFORE rendering, then
+    run start to finish with no further modal -- a checked "Publish after
+    render" means an uninterrupted render+publish, not a render followed by
+    a second dialog asking for the same thing again."""
     nuke = _nuke()
     if node.Class() != "Write":
         raise OpsError("Render & Publish needs a Write node.")
-    t, _mtype, name, _preview, node_version = _node_context(nuke, node)
+    t, mtype, name, _preview, node_version = _node_context(nuke, node)
     sync = node_version == SYNC_VERSION
     warning = get_ops().verify_workfile_for_render(
         t, name=name, open_script_path=nuke.root().name(), sync=sync)
     if warning and not nuke.ask(f"{warning}\n\nRender anyway?"):
         return
-    first = int(nuke.root()["first_frame"].value())
-    last = int(nuke.root()["last_frame"].value())
+
+    panel = _RenderPanel(nuke, node)
+    if not panel.run():
+        return
+    node["sq_preview"].setValue(panel.k_preview.value())
+    node["sq_do_publish"].setValue(panel.k_publish.value())
+
+    first, last = panel.first(), panel.last()
     nuke.execute(node, first, last)
-    if "sq_do_publish" in node.knobs() and not node["sq_do_publish"].value():
+
+    if not panel.k_publish.value():
         _msg(f"Rendered {last - first + 1} frame(s).\n"
              "Publish later: Square -> Publish Output.")
         return
-    _PublishPanel(nuke, node).run()
+
+    frames = _node_frames(nuke, node, first=first, last=last)
+    # node_version carries a "vNNN" prefix for an explicit pick (as shown in
+    # the dropdown) but not for the (new)/(sync) sentinels -- strip it the
+    # same way gizmos._apply_file() does before resolve_output_path/
+    # publish_render see it, or an explicit pick would crash on int("v005").
+    version = node_version.lstrip("v") if node_version else ""
+    res = get_ops().publish_render(
+        t, frames, media_type=mtype, name=name, version=version or SYNC_VERSION,
+        make_preview=bool(panel.k_preview.value()),
+        comment=panel.k_comment.value() or f"from {nuke.root().name()}",
+        source_script_path=nuke.root().name())
+    to_env(t)
+    _msg(f"Rendered + published {mtype} v{res.version:03d}"
+         + (" + review preview" if getattr(res, "preview", None) else "")
+         + f"\n{res.dir}")
+
+
+class _RenderPanel:
+    """Shown BEFORE a SquareWrite renders: the resolved path, an editable
+    frame range, and the preview/publish choices -- when publishing, the
+    comment is gathered right here too, so everything needed for an
+    uninterrupted render+publish is settled before rendering starts."""
+
+    def __init__(self, nuke, node):
+        import nukescripts
+        self.nuke, self.node = nuke, node
+        self.p = nukescripts.PythonPanel("Square — Render", "com.square.render")
+        self.k_path = nuke.Text_Knob("path", "File")
+        self.k_first = nuke.Int_Knob("first", "First frame")
+        self.k_last = nuke.Int_Knob("last", "Last frame")
+        self.k_preview = nuke.Boolean_Knob("preview", "Make review preview")
+        self.k_publish = nuke.Boolean_Knob("publish", "Publish after render")
+        self.k_comment = nuke.Multiline_Eval_String_Knob("comment", "Comment")
+        for kb in (self.k_path, self.k_first, self.k_last,
+                   self.k_preview, self.k_publish, self.k_comment):
+            self.p.addKnob(kb)
+        self.p.knobChanged = self._changed
+
+        self.k_path.setValue((node["file"].value() or "").replace("\\", "/"))
+        self.k_first.setValue(int(nuke.root()["first_frame"].value()))
+        self.k_last.setValue(int(nuke.root()["last_frame"].value()))
+        self.k_preview.setValue(
+            bool(node["sq_preview"].value()) if "sq_preview" in node.knobs() else True)
+        self.k_publish.setValue(
+            bool(node["sq_do_publish"].value()) if "sq_do_publish" in node.knobs() else True)
+        self.k_comment.setVisible(self.k_publish.value())
+
+    def _changed(self, knob):
+        if knob is self.k_publish:
+            self.k_comment.setVisible(self.k_publish.value())
+
+    def first(self) -> int:
+        return int(self.k_first.value())
+
+    def last(self) -> int:
+        return int(self.k_last.value())
+
+    def run(self):
+        return self.p.showModalDialog()
 
 
 class _PublishPanel:

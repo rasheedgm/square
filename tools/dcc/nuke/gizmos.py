@@ -167,6 +167,19 @@ def refresh_node(nuke, node) -> None:
     _guard(node, _apply_file, nuke, node)
 
 
+def refresh_all_square_nodes(nuke) -> None:
+    """Re-applies every Square Write/Read node's file resolution against
+    whatever script is open right now. Needed after anything that changes
+    the open script WITHOUT going through a node's own knobChanged -- Minor
+    Up / Major Up / Save Version… all call nuke.scriptSaveAs() directly, so
+    a Write left on (sync) would otherwise keep pointing at the major that
+    was open before the bump until the artist happened to touch one of its
+    own knobs."""
+    for node in nuke.allNodes():
+        if MARK in node.knobs():
+            _guard(node, _apply_file, nuke, node)
+
+
 def _guard(node, fn, *a) -> None:
     """Run a step; a pipeline error just lands in the Square status knob so the
     node graph never breaks."""

@@ -44,10 +44,15 @@ def _to_pattern(first_frame: str, start: int) -> str:
 
 
 def make_proxy(source, out_path, *, fps: float = 24.0, is_video: bool = False,
-               start_frame: int | None = None, height: int = 720,
+               start_frame: int | None = None, width: int = 1280,
                dry_run: bool = False) -> str:
     """`source` is a list of frame paths (image sequence) or a single video path.
-    Writes an MP4 to `out_path`, returns it. `dry_run` writes a tiny stub."""
+    Writes an MP4 to `out_path`, returns it. `dry_run` writes a tiny stub.
+
+    Fits by WIDTH (`width`, always exactly this many pixels wide) with height
+    auto-computed to preserve aspect -- never crops or distorts, so a wide
+    anamorphic plate and a tall portrait one both play at their own true
+    aspect ratio, just always the same width."""
     out_path = str(out_path)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -60,7 +65,7 @@ def make_proxy(source, out_path, *, fps: float = 24.0, is_video: bool = False,
         raise ProxyError("no source media for proxy")
 
     ff = ffmpeg_bin()
-    vf = f"scale=-2:{height}"
+    vf = f"scale={width}:-2"
     if is_video or len(files) == 1 and not _FRAME_RE.search(str(files[0])):
         cmd = [ff, "-y", "-i", str(files[0]), "-vf", vf,
                "-c:v", "libx264", "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p",

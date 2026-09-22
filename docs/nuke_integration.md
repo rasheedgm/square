@@ -2,8 +2,10 @@
 
 Tool #3. Runs inside Nuke's own Python (14+, i.e. Python 3.9+). It imports
 `square_core` directly and authenticates through the shared
-`~/.square/kitsu_session.json` (or the OS keyring, when available), like
-every other Square tool.
+`~/.square/kitsu_session.json`, like every other Square tool -- the one
+session store, no OS keyring (removed: a desktop tool's sign-out only ever
+cleared the file, so a different keyring-capable tool's next read could
+resurrect a stale session from keyring on top of it).
 
 ## Install
 
@@ -71,7 +73,11 @@ until something else happened to touch its knobs.
 A SquareWrite's **Render** button opens the **Render** panel first: the
 resolved path, an editable frame range (defaulting to the script range), and
 the *Make review preview* / *Publish after render* toggles -- ticking
-*Publish after render* also reveals a comment field right there. Confirming
+*Publish after render* also reveals a comment field right there, which lands
+on **both** the output file's own comment and the review preview's comment
+(with the version appended, e.g. "fixed the edge — CompRender v009") --
+previously it only ever reached the output file, never the clip a supervisor
+actually watches and comments back on. Confirming
 it renders, then -- if publish was requested -- publishes immediately with no
 further dialog: **Publish after render** means an uninterrupted render then
 publish, not a render followed by a second confirmation asking for the same
@@ -126,6 +132,12 @@ pure-Python-only `dcc-deps` environment Nuke's Python runs in), then bare
 copy, e.g. on the NAS, via a UNC path) rather than installing ffmpeg on every
 workstation -- `dcc_launch.py` sets `FFMPEG_BINARY` from it (or
 `%SQUARE_FFMPEG_EXE%`) before launching Nuke.
+
+The proxy itself (`square_core/media/proxy.py::make_proxy`) fits by **width**
+(1280px by default, `-vf scale=1280:-2`) with height auto-computed to
+preserve aspect -- never crops or distorts, so a wide anamorphic plate and a
+tall portrait one both play at their own true aspect ratio, just always the
+same width.
 
 ## Context
 

@@ -54,8 +54,10 @@ def create_square_read(nuke):
     return _create(nuke, "Read", "read")
 
 
-_DIVIDER = "─" * 30       # a plain static-text row, the closest thing to a
-                                # rule line the classic knob API offers
+def _divider(nuke, name: str):
+    """An unset Text_Knob -- no label, no value -- the standard Nuke
+    convention for a blank separating row between knob groups."""
+    return nuke.Text_Knob(name, "")
 
 
 def _create(nuke, node_class: str, kind: str):
@@ -74,7 +76,7 @@ def _create(nuke, node_class: str, kind: str):
     seq_knob.clearFlag(nuke.STARTLINE)     # shares Episode's line
     node.addKnob(seq_knob)
     node.addKnob(nuke.Enumeration_Knob("sq_shot", "Shot", [""]))
-    node.addKnob(nuke.Text_Knob("sq_div1", "", _DIVIDER))
+    node.addKnob(_divider(nuke, "sq_div1"))
 
     # -- what: task+media type / name -------------------------------------
     node.addKnob(nuke.Enumeration_Knob("sq_task", "Task", [""]))
@@ -84,7 +86,7 @@ def _create(nuke, node_class: str, kind: str):
     # editable so a brand new stream (no Kitsu record yet) can just be
     # typed, not only picked from known name-streams for this media type.
     node.addKnob(nuke.EditableEnumeration_Knob("sq_name", "Name", ["main"]))
-    node.addKnob(nuke.Text_Knob("sq_div2", "", _DIVIDER))
+    node.addKnob(_divider(nuke, "sq_div2"))
 
     # -- version + status --------------------------------------------------
     node.addKnob(nuke.Enumeration_Knob("sq_version", "Version", [""]))
@@ -96,7 +98,7 @@ def _create(nuke, node_class: str, kind: str):
     node.addKnob(nuke.Text_Knob("sq_status", ""))
 
     if kind == "write":
-        node.addKnob(nuke.Text_Knob("sq_div3", "", _DIVIDER))
+        node.addKnob(_divider(nuke, "sq_div3"))
 
         # -- preview / publish toggles + actions --------------------------
         # explicit STARTLINE throughout, not left to each knob type's own
@@ -126,7 +128,7 @@ def _create(nuke, node_class: str, kind: str):
         publish_only_btn.clearFlag(nuke.STARTLINE)
         node.addKnob(publish_only_btn)
 
-        node.addKnob(nuke.Text_Knob("sq_div4", "", _DIVIDER))
+        node.addKnob(_divider(nuke, "sq_div4"))
         create_read_btn = nuke.PyScript_Knob(
             "sq_create_read", "Create Read",
             "from tools.dcc.nuke import panel; panel.create_read_from_write(nuke.thisNode())")

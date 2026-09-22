@@ -193,23 +193,24 @@ Picking `(new)` — or any other, unlocked version — clears the block.
 
 Stock Read / Write nodes with a **Square** tab. Its knobs (project … task, media
 type, name, version) drive the node's `file`; a `knobChanged` callback keeps it
-in sync. Laid out in sections, divider lines between them:
+in sync. Laid out in sections, a blank unset knob (the standard Nuke way to
+get a separating gap -- no visible rule line, just space) between each:
 
 ```
 Project
 Episode   Seq
 Shot
-──────────────
+[blank]
 Task      Media type
 Name
-──────────────
+[blank]
 Version   [Refresh]
 <status>
-──────────────          (SquareWrite only from here down)
+[blank]                 (SquareWrite only from here down)
 [x] Make preview
 [x] Publish after render
 [Render] [Publish]
-──────────────
+[blank]
 [Create Read]
 ```
 

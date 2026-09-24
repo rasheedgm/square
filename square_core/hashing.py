@@ -34,6 +34,14 @@ _CHUNK = 1 << 20   # 1 MiB
 DEFAULT_ALGO = "xxh3_64"
 
 
+def best_available_algo() -> str:
+    """xxh3_64 where the extension imports, else blake2b -- for a caller that
+    must keep working without it (an embedded DCC interpreter is pure-Python
+    only, and xxhash ships compiled wheels only) and records which algo it
+    actually used so a digest is never compared against a different one."""
+    return DEFAULT_ALGO if _HAS_XXHASH else "blake2b"
+
+
 def _new_hasher(algo: str):
     if algo == "xxh3_64":
         if not _HAS_XXHASH:

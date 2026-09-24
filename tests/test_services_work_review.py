@@ -136,6 +136,27 @@ class TestMediaPublish(unittest.TestCase):
             self.assertIn("fixed the edge per note #3", preview_comment)
             self.assertIn("v001", preview_comment)
 
+    def test_publish_works_without_xxhash_and_records_the_algo_used(self):
+        """Regression: an embedded DCC interpreter is pure-Python only and
+        can't import xxhash (compiled wheels only), so publish() from Nuke
+        died with "xxh3_64 requested but the 'xxhash' extension is not
+        available". It now uses blake2b there and records the algo actually
+        used, so a digest is never compared against one made with another."""
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as td:
+            pctx = _pctx(td)
+            shot = breakdown.ensure_shot(pctx, "SQ010", "SH0100", create_folders=False)
+            comp = breakdown.build_task_grid(pctx, [shot], ["Comp"])[0]
+            exr = Path(td) / "c.1001.exr"; exr.write_bytes(b"x" * 20)
+            with patch("square_core.hashing._HAS_XXHASH", False):
+                r = media.publish(pctx, shot, "CompRender", comp, files=[str(exr)],
+                                  make_review_proxy=False)
+            self.assertTrue(r.copied)
+            sq = pctx.kitsu.outputs[0]["data"]["square"]
+            self.assertEqual(sq["checksum_algo"], "blake2b")
+            self.assertTrue(sq["checksum"])
+
     def test_no_comment_falls_back_to_the_default_preview_label(self):
         with tempfile.TemporaryDirectory() as td:
             pctx = _pctx(td)

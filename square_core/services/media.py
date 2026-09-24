@@ -17,6 +17,7 @@ import datetime as _dt
 import logging
 from pathlib import Path
 
+from square_core.hashing import FileHasher, best_available_algo
 from square_core.model import MediaResult, Provenance
 from square_core.storage import transfer
 
@@ -88,6 +89,12 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
     if dry_run:
         return result
 
+    # xxh3_64 where available, blake2b otherwise (an embedded DCC's
+    # pure-Python interpreter can't import xxhash) -- the algo actually used
+    # is recorded in the provenance, so a digest is never compared against
+    # one made with a different algorithm.
+    hasher = FileHasher(best_available_algo())
+
     # move into place (verified), skipping anything already there
     pairs = [(s, d) for s, d in zip(files, dest_files)
              if Path(s).resolve() != Path(d).resolve()]
@@ -99,7 +106,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         # instead of each publish() call spinning up its own -- and get
         # per-file progress for its UI.
         rs = transfer.transfer_sequence(pairs, mode=transfer_mode, workers=workers,
-                                        pool=pool, progress=progress)
+                                        pool=pool, progress=progress, hasher=hasher)
         # keyed by the OS-normalized path on both sides: TransferResult.dest
         # is str(Path(...)) (native separators), but dest_files[i] above was
         # built with a literal "/" join -- a plain string-equality lookup
@@ -118,6 +125,7 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         name=name, version=rev, minor=minor, recorded_at=_now(),
         recorded_by=getattr(pctx.pipeline.user, "email", ""),
         checksum=result.checksums.get(str(Path(dest_files[0])), ""),
+        checksum_algo=hasher.algo,
         resolution=getattr(media_info, "resolution", "") if media_info else "",
         fps=getattr(media_info, "fps", None) if media_info else None,
         colorspace=(getattr(media_info, "colorspace", "") if media_info else "")

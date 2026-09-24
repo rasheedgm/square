@@ -433,9 +433,12 @@ def create_read_from_write(node):
     t, media_type, name, _preview, _v = _node_context(nuke, node)
     if not (t.complete and media_type):
         raise OpsError("Pick project / sequence / shot / task on the Write first.")
-    version = version_from_output_path(node["file"].value() or "")
+    version = _resolved_write_version(nuke, node, t, media_type, name)
     if not version:
-        raise OpsError("This Write hasn't rendered or published yet -- no version to read.")
+        raise OpsError("Couldn't work out which version this Write points at "
+                       f"(file knob: {node['file'].value()!r}, "
+                       f"version knob: {node['sq_version'].value()!r}) -- "
+                       "click Refresh on the Write and try again.")
 
     read = gizmos.create_square_read(nuke)
     read["sq_media_type"].setValue(media_type)
@@ -482,6 +485,25 @@ def _node_context(nuke, node):
     return t, media_type, name, make_preview, version
 
 
+def _resolved_write_version(nuke, node, t, media_type: str, name: str):
+    """The version a SquareWrite points at: read off its own `file` path when
+    that's set (the exact number it rendered to, even for (new)), else
+    re-resolved from its version knob -- `file` is deliberately blanked
+    while the resolved version is locked (approved), and a Read of that
+    version is still perfectly valid. (new) can't be re-resolved: it would
+    now mean the NEXT number after whatever was just rendered."""
+    v = version_from_output_path(node["file"].value() or "")
+    if v:
+        return v
+    raw = node["sq_version"].value() if "sq_version" in node.knobs() else ""
+    if raw and raw != NEW_VERSION:
+        info = get_ops().resolve_output_path(
+            t, media_type, raw.lstrip("v") or SYNC_VERSION, name=name,
+            open_script_path=nuke.root().name())
+        return info["version"]
+    return None
+
+
 def _rendered_version_label(node) -> str:
     """The version already embedded in `node`'s own `file` path (every output
     template nests under `.../v{version}/...`), as a "vNNN" label -- or ""
@@ -505,9 +527,41 @@ def _node_frames(nuke, node, *, first=None, last=None):
         if node.Class() == "Read":
             first, last = int(node["first"].value()), int(node["last"].value())
         else:
-            first = int(nuke.root()["first_frame"].value())
-            last = int(nuke.root()["last_frame"].value())
+            # a Write publishes what was actually rendered, not whatever the
+            # script's full frame range happens to be: rendering 12 of 100
+            # frames (a partial range, a farm chunk, Nuke's own Render) and
+            # then publishing used to demand all 100 and fail on frame 13.
+            # Spans first..last of what's on disk, so a gap INSIDE that span
+            # still shows up as missing.
+            found = _frames_on_disk(pattern)
+            if found:
+                first, last = found[0], found[-1]
+            else:
+                first = int(nuke.root()["first_frame"].value())
+                last = int(nuke.root()["last_frame"].value())
     return [_expand(pattern, f) for f in range(first, last + 1)]
+
+
+def _frames_on_disk(pattern: str) -> list:
+    """Sorted frame numbers that exist on disk for a `####` / `%04d` pattern."""
+    import glob
+    import os
+    import re
+
+    m = re.search(r"#+", pattern)
+    pad = len(m.group()) if m else 0
+    if not m:
+        m = re.search(r"%0(\d+)d", pattern)
+        pad = int(m.group(1)) if m else 0
+    if not m:
+        return []
+    head, tail = pattern[:m.start()], pattern[m.end():]
+    frames = []
+    for path in glob.glob(glob.escape(head) + "?" * pad + glob.escape(tail)):
+        token = os.path.basename(path)[len(os.path.basename(head)):][:pad]
+        if token.isdigit():
+            frames.append(int(token))
+    return sorted(set(frames))
 
 
 @_guard
@@ -713,7 +767,9 @@ class _PublishPanel:
         self._src_frames = _node_frames(self.nuke, self.node) if self.node else []
         missing = [f for f in self._src_frames if not _exists(f)]
         src = self.node.name() if self.node else "(no node)"
-        self.k_src.setValue(f"{len(self._src_frames)} frame(s), "
+        on_disk = _frames_on_disk((self.node["file"].value() or "").strip()) if self.node else []
+        span = f" ({on_disk[0]}-{on_disk[-1]})" if on_disk else ""
+        self.k_src.setValue(f"{len(self._src_frames)} frame(s){span}, "
                             f"{len(missing)} missing   <-  {src}")
         vs = []
         try:

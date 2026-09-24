@@ -832,6 +832,40 @@ class TestGizmos(unittest.TestCase):
             gizmos.refresh_node(nk, node)
             self.assertIn("v007", node["sq_version"].values())
 
+    def test_create_read_version_falls_back_when_file_knob_is_blank(self):
+        """Regression: Create Read said the Write "hasn't rendered yet" when
+        its `file` knob was blank (blanked on purpose while the resolved
+        version is locked) -- the version is still knowable from the version
+        knob, and a Read of a locked version is perfectly valid."""
+        from tools.dcc.nuke import panel
+        with tempfile.TemporaryDirectory() as td:
+            ops, api = self._wire(td)
+            t1 = ops.next_save(_t(), bump="major")           # major 1
+            Path(t1.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t1.path).write_text("v1", encoding="utf-8")
+            ops.register_major(_t(), t1)
+            api.outputs.append({"output_type": "CompRender", "revision": 1, "name": "main",
+                                "representation": "exr", "path": "X:/o/v001",
+                                "data": {"square": {"locked": True}}})
+            nk = _FakeNuke()
+            nk._root._name = t1.path
+            node = gizmos.create_square_write(nk)
+            self.assertEqual(node["file"].value(), "")            # locked -> blanked
+            t = Target("ABC", "", "SQ010", "SH0100", "Comp")
+            self.assertEqual(
+                panel._resolved_write_version(nk, node, t, "CompRender", "main"), 1)
+
+    def test_create_read_version_prefers_the_rendered_path(self):
+        from tools.dcc.nuke import panel
+        with tempfile.TemporaryDirectory() as td:
+            self._wire(td)
+            nk = _FakeNuke()
+            node = gizmos.create_square_write(nk)
+            node["file"].setValue("Z:/o/comp/v007/exr/x.####.exr")
+            t = Target("ABC", "", "SQ010", "SH0100", "Comp")
+            self.assertEqual(
+                panel._resolved_write_version(nk, node, t, "CompRender", "main"), 7)
+
     def test_refresh_all_square_nodes_catches_up_every_write_and_read(self):
         """Regression: Minor Up / Major Up / Save Version... change the open
         script via nuke.scriptSaveAs() directly, never touching any node's
@@ -1096,6 +1130,40 @@ class TestPanelImports(unittest.TestCase):
         node = _Node("Read")
         node["file"].setValue("X:/sh/plate_v001.mov")
         self.assertEqual(panel._node_frames(_FakeNuke(), node), ["X:/sh/plate_v001.mov"])
+
+    def test_write_publishes_what_was_actually_rendered_not_the_script_range(self):
+        """Regression: 12 of 100 frames rendered, then Publish demanded all
+        100 and failed on frame 13 ("88 frames missing")."""
+        from tools.dcc.nuke import panel
+        with tempfile.TemporaryDirectory() as td:
+            for f in range(1001, 1013):
+                (Path(td) / f"comp.{f}.exr").write_bytes(b"x")
+            node = _Node("Write")
+            node["file"].setValue(str(Path(td) / "comp.####.exr").replace("\\", "/"))
+            frames = panel._node_frames(_FakeNuke(), node)     # no explicit range
+            self.assertEqual(len(frames), 12)
+            self.assertTrue(frames[0].endswith("comp.1001.exr"))
+            self.assertTrue(frames[-1].endswith("comp.1012.exr"))
+
+    def test_a_gap_inside_the_rendered_span_still_counts_as_missing(self):
+        from tools.dcc.nuke import panel
+        with tempfile.TemporaryDirectory() as td:
+            for f in (1001, 1002, 1004):
+                (Path(td) / f"comp.{f}.exr").write_bytes(b"x")
+            node = _Node("Write")
+            node["file"].setValue(str(Path(td) / "comp.####.exr").replace("\\", "/"))
+            frames = panel._node_frames(_FakeNuke(), node)
+            self.assertEqual(len(frames), 4)                    # 1001..1004
+            self.assertEqual([f for f in frames if not panel._exists(f)],
+                             [frames[2]])                       # 1003 is the hole
+
+    def test_frames_on_disk_ignores_non_numeric_lookalikes(self):
+        from tools.dcc.nuke import panel
+        with tempfile.TemporaryDirectory() as td:
+            (Path(td) / "comp.1001.exr").write_bytes(b"x")
+            (Path(td) / "comp.abcd.exr").write_bytes(b"x")
+            found = panel._frames_on_disk(str(Path(td) / "comp.####.exr").replace("\\", "/"))
+            self.assertEqual(found, [1001])
 
     def test_node_frames_honors_an_explicit_range_override(self):
         """The Render panel's own (possibly-edited) frame range must be what

@@ -94,6 +94,10 @@ def rollback(nas_root_path, version_tag: str):
 _LAUNCHER = """@echo off
 title Square VFX - {title} v{ver}
 set PIPELINE_ROOT=%~dp0..
+rem cache compiled .pyc on THIS machine, not beside the source on the share:
+rem importing hundreds of small files over SMB is the slow part of a launch.
+rem An already-set value wins.
+if not defined PYTHONPYCACHEPREFIX set PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\\square\\pycache
 set STUDIO_CONFIG_PATH=%PIPELINE_ROOT%\\config\\studio_config.json
 set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\Scripts\\python.exe
@@ -114,6 +118,10 @@ if errorlevel 1 (
 _DCC_LAUNCHER = """@echo off
 title Square VFX - {title} v{ver}
 set PIPELINE_ROOT=%~dp0..
+rem cache compiled .pyc on THIS machine (inherited by the DCC dcc_launch.py
+rem starts, whose own imports of square_core / gazu / requests are the slow
+rem part over a share). An already-set value wins.
+if not defined PYTHONPYCACHEPREFIX set PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\\square\\pycache
 set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=%PIPELINE_ROOT%\\envs\\win_x64_python311\\Scripts\\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=python.exe

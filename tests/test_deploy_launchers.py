@@ -134,6 +134,67 @@ class TestDccLaunchFfmpeg(unittest.TestCase):
                 self.assertEqual(os.environ.get("FFMPEG_BINARY"), "C:/already/set.exe")
 
 
+class TestPycachePrefix(unittest.TestCase):
+    """The pipeline usually lives on a network share; importing hundreds of
+    small files over SMB (plus a recompile whenever the share's __pycache__
+    is missing/stale/read-only) is what makes a launch slow. Compiled files
+    go to a machine-local folder instead."""
+
+    def _root(self, td):
+        root = Path(td) / "pipeline"
+        (root / "config").mkdir(parents=True)
+        exe = str(Path(td) / "nuke.exe")
+        Path(exe).write_text("", encoding="utf-8")
+        (root / "config" / "studio_config.json").write_text(
+            json.dumps({"dcc": {"nuke_exe": exe}}), encoding="utf-8")
+        (root / "current").mkdir()
+        return root
+
+    def test_dcc_launch_sets_a_local_prefix(self):
+        from tools.pipeline_deploy import dcc_launch
+        with tempfile.TemporaryDirectory() as td:
+            root = self._root(td)
+            with patch.dict(os.environ, {"LOCALAPPDATA": r"C:\Users\x\AppData\Local"},
+                            clear=True), patch("os.execv"):
+                dcc_launch.main(["dcc_launch.py", "nuke", str(root)])
+                self.assertEqual(os.environ["PYTHONPYCACHEPREFIX"],
+                                 str(Path(r"C:\Users\x\AppData\Local") / "square" / "pycache"))
+
+    def test_an_already_set_prefix_wins(self):
+        from tools.pipeline_deploy import dcc_launch
+        with tempfile.TemporaryDirectory() as td:
+            root = self._root(td)
+            with patch.dict(os.environ, {"PYTHONPYCACHEPREFIX": "D:/mine"},
+                            clear=True), patch("os.execv"):
+                dcc_launch.main(["dcc_launch.py", "nuke", str(root)])
+                self.assertEqual(os.environ["PYTHONPYCACHEPREFIX"], "D:/mine")
+
+    def test_falls_back_to_the_home_dir_without_localappdata(self):
+        from tools.pipeline_deploy import dcc_launch
+        with patch.dict(os.environ, {"USERPROFILE": r"C:\Users\x", "HOME": r"C:\Users\x"},
+                        clear=True):
+            self.assertEqual(dcc_launch._pycache_prefix(),
+                             str(Path.home() / ".square" / "pycache"))
+
+    def test_no_home_at_all_skips_it_rather_than_blocking_a_launch(self):
+        from tools.pipeline_deploy import dcc_launch
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(dcc_launch._pycache_prefix(), "")
+
+    def test_tool_and_dcc_launchers_set_it_too_but_dont_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            release = Path(td) / "release"
+            (release / "tools" / "config_editor").mkdir(parents=True)
+            (release / "tools" / "config_editor" / "main.py").write_text("", encoding="utf-8")
+            (release / "tools" / "dcc" / "nuke").mkdir(parents=True)
+            launchers = Path(td) / "launchers"
+            write_launchers(launchers, release)
+            for name in ("square_config_editor.bat", "square_nuke.bat"):
+                bat = (launchers / name).read_text(encoding="utf-8")
+                self.assertIn("if not defined PYTHONPYCACHEPREFIX set "
+                              "PYTHONPYCACHEPREFIX=%LOCALAPPDATA%\\square\\pycache", bat)
+
+
 class TestBuildDccDeps(unittest.TestCase):
     """Regression coverage for a real crash: gazu declares a hard dependency
     on pywin32 (for its unused events.py live-notification client), which

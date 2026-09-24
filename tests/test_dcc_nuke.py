@@ -651,6 +651,9 @@ class _FakeRoot:
     def name(self):
         return self._name
 
+    def modified(self):
+        return False
+
 
 class _FakeNuke:
     STARTLINE = 1  # real nuke.STARTLINE's actual value doesn't matter to _Knob's no-op
@@ -668,6 +671,16 @@ class _FakeNuke:
         if cls is None:
             return list(self.created)
         return [n for n in self.created if n.Class() == cls]
+
+    def scriptOpen(self, path):
+        self.opened = path
+        self._root._name = path
+
+    def scriptClear(self):
+        self.created.clear()
+
+    def ask(self, text):
+        return True
 
     # node creation / knob factories
     def createNode(self, cls, inpanel=False):
@@ -1174,6 +1187,119 @@ class TestPanelImports(unittest.TestCase):
         node["file"].setValue("X:/sh/comp.####.exr")
         frames = panel._node_frames(_FakeNuke(), node, first=2001, last=2002)
         self.assertEqual(frames, ["X:/sh/comp.2001.exr", "X:/sh/comp.2002.exr"])
+
+
+class _FakePythonPanel:
+    def __init__(self, title, panel_id):
+        self.knobs = []
+
+    def addKnob(self, knob):
+        self.knobs.append(knob)
+
+
+class _FakeNukescripts:
+    PythonPanel = _FakePythonPanel
+
+
+class TestOpenVersionPanel(unittest.TestCase):
+    """The Open Version panel is two dropdowns -- Major, then that major's
+    Minor saves -- not one flat list of every version, which stops being
+    usable once a shot has hundreds of workfiles."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        os.environ.update(SQUARE_PROJECT="ABC", SQUARE_SEQUENCE="SQ010",
+                          SQUARE_SHOT="SH0100", SQUARE_TASK="Comp")
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
+
+    def _panel(self, td):
+        import tools.dcc.nuke.panel as panel_mod
+        ops, api = _ops(td)
+        panel_mod._ops = ops
+        self.addCleanup(lambda: setattr(panel_mod, "_ops", None))
+        # v1: .001 .002 + a rendered .000 snapshot;  v2: .001;  v3: .001 .002 .003
+        def save(bump):
+            t = ops.next_save(_t(), bump=bump)
+            Path(t.path).parent.mkdir(parents=True, exist_ok=True)
+            Path(t.path).write_text("x", encoding="utf-8")
+            if t.is_new_major:
+                ops.register_major(_t(), t)
+            return t
+        save("major"); save("minor")
+        src = Path(td) / "open.nk"; src.write_text("rendered", encoding="utf-8")
+        ops.snapshot_render(_t(), version="1", source_script_path=str(src))
+        save("major")
+        save("major"); save("minor"); save("minor")
+        nk = _FakeNuke()
+        return panel_mod._OpenVersionPanel(nk, _FakeNukescripts), nk
+
+    def test_majors_are_newest_first_and_open_on_the_newest(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, _ = self._panel(td)
+            self.assertEqual(p.k_major.values(), ["v003", "v002", "v001"])
+            self.assertEqual(p.k_major.value(), "v003")
+
+    def test_minors_belong_to_the_selected_major_newest_first(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, _ = self._panel(td)
+            self.assertEqual([l.split()[0] for l in p.k_minor.values()],
+                             ["v003.003", "v003.002", "v003.001"])
+            self.assertTrue(p.k_minor.value().startswith("v003.003"))
+            p.k_major.setValue("v002")
+            p._changed(p.k_major)
+            self.assertEqual([l.split()[0] for l in p.k_minor.values()], ["v002.001"])
+
+    def test_rendered_snapshot_hidden_until_asked_for(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, _ = self._panel(td)
+            p.k_major.setValue("v001")
+            p._changed(p.k_major)
+            self.assertEqual([l.split()[0] for l in p.k_minor.values()],
+                             ["v001.002", "v001.001"])                # no .000
+            p.k_rendered.setValue(True)
+            p._changed(p.k_rendered)
+            labels = p.k_minor.values()
+            self.assertEqual([l.split()[0] for l in labels],
+                             ["v001.002", "v001.001", "v001.000"])
+            self.assertIn("(rendered)", labels[-1])
+            self.assertTrue(p.k_minor.value().startswith("v001.002"))   # selection kept
+
+    def test_minor_rows_show_when_they_were_saved(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, _ = self._panel(td)
+            self.assertRegex(p.k_minor.values()[0], r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}$")
+
+    def test_info_and_path_follow_the_selection(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, _ = self._panel(td)
+            self.assertIn("v003: 3 save(s)", p.k_info.value())
+            self.assertIn("v003.003", p.k_path.value().replace("\\", "/"))
+            p.k_minor.setValue(p.k_minor.values()[2])                   # v003.001
+            p._changed(p.k_minor)
+            self.assertIn("v003.001", p.k_path.value().replace("\\", "/"))
+
+    def test_opening_opens_the_selected_minor(self):
+        with tempfile.TemporaryDirectory() as td:
+            p, nk = self._panel(td)
+            p.k_major.setValue("v002")
+            p._changed(p.k_major)
+            p._open()
+            self.assertIn("v002.001", nk.opened)
+
+    def test_a_major_with_only_a_rendered_snapshot_is_not_shown_empty(self):
+        """A major whose only file is the .000 snapshot must still list it,
+        not look like it has nothing to open."""
+        from square_core.services.work import MajorVersion, MinorFile
+        from tools.dcc.nuke import panel
+        mv = MajorVersion(major=4, name="main",
+                          minors=[MinorFile(minor=0, path="X:/a.000.nk", modified=1.0)])
+        self.assertEqual(len(panel._minor_choices(mv, show_rendered=False)), 1)
+
+    def test_a_major_that_is_offline_says_so(self):
+        from square_core.services.work import MajorVersion
+        from tools.dcc.nuke import panel
+        mv = MajorVersion(major=5, name="main", minors=[])
+        self.assertEqual(panel._major_choices([mv])[0][0], "v005  (offline)")
 
 
 class TestAccountState(unittest.TestCase):

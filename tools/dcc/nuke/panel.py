@@ -222,17 +222,58 @@ def open_version() -> None:
     _OpenVersionPanel(_nuke(), nukescripts).showModalDialog()
 
 
+def _fmt_time(ts: float) -> str:
+    import time
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else ""
+
+
+def _major_choices(majors) -> list:
+    """(label, MajorVersion) pairs for the Major dropdown, newest first."""
+    out = []
+    for mv in reversed(majors):
+        tag = f"v{mv.major:03d}"
+        out.append((tag if mv.online else f"{tag}  (offline)", mv))
+    return out
+
+
+def _minor_choices(mv, show_rendered: bool) -> list:
+    """(label, MinorFile) pairs for one major's Minor dropdown, newest first,
+    each with when it was saved. Minor 0 is the auto-managed snapshot of the
+    script that actually produced a render (never an artist WIP save), so it
+    stays out of the way unless asked for -- or unless it's all that major
+    has, so a major never looks empty when it isn't."""
+    wip = [m for m in mv.minors if not m.is_rendered_snapshot]
+    shown = mv.minors if (show_rendered or not wip) else wip
+    out = []
+    for m in shown:
+        label = f"v{mv.major:03d}.{m.minor:03d}"
+        if m.is_rendered_snapshot:
+            label += " (rendered)"
+        out.append((f"{label}   {_fmt_time(m.modified) if m.online else 'offline'}".rstrip(), m))
+    return out
+
+
 class _OpenVersionPanel:
+    """Two dropdowns -- Major, then that major's Minor saves -- instead of one
+    flat list of every version, which stops being usable once a shot has
+    hundreds of workfiles. Both open on the newest."""
+
     def __init__(self, nuke, nukescripts):
         self.nuke = nuke
         self.p = nukescripts.PythonPanel("Square — Open Version", "com.square.open_version")
         self.picker = _Picker(self.p, nuke, get_ops(), with_name=True)
-        self.k_version = nuke.Enumeration_Knob("version", "Version", [""])
+        self.k_major = nuke.Enumeration_Knob("major", "Major", [""])
+        self.k_minor = nuke.Enumeration_Knob("minor", "Minor", [""])
+        self.k_rendered = nuke.Boolean_Knob("show_rendered", "Show rendered (.000) snapshots")
         self.k_info = nuke.Text_Knob("info", "")
-        for k in (self.k_version, self.k_info):
+        self.k_path = nuke.Text_Knob("path", "")
+        for k in (self.k_major, self.k_minor, self.k_rendered, self.k_info, self.k_path):
             self.p.addKnob(k)
+        self.k_rendered.setValue(False)
+        self._major_items: list = []
+        self._minor_items: list = []
         self.p.knobChanged = self._changed
-        self._reload_versions()
+        self._reload_majors()
 
     def showModalDialog(self):
         if not self.p.showModalDialog():
@@ -242,45 +283,60 @@ class _OpenVersionPanel:
     def _changed(self, knob):
         if self.picker.handles(knob) or knob is self.picker.k_name:
             self.picker.reload(knob.name() if self.picker.handles(knob) else "task")
-            self._reload_versions()
+            self._reload_majors()
+        elif knob is self.k_major:
+            self._reload_minors()
+        elif knob is self.k_rendered:
+            self._reload_minors(keep=self.k_minor.value())
+        elif knob is self.k_minor:
+            self._refresh_info()
 
-    @staticmethod
-    def _label(mv, minor) -> str:
-        if minor is None:
-            return f"v{mv.major:03d}  (offline)"
-        label = f"v{mv.major:03d}.{minor.minor:03d}"
-        # minor 0 is the auto-managed snapshot of the script that actually
-        # produced a render (see square_core.services.work.snapshot_rendered_script)
-        # -- never an artist WIP save, so it's called out distinctly here.
-        return label + " (rendered)" if minor.is_rendered_snapshot else label
-
-    def _reload_versions(self):
-        self._versions = []
+    def _reload_majors(self):
+        self._major_items, self._minor_items = [], []
         try:
             majors = get_ops().workfile_versions(self.picker.target(),
                                                  name=(self.picker.k_name.value() or "main"))
         except OpsError as e:
-            self.k_version.setValues([""])
+            self.k_major.setValues([""])
+            self.k_minor.setValues([""])
             self.k_info.setValue(str(e))
+            self.k_path.setValue("")
             return
-        labels = []
-        for mv in reversed(majors):
-            for m in mv.minors:
-                labels.append(self._label(mv, m))
-                self._versions.append((mv, m))
-            if not mv.minors:
-                labels.append(self._label(mv, None))
-                self._versions.append((mv, None))
-        self.k_version.setValues(labels or ["(none)"])
-        self.k_info.setValue(f"{len(self._versions)} version(s)")
+        self._major_items = _major_choices(majors)
+        labels = [label for label, _ in self._major_items] or ["(none)"]
+        self.k_major.setValues(labels)
+        self.k_major.setValue(labels[0])            # newest
+        self._reload_minors()
+
+    def _selected_major(self):
+        return next((mv for label, mv in self._major_items
+                     if label == self.k_major.value()), None)
+
+    def _selected_minor(self):
+        return next((m for label, m in self._minor_items
+                     if label == self.k_minor.value()), None)
+
+    def _reload_minors(self, keep: str = ""):
+        mv = self._selected_major()
+        self._minor_items = _minor_choices(mv, bool(self.k_rendered.value())) if mv else []
+        labels = [label for label, _ in self._minor_items] or ["(none)"]
+        self.k_minor.setValues(labels)
+        self.k_minor.setValue(keep if keep in labels else labels[0])     # newest
+        self._refresh_info()
+
+    def _refresh_info(self):
+        mv, minor = self._selected_major(), self._selected_minor()
+        if mv is None:
+            self.k_info.setValue(f"{len(self._major_items)} major version(s)")
+            self.k_path.setValue("")
+            return
+        note = f" — {mv.comment}" if mv.comment else ""
+        self.k_info.setValue(f"{len(self._major_items)} major(s); "
+                             f"v{mv.major:03d}: {len(mv.minors)} save(s){note}")
+        self.k_path.setValue(minor.path if minor is not None and minor.online else "")
 
     def _open(self):
-        idx = self.k_version.value()
-        try:
-            mv, minor = self._versions[
-                [self._label(m, f) for m, f in self._versions].index(idx)]
-        except (ValueError, IndexError):
-            return
+        minor = self._selected_minor()
         if minor is None or not minor.online:
             _msg("That version isn't on disk.")
             return

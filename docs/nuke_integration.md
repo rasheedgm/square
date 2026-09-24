@@ -181,10 +181,16 @@ do with what actually produced those frames.
   major) or *major up* (milestone; resets minor to 1 and records the major in
   Kitsu). Shows the destination path before you commit. No comment field —
   comments belong on the task at publish/review time.
-- **Open Version panel** — the cascade + name, then a flat version list
-  (`v003.002`, `v003.001 (rendered)`, `v002.001 (offline)` …). "Offline" = the
-  file isn't on this machine's NAS path. Opening prompts *clear & open here* /
-  *open in a new Nuke* if the session already has nodes.
+- **Open Version panel** — the cascade + name, then two dropdowns: **Major**
+  (`v003`, `v002`, `v001  (offline)` …, newest first) and that major's
+  **Minor** saves, each with when it was saved (`v003.002   2026-09-24 21:10`),
+  newest first. Both open on the newest, so the common case is just OK. It's
+  two short lists instead of one flat one because a shot can end up with
+  hundreds of workfiles. The `.000` "(rendered)" snapshots stay hidden behind
+  a *Show rendered* checkbox (unless a major has nothing else), and the info
+  lines show the major's comment and the selected file's path. "Offline" =
+  the file isn't on this machine's NAS path. Opening prompts *clear & open
+  here* / *open in a new Nuke* if the session already has nodes.
 
 ### `(new)` vs `(sync)`
 

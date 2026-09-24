@@ -13,9 +13,6 @@ override), sets:
 * `SQUARE_ROOT`   -> `<pipeline>/current`         (square_core + tools)
 * `SQUARE_DEPS`   -> `<pipeline>/envs/dcc-deps`   (pure-python gazu + requests)
 * `STUDIO_CONFIG_PATH`
-* `PYTHONPYCACHEPREFIX` -> a machine-local folder (`%LOCALAPPDATA%\square\pycache`),
-  unless already set -- .pyc files cached locally instead of next to the source
-  on the (usually network) pipeline share
 * `FFMPEG_BINARY` -> `ffmpeg_exe` from studio_config.json (`%SQUARE_FFMPEG_EXE%`
   overrides), if either is set -- e.g. one shared copy on the NAS, so a review
   proxy encode doesn't depend on ffmpeg being installed on every workstation
@@ -63,23 +60,6 @@ def _exe(dcc: str, cfg: dict) -> str:
     return str((cfg.get("dcc") or {}).get(f"{dcc}_exe", "") or "")
 
 
-def _pycache_prefix() -> str:
-    """A machine-local home for compiled .pyc files. The pipeline usually
-    lives on a network share, where importing hundreds of small files (the
-    DCC's own startup imports square_core, gazu, requests, Qt.py, ...) is
-    dominated by SMB round trips -- and a share that's read-only, or a
-    stale/missing __pycache__ beside the source, means a recompile every
-    launch. Python 3.8+ (Nuke 14 is 3.9, xStudio 3.11) reads this at start-up,
-    so it has to be in the environment BEFORE the DCC is exec'd."""
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        return str(Path(local) / "square" / "pycache")
-    try:
-        return str(Path.home() / ".square" / "pycache")
-    except RuntimeError:
-        return ""        # no home directory to be found -- skip, never block a launch
-
-
 def _ffmpeg_exe(cfg: dict) -> str:
     return os.environ.get("SQUARE_FFMPEG_EXE") or str(cfg.get("ffmpeg_exe", "") or "")
 
@@ -111,10 +91,6 @@ def main(argv=None) -> int:
     os.environ["SQUARE_ROOT"] = str(current)
     os.environ["SQUARE_DEPS"] = str(root / "envs" / "dcc-deps")
     os.environ.setdefault("STUDIO_CONFIG_PATH", str(root / "config" / "studio_config.json"))
-
-    pycache = _pycache_prefix()
-    if pycache:
-        os.environ.setdefault("PYTHONPYCACHEPREFIX", pycache)
 
     ffmpeg = _ffmpeg_exe(cfg)
     if ffmpeg:

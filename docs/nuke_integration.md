@@ -16,15 +16,6 @@ resurrect a stale session from keyring on top of it).
 to `NUKE_PATH`, points `SQUARE_DEPS` at the shared `envs/dcc-deps` (pure-Python
 `gazu` + `Qt.py`), and launches Nuke.
 
-Launching from a network share is slow mostly because of the hundreds of
-small files Python imports (each a SMB round trip), and a share whose
-`__pycache__` is missing, stale or read-only means a recompile every time.
-Every launcher therefore sets **`PYTHONPYCACHEPREFIX`** to a machine-local
-folder (`%LOCALAPPDATA%\square\pycache`) unless it's already set, so compiled
-files are cached on each workstation -- the first launch after a deploy still
-reads the source over the share, later ones don't. The bigger win, if it's
-still slow, is a local copy of `current` and `envs/dcc-deps` per machine.
-
 **From a checkout:** put `tools/dcc/nuke` **and** the repo root on `NUKE_PATH`
 (Nuke runs the first `menu.py` on a path entry; the imports need the repo root
 on `sys.path`).

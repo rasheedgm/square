@@ -1,3 +1,4 @@
+import os
 import shutil
 import tempfile
 import unittest
@@ -232,6 +233,42 @@ class TestPatternMetadataDefaults(unittest.TestCase):
         ))
         item = mapper.build_items()[0]
         self.assertNotIn("fps", item.metadata_defaulted)
+
+
+class TestTaggedOnlyLoading(unittest.TestCase):
+    """A bare Load (nothing picked in the tree) used to bring in every file
+    under the root -- untagged ones too."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        for shot, stem in (("SH0100", "plate"), ("SH0200", "other")):
+            d = self.tmp / "SQ010" / shot
+            d.mkdir(parents=True)
+            for f in range(1001, 1004):
+                (d / f"{stem}.{f}.exr").write_text("x")
+        self.mapper = FolderMapper(self.tmp)
+        self.mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr"))
+
+    def test_tagged_only_keeps_just_what_a_pattern_matched(self):
+        items = self.mapper.build_items(tagged_only=True)
+        self.assertEqual([i.shot_code for i in items], ["SH0100"])
+
+    def test_without_it_everything_is_still_returned(self):
+        self.assertEqual(len(self.mapper.build_items()), 2)
+
+    def test_a_manual_media_type_counts_as_tagged(self):
+        other = next(i for i in self.mapper.build_items() if "other" in i.files[0])
+        self.mapper.set_media_type(other.files[0], "Plate")
+        items = self.mapper.build_items(tagged_only=True)
+        self.assertEqual(len(items), 2)
+
+    def test_an_explicit_selection_can_still_pull_in_an_untagged_item(self):
+        other = next(i for i in self.mapper.build_items() if "other" in i.files[0])
+        picked = {os.path.normcase(os.path.abspath(f)) for f in other.files}
+        items = self.mapper.build_items(filter_paths=picked)          # tagged_only off
+        self.assertEqual(len(items), 1)
+        self.assertIn("other", items[0].files[0])
 
 
 if __name__ == "__main__":

@@ -174,14 +174,25 @@ class FolderMapper:
     # Build IngestSequenceItems
     # ------------------------------------------------------------------
 
-    def build_items(self, filter_paths=None):
+    def build_items(self, filter_paths=None, tagged_only=False):
+        """Scan the root into items, applying the Path Patterns and manual
+        media-type tags. `filter_paths` restricts to what the user picked in
+        the tree. `tagged_only` keeps only items a pattern matched or that
+        were tagged by hand -- what a bare "Load" (nothing selected) should
+        bring in, rather than every stray file under the root that nothing
+        described."""
         from square_core.media.scanner import PlateScanner
 
         items = PlateScanner(self.root).scan()
         patterns = self.get_path_patterns()
+        tagged = []
         for item in items:
-            self._apply_patterns_to_item(item, patterns)
-            self._apply_manual_media_type(item)
+            matched = self._apply_patterns_to_item(item, patterns)
+            manual = self._apply_manual_media_type(item)
+            if matched or manual:
+                tagged.append(item)
+        if tagged_only:
+            items = tagged
 
         if filter_paths is not None:
             filtered = []
@@ -194,15 +205,16 @@ class FolderMapper:
             return filtered
         return items
 
-    def _apply_patterns_to_item(self, item, patterns):
+    def _apply_patterns_to_item(self, item, patterns) -> bool:
+        """Apply the first matching pattern's tags to the item. True if one matched."""
         if not patterns or not item.files:
-            return
+            return False
         rel = self._relative_posix(Path(item.files[0]))
         if rel is None:
-            return
+            return False
         _, extracted = match_first(patterns, rel)
         if extracted is None:
-            return
+            return False
         canonical, extra = split_canonical_and_extra(extracted)
 
         if canonical.get("sequence_code"): item.sequence_code = canonical["sequence_code"]
@@ -229,12 +241,14 @@ class FolderMapper:
 
         if extra:
             item.extra_tags.update(extra)
+        return True
 
-    def _apply_manual_media_type(self, item):
+    def _apply_manual_media_type(self, item) -> bool:
         if not item.files:
-            return
+            return False
         candidates = (self._norm_path(item.files[0]), self._norm_path(Path(item.files[0]).parent))
         for key in candidates:
             if key in self._media_types:
                 item.media_type = self._media_types[key]
-                return
+                return True
+        return False

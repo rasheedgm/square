@@ -31,6 +31,16 @@ from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTIO
 # Item data roles (integer literals for Qt5/Qt6 compatibility)
 ROLE_PATH       = 256   # Qt.UserRole
 ROLE_KIND       = 257   # Qt.UserRole + 1
+
+
+class PathSelection(set):
+    """The paths a tree selection resolves to, remembering which of them the
+    user picked directly (`explicit`) versus which came from a parent folder."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.explicit = set()
+
 ROLE_MEDIA_TYPE = 259   # Qt.UserRole + 3  — badge text on tagged/matched leaf items
 
 
@@ -793,19 +803,26 @@ class FolderTreeWidget(QtWidgets.QWidget):
     def get_selected_file_paths(self):
         """
         Return a set of normalized string paths corresponding to currently
-        selected tree items (and their recursive children).
-        If no items are selected, returns None (meaning select all).
+        selected tree items (and their recursive children), or None if
+        nothing is selected.
+
+        The set's `.explicit` holds the real files of the items the user
+        selected themselves (a sequence / file row) -- as opposed to
+        everything that came in only because a parent folder was selected.
+        Selecting a folder means "what is tagged under it", selecting a row
+        means "that row".
         """
         selected_items = self._tree.selectedItems()
         if not selected_items:
             return None
 
-        paths = set()
+        paths = PathSelection()
         scan_cache = {}
 
-        def _collect(item):
+        def _collect(item, direct=False):
             kind = item.data(0, ROLE_KIND)
             p = item.data(0, ROLE_PATH)
+            explicit = paths.explicit if direct and kind != "folder" else None
             if p:
                 if kind == "sequence":
                     # ROLE_PATH here is a synthetic "prefix.ext" display path
@@ -818,15 +835,21 @@ class FolderTreeWidget(QtWidgets.QWidget):
                     if real_item and real_item.files:
                         for f in real_item.files:
                             paths.add(os.path.normcase(os.path.abspath(f)))
+                            if explicit is not None:
+                                explicit.add(os.path.normcase(os.path.abspath(f)))
                     else:
                         paths.add(os.path.normcase(os.path.abspath(str(p))))
+                        if explicit is not None:
+                            explicit.add(os.path.normcase(os.path.abspath(str(p))))
                 else:
                     paths.add(os.path.normcase(os.path.abspath(str(p))))
+                    if explicit is not None:
+                        explicit.add(os.path.normcase(os.path.abspath(str(p))))
             for i in range(item.childCount()):
                 _collect(item.child(i))
 
         for item in selected_items:
-            _collect(item)
+            _collect(item, direct=True)
 
         return paths
 

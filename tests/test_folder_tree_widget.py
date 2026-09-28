@@ -356,5 +356,54 @@ class TestActivePresetSync(unittest.TestCase):
             sync.assert_called_once()
 
 
+class TestFolderSelectionLoadsTaggedChildren(unittest.TestCase):
+    """Selecting a parent folder must not mean selecting every row by hand."""
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        for shot, stem in (("SH0100", "plate"), ("SH0100", "other"), ("SH0200", "plate")):
+            d = self.tmp / "SQ010" / shot
+            d.mkdir(parents=True, exist_ok=True)
+            for f in range(1001, 1004):
+                (d / f"{stem}.{f}.exr").write_text("x")
+        self.tree = FolderTreeWidget()
+        self.tree.load_path(str(self.tmp))
+        self.tree._mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr"))
+
+    def _find(self, parent, name):
+        for i in range(parent.childCount()):
+            c = parent.child(i)
+            if c.text(0).startswith(name):
+                return c
+            found = self._find(c, name)
+            if found:
+                return found
+        return None
+
+    def _select(self, item):
+        self.tree._tree.clearSelection()
+        item.setSelected(True)
+        return self.tree.get_selected_file_paths()
+
+    def test_a_selected_folder_has_no_explicit_paths(self):
+        sel = self._select(self._find(self.tree._tree.topLevelItem(0), "SQ010"))
+        self.assertEqual(sel.explicit, set())
+        self.assertTrue(sel)
+
+    def test_a_selected_sequence_row_is_explicit(self):
+        sel = self._select(self._find(self.tree._tree.topLevelItem(0), "other."))
+        self.assertEqual(len(sel.explicit), 3)
+        self.assertTrue(all("other." in p for p in sel.explicit))
+
+    def test_selecting_the_top_folder_yields_only_the_tagged_shots(self):
+        sel = self._select(self.tree._tree.topLevelItem(0))
+        items = self.tree._mapper.build_items(filter_paths=sel, tagged_only=True,
+                                              explicit_paths=sel.explicit)
+        self.assertEqual(sorted(i.shot_code for i in items), ["SH0100", "SH0200"])
+        self.assertTrue(all("plate." in i.files[0] for i in items))
+
+
 if __name__ == "__main__":
     unittest.main()

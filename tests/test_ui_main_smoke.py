@@ -5,6 +5,7 @@ against a PipelineContext backed by the in-memory tracking Kitsu fake and a
 real (tmp) NAS root. Guards the wiring, not the pixels.
 """
 
+import os
 import shutil
 import tempfile
 import unittest
@@ -211,6 +212,52 @@ class MainWindowIngestBugsTest(unittest.TestCase):
                 kind="warning", payload={"message": "Task type Comp is not on the project"}))
         warn.assert_called_once()
         self.assertIn("Task type Comp", warn.call_args[0][2])
+
+
+class MainWindowFolderSelectionTest(unittest.TestCase):
+    setUp = MainWindowSmoke.setUp
+    _wait_job = MainWindowSmoke._wait_job
+
+    def test_a_selected_parent_folder_loads_its_tagged_children_only(self):
+        from tools.ingest_tool.core.folder_mapper import FolderMapper
+        from tools.ingest_tool.widgets.folder_tree_widget import PathSelection
+        from square_core.paths.path_pattern import PathPattern
+        for shot, stem in (("SH0100", "plate"), ("SH0100", "other"), ("SH0200", "plate")):
+            d = self.delivery / "SQ010" / shot
+            d.mkdir(parents=True, exist_ok=True)
+            for i in range(3):
+                (d / f"{stem}.{1001 + i}.exr").write_bytes(b"x")
+        mapper = FolderMapper(self.delivery)
+        mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr"))
+        sel = PathSelection()
+        sel.add(os.path.normcase(os.path.abspath(str(self.delivery))))
+        for p in self.delivery.rglob("*.exr"):
+            sel.add(os.path.normcase(os.path.abspath(str(p))))
+        for d in self.delivery.rglob("SH*"):
+            sel.add(os.path.normcase(os.path.abspath(str(d))))
+        self.win._on_load_requested(str(self.delivery), mapper, sel, False)
+        self._wait_job()
+        self.assertEqual(sorted(i.shot_code for i in self.win.controller.items),
+                         ["SH0100", "SH0200"])
+        self.assertTrue(all("plate." in i.source_files[0] for i in self.win.controller.items))
+
+    def test_a_selected_folder_with_nothing_tagged_says_so(self):
+        from tools.ingest_tool.core.folder_mapper import FolderMapper
+        from tools.ingest_tool.widgets.folder_tree_widget import PathSelection
+        from square_core.paths.path_pattern import PathPattern
+        d = self.delivery / "SQ010" / "SH0100"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "other.1001.exr").write_bytes(b"x")
+        mapper = FolderMapper(self.delivery)
+        mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/nomatch.####.exr"))
+        sel = PathSelection()
+        sel.add(os.path.normcase(os.path.abspath(str(d))))
+        sel.add(os.path.normcase(os.path.abspath(str(d / "other.1001.exr"))))
+        with patch("tools.ingest_tool.ui_main.QtWidgets.QMessageBox.information") as info:
+            self.win._on_load_requested(str(self.delivery), mapper, sel, False)
+        info.assert_called_once()
+        self.assertIn("selected folder", info.call_args[0][2])
+        self.assertEqual(self.win.controller.items, [])
 
 
 if __name__ == "__main__":

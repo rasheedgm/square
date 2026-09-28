@@ -174,13 +174,14 @@ class FolderMapper:
     # Build IngestSequenceItems
     # ------------------------------------------------------------------
 
-    def build_items(self, filter_paths=None, tagged_only=False):
+    def build_items(self, filter_paths=None, tagged_only=False, explicit_paths=None):
         """Scan the root into items, applying the Path Patterns and manual
         media-type tags. `filter_paths` restricts to what the user picked in
         the tree. `tagged_only` keeps only items a pattern matched or that
-        were tagged by hand -- what a bare "Load" (nothing selected) should
-        bring in, rather than every stray file under the root that nothing
-        described."""
+        were tagged by hand -- what a bare "Load" (nothing selected) or a
+        selected folder should bring in, rather than every stray file under
+        it that nothing described. `explicit_paths` are files the user picked
+        one by one: their items are kept even when untagged."""
         from square_core.media.scanner import PlateScanner
 
         items = PlateScanner(self.root).scan()
@@ -192,7 +193,12 @@ class FolderMapper:
             if matched or manual:
                 tagged.append(item)
         if tagged_only:
-            items = tagged
+            if explicit_paths:
+                tagged_ids = {id(i) for i in tagged}
+                items = [i for i in items if id(i) in tagged_ids
+                         or {self._norm_path(f) for f in i.files} & set(explicit_paths)]
+            else:
+                items = tagged
 
         if filter_paths is not None:
             filtered = []

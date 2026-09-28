@@ -594,10 +594,14 @@ fixes are structural rather than one per symptom.
    not its number, since rows above shift on an in-place removal.
 7. **Fewer Kitsu round trips**: the shot list is fetched once per check (it was
    once per distinct shot) and a shot's existing outputs once per media type.
-8. **Load brings in what's tagged.** With nothing selected in the tree, Load /
-   Update loads only items a Path Pattern matched or that carry a manual media
-   type; selecting rows loads exactly those. (No patterns or tags at all still
-   loads everything, since there is nothing to filter on.)
+8. **Load brings in what's tagged.** Load / Update loads only items a Path
+   Pattern matched or that carry a manual media type -- across the whole root
+   when nothing is selected, and under a selected folder otherwise (select the
+   top folder and every tagged item below it loads; no need to pick each row).
+   A sequence/file row picked directly always loads, tagged or not. (No
+   patterns or tags at all still loads everything, since there is nothing to
+   filter on.) The tree's selection is a `PathSelection`: the set of paths plus
+   `.explicit`, the ones picked by hand.
 9. **Task types are enabled on the project before tasks are created.** A task
    can't be created for a type the project doesn't have, and `ensure_tasks` used to
    quietly make none, so the ingest failed with a bare "no task on SH0100".

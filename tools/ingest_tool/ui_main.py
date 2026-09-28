@@ -364,11 +364,18 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             if mapper and mapper.has_map():
-                # nothing picked in the tree -> only what's been tagged (a
-                # pattern matched / a media type was set); picking rows
-                # explicitly loads exactly those, tagged or not
-                scan_items = mapper.build_items(filter_paths=selected_paths,
-                                                tagged_only=selected_paths is None)
+                # only what is tagged (a pattern matched / a media type was
+                # set) -- under the whole root when nothing is picked, under a
+                # picked folder otherwise; rows picked one by one always load,
+                # tagged or not. A plain set (no `.explicit`) means every path
+                # in it was picked by hand.
+                if selected_paths is not None and not hasattr(selected_paths, "explicit"):
+                    explicit = selected_paths
+                else:
+                    explicit = getattr(selected_paths, "explicit", None)
+                scan_items = mapper.build_items(
+                    filter_paths=selected_paths, tagged_only=True,
+                    explicit_paths=explicit)
                 self._path_patterns = [p.to_dict() if hasattr(p, "to_dict") else p
                                        for p in mapper.get_path_patterns()]
             else:
@@ -379,12 +386,13 @@ class MainWindow(QtWidgets.QMainWindow):
                         if {os.path.normcase(os.path.abspath(f)) for f in s.files} & set(selected_paths)
                     ]
             self._delivery_root = root_path
-            if not scan_items and mapper and mapper.has_map() and selected_paths is None:
+            if not scan_items and mapper and mapper.has_map():
+                where = "under the selected folder(s)" if selected_paths else "yet"
                 QtWidgets.QMessageBox.information(
                     self, "Load",
-                    "Nothing is tagged yet -- no Path Pattern matches and no media type was "
-                    "set. Tag some items (or select rows in the tree to load them as they are), "
-                    "then Load again.")
+                    f"Nothing is tagged {where} -- no Path Pattern matches and no media type "
+                    "was set. Tag some items (or select individual rows in the tree to load "
+                    "them as they are), then Load again.")
                 return
             added = self.controller.load(scan_items, replace=not is_update)
             if added:

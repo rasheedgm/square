@@ -271,5 +271,43 @@ class TestTaggedOnlyLoading(unittest.TestCase):
         self.assertIn("other", items[0].files[0])
 
 
+class TestExplicitPathsWithTaggedOnly(unittest.TestCase):
+    """A folder in the tree means what is tagged under it; a row picked by
+    hand always loads."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        for shot, stem in (("SH0100", "plate"), ("SH0100", "other"), ("SH0200", "plate")):
+            d = self.tmp / "SQ010" / shot
+            d.mkdir(parents=True, exist_ok=True)
+            for f in range(1001, 1004):
+                (d / f"{stem}.{f}.exr").write_text("x")
+        self.mapper = FolderMapper(self.tmp)
+        self.mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr"))
+
+    def _norm(self, *parts):
+        return os.path.normcase(os.path.abspath(str(self.tmp.joinpath(*parts))))
+
+    def test_a_folder_loads_only_the_tagged_items_under_it(self):
+        folder = {self._norm("SQ010", "SH0100")}
+        items = self.mapper.build_items(filter_paths=folder, tagged_only=True)
+        self.assertEqual([(i.shot_code, "plate" in i.files[0]) for i in items],
+                         [("SH0100", True)])
+
+    def test_a_parent_folder_loads_every_tagged_item_below_it(self):
+        with_children = {self._norm("SQ010"), self._norm("SQ010", "SH0100"),
+                         self._norm("SQ010", "SH0200")}
+        items = self.mapper.build_items(filter_paths=with_children, tagged_only=True)
+        self.assertEqual(sorted(i.shot_code for i in items), ["SH0100", "SH0200"])
+
+    def test_an_explicitly_picked_untagged_row_still_loads_beside_the_folder(self):
+        other_files = {self._norm("SQ010", "SH0100", f"other.{f}.exr") for f in (1001, 1002, 1003)}
+        picked = {self._norm("SQ010", "SH0200")} | other_files
+        items = self.mapper.build_items(filter_paths=picked, tagged_only=True,
+                                        explicit_paths=other_files)
+        self.assertEqual(sorted("other" in i.files[0] for i in items), [False, True])
+
+
 if __name__ == "__main__":
     unittest.main()

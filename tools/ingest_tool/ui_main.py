@@ -299,7 +299,7 @@ class MainWindow(QtWidgets.QMainWindow):
             task_types=config_keys.read(self.pctx, "task_types") or list(_DEFAULT_TASK_TYPES),
             ingest_task_status=config_keys.read(self.pctx, "task_status"),
             transfer_mode=config_keys.read(self.pctx, "transfer_mode"),
-            hash_check=bool(config_keys.read(self.pctx, "hash_check")),
+            hash_check=config_keys.read(self.pctx, "hash_check"),
             ingested_by=getattr(self.ctx.user, "email", ""),
         )
         self._attach_bridge()

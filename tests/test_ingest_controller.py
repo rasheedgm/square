@@ -956,6 +956,81 @@ class TestCheckRun(unittest.TestCase):
         controller.run_preflight()
         self.assertEqual(len(controller.items[0].hashes), 3)
 
+    def test_each_mode_hashes_only_its_sample(self):
+        for mode, expected in (("off", 0), ("first", 1), ("first_last", 2),
+                               ("first_middle_last", 3), ("all", 5)):
+            with self.subTest(mode=mode):
+                src, work = self._env()
+                controller = _controller(_pctx(work), work, hash_check=mode)
+                _load(controller, [_make_item(src, n_frames=5)])
+                controller.run_preflight()
+                it = controller.items[0]
+                self.assertEqual(len(it.hashes), expected)
+                if mode in ("first", "first_last", "first_middle_last"):
+                    self.assertIn(it.source_files[0], it.hashes)
+
+    def test_sample_files_picks_and_dedupes(self):
+        from tools.ingest_tool.core.controller import sample_files
+        f = ["a", "b", "c", "d", "e"]
+        self.assertEqual(sample_files(f, "off"), [])
+        self.assertEqual(sample_files(f, "first"), ["a"])
+        self.assertEqual(sample_files(f, "first_last"), ["a", "e"])
+        self.assertEqual(sample_files(f, "first_middle_last"), ["a", "c", "e"])
+        self.assertEqual(sample_files(f, "all"), f)
+        self.assertEqual(sample_files(["a"], "first_middle_last"), ["a"])
+        self.assertEqual(sample_files(["a", "b"], "first_middle_last"), ["a", "b"])
+        self.assertEqual(sample_files([], "all"), [])
+
+    def test_the_old_boolean_still_means_all_or_off(self):
+        from tools.ingest_tool.core.controller import normalize_hash_mode
+        self.assertEqual(normalize_hash_mode(True), "all")
+        self.assertEqual(normalize_hash_mode(False), "off")
+        self.assertEqual(normalize_hash_mode(None), "off")
+        self.assertEqual(normalize_hash_mode("First_Last"), "first_last")
+        with self.assertRaises(ValueError):
+            normalize_hash_mode("sometimes")
+
+    def test_files_already_hashed_are_not_hashed_again(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work, hash_check="first")
+        _load(controller, [_make_item(src, n_frames=4)])
+        controller.run_preflight()
+        it = controller.items[0]
+        first = dict(it.hashes)
+        controller.hash_mode = "first_last"
+        with patch.object(controller.hasher, "hash_files", wraps=controller.hasher.hash_files) as hf:
+            controller.run_preflight([it.key])
+        self.assertEqual(hf.call_args[0][0], [it.source_files[-1]])
+        self.assertEqual(len(it.hashes), 2)
+        self.assertTrue(first.items() <= it.hashes.items())
+
+    def test_a_sampled_match_says_likely_identical(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work, hash_check="first_last")
+        _load(controller, [_make_item(src, n_frames=5)])
+        controller.run_preflight()
+        controller.run_ingest()
+        with tempfile.TemporaryDirectory() as src2:
+            second = _make_item(src2, n_frames=5, shot="SH0200")
+            _load(controller, [second])
+            controller.run_preflight([second.key])
+            self.assertEqual(controller.get(second.key).ledger_kind, "full")
+            self.assertIn("Likely identical", controller.get(second.key).ledger_detail)
+            self.assertIn("2 of 5", controller.get(second.key).ledger_detail)
+
+    def test_an_exact_match_is_not_hedged(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work, hash_check="all")
+        _load(controller, [_make_item(src, n_frames=3)])
+        controller.run_preflight()
+        controller.run_ingest()
+        with tempfile.TemporaryDirectory() as src2:
+            second = _make_item(src2, n_frames=3, shot="SH0200")
+            _load(controller, [second])
+            controller.run_preflight([second.key])
+            detail = controller.get(second.key).ledger_detail
+            self.assertTrue(detail.startswith("Identical content"), detail)
+
     def test_ledger_is_still_populated_when_the_check_skipped_hashing(self):
         """The copy hashes what it writes either way -- the ledger must not
         end up empty just because the (opt-in) pre-flight hash was off."""

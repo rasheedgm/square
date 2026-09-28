@@ -35,6 +35,12 @@ class TestIngestConfigKeys(unittest.TestCase):
         self.assertEqual(schema.get("tools.ingest.transfer_mode").choices,
                          ("copy", "hardlink", "symlink"))
 
+    def test_hash_check_is_an_enum_of_modes_defaulting_to_off(self):
+        spec = schema.get("tools.ingest.hash_check")
+        self.assertEqual(spec.default, "off")
+        self.assertEqual(spec.choices,
+                         ("off", "first", "first_last", "first_middle_last", "all"))
+
     def test_read_returns_the_schema_default_when_unset(self):
         with tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)

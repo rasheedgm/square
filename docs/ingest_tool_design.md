@@ -560,12 +560,15 @@ fixes are structural rather than one per symptom.
    re-emitted the rows -- unticking Preview "finished" it). Each row now
    settles the moment its own scan completes and shows live progress in the
    Progress column ("Reading metadata", "Hashing 3/12", "Checking Kitsu").
-2. **Hashing is opt-in** (`tools.ingest.hash_check`, default off). Fully
+2. **Hashing is opt-in** (`tools.ingest.hash_check`, default `off`). Fully
    hashing every frame was what made the check slow, and all it buys is an
-   early "identical content was ingested before". The copy still verifies every
-   file, and the ledger is now filled from the copy's own hashes, so it stays
-   populated either way. With it off, an occupied slot reads "already exists
-   (content wasn't compared)" instead of claiming the content differs.
+   early "identical content was ingested before". It is a mode: `off`,
+   `first`, `first_last`, `first_middle_last` or `all`. Sampled modes read only
+   those frames and word a match as "likely identical (N of M files sampled)";
+   only `all` says "identical". The copy still verifies every file, and the
+   ledger is filled from the copy's own hashes, so it stays populated in every
+   mode. With it off, an occupied slot reads "already exists (content wasn't
+   compared)" instead of claiming the content differs.
 3. **Skipping / removing a row stops its scan**, even mid-file: hashing polls a
    stop callback once per chunk, and a run notices a row that was skipped,
    removed or replaced (undo). Skipped rows aren't scanned at all; including one

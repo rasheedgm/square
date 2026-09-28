@@ -30,12 +30,18 @@ schema.register(
     description="How delivered files reach the NAS. hardlink / symlink need "
                 "the delivery and the NAS on the same filesystem.",
 )
+HASH_MODES = ("off", "first", "first_last", "first_middle_last", "all")
+
 schema.register(
-    "tools.ingest.hash_check", "bool", scope="both", default=False,
-    description="While checking a delivery, fully hash every source file to "
-                "spot content that was already ingested (an exact-duplicate "
-                "check). Slow on big sequences / network drives, so it's off "
-                "by default -- the copy still verifies every file either way.",
+    "tools.ingest.hash_check", "enum", scope="both", default="off",
+    choices=HASH_MODES,
+    description="How much of a delivery the check hashes to spot content that "
+                "was already ingested: off (nothing is compared), first frame, "
+                "first + last, first + middle + last, or every frame. Reading "
+                "files is what makes a check slow on big sequences / network "
+                "drives, hence off by default; a sampled mode reports "
+                "'likely identical', only 'all' is exact. The copy verifies "
+                "every file either way.",
 )
 
 

@@ -46,6 +46,36 @@ from .item import IngestItem, Stage, Action, IssueKind, Status
 logger = logging.getLogger("SquareIngestController")
 
 
+HASH_MODES = ("off", "first", "first_last", "first_middle_last", "all")
+
+
+def normalize_hash_mode(value) -> str:
+    """A config value (or the old on/off boolean) -> one of HASH_MODES."""
+    if value is True:
+        return "all"
+    if value in (False, None, ""):
+        return "off"
+    mode = str(value).strip().lower()
+    if mode not in HASH_MODES:
+        raise ValueError(f"unknown hash check mode {value!r}; expected one of {HASH_MODES}")
+    return mode
+
+
+def sample_files(files, mode: str) -> list:
+    """The source files a hash-check mode reads: none, the first frame, first
+    + last, first + middle + last, or all of them (de-duplicated for a
+    sequence too short to have distinct ones)."""
+    files = list(files)
+    n = len(files)
+    if mode == "off" or n == 0:
+        return []
+    if mode == "all":
+        return files
+    picks = {"first": [0], "first_last": [0, n - 1],
+             "first_middle_last": [0, n // 2, n - 1]}[mode]
+    return [files[i] for i in sorted(set(picks))]
+
+
 def _utcnow() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -74,7 +104,7 @@ class IngestController:
     def __init__(self, pctx, *, ledger, task_types, hasher: FileHasher | None = None,
                  extractor=None, converter=None, ingested_by: str = "",
                  ingest_task_status: str = "Done", transfer_mode: str = "copy",
-                 hash_check: bool = False):
+                 hash_check="off"):
         self.pctx = pctx
         self.ledger = ledger
         self.task_types = list(task_types or [])
@@ -86,12 +116,14 @@ class IngestController:
         self.converter = converter
         self.ingested_by = ingested_by or getattr(pctx.pipeline.user, "email", "")
         self.ingest_task_status = ingest_task_status
-        # Fully hashing every source file during the check is what makes a
-        # check slow (every byte of every frame is read, over the network
-        # for a delivery on a share) and all it buys is an early "this exact
-        # content was ingested before" -- the copy itself always verifies
-        # every file. Off unless the studio opts in (tools.ingest.hash_check).
-        self.hash_check = bool(hash_check)
+        # Hashing source files during the check is what makes it slow (every
+        # byte of every file read, over the network for a delivery on a
+        # share) and all it buys is an early "this content was ingested
+        # before" -- the copy itself always verifies every file. So it's
+        # opt-in, and how much of a sequence to read is a choice: none, first
+        # frame, first+last, first+middle+last, all (tools.ingest.hash_check).
+        # True/False from older callers mean all/off.
+        self.hash_mode = normalize_hash_mode(hash_check)
 
         self.items: list[IngestItem] = []
         self._by_key: dict[str, IngestItem] = {}
@@ -279,14 +311,16 @@ class IngestController:
                 self._set_check_stage(item, "Reading metadata", 5)
                 item.probe_metadata(self.extractor)
                 self._scanned.add(item.key)
-            if self.hash_check and item.source_files and not item.hashes:
+            wanted = [f for f in sample_files(item.source_files, self.hash_mode)
+                      if f not in item.hashes]
+            if wanted:
                 if stop():
                     return self._abandon(item)
-                item.hashes = self.hasher.hash_files(
-                    item.source_files, should_stop=stop,
+                item.hashes.update(self.hasher.hash_files(
+                    wanted, should_stop=stop,
                     progress=lambda done, total, it=item: self._set_check_stage(
                         it, f"Hashing {done}/{total}", 10 + int(80 * done / max(1, total))),
-                )
+                ))
             if stop():
                 return self._abandon(item)
             self._set_check_stage(item, "Checking Kitsu", 92)
@@ -366,14 +400,20 @@ class IngestController:
 
         match = self.ledger.classify(list(item.hashes.values()))
         item.ledger_kind = match.kind
+        # a sampled hash (first / first+last / ...) can't prove the rest of
+        # the sequence matches, so it only ever says "likely"
+        sampled = self._is_sampled(item)
         if match.kind == "full" and match.latest:
+            what = (f"Likely identical content ({len(item.hashes)} of "
+                    f"{len(item.source_files)} file(s) sampled) already ingested"
+                    if sampled else "Identical content already ingested")
             item.ledger_detail = (
-                f"Identical content already ingested as v{match.latest.version} "
-                f"on {match.latest.ingested_at[:10]}."
+                f"{what} as v{match.latest.version} on {match.latest.ingested_at[:10]}."
             )
         elif match.kind == "partial":
             item.ledger_detail = (
-                f"{match.matched_count} of {match.total_count} file(s) already ingested."
+                f"{match.matched_count} of {match.total_count} "
+                f"{'sampled ' if sampled else ''}file(s) already ingested."
             )
         else:
             item.ledger_detail = ""
@@ -395,6 +435,11 @@ class IngestController:
         current_hash = item.hashes.get(item.source_files[0], "") if item.hashes else ""
         recorded_hash = ((rec.data or {}).get("square") or {}).get("checksum", "")
         if current_hash and recorded_hash and current_hash == recorded_hash:
+            if self._is_sampled(item):
+                return preflight.SLOT_ALREADY, (
+                    f"v{item.version:03d} likely already holds this content "
+                    f"(only {len(item.hashes)} of {len(item.source_files)} file(s) were compared)."
+                )
             return preflight.SLOT_ALREADY, (
                 f"v{item.version:03d} already holds exactly this content."
             )
@@ -406,6 +451,10 @@ class IngestController:
             f"v{item.version:03d} already exists in Kitsu {why}. "
             f"Version up, or overwrite it."
         )
+
+    @staticmethod
+    def _is_sampled(item: IngestItem) -> bool:
+        return 0 < len(item.hashes) < len(item.source_files)
 
     # -- assembling issues / telling the UI -------------------------------
 

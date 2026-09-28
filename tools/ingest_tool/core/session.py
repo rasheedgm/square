@@ -98,7 +98,7 @@ class IngestSession:
             controller._by_key[it.key] = it
             # the probe (and the hashes, when the hash check is on) survive in
             # the file; no need to redo them on resume
-            if it.preflight_done and (it.hashes or not getattr(controller, "hash_check", False)):
+            if it.preflight_done and (it.hashes or getattr(controller, "hash_mode", "off") == "off"):
                 controller._scanned.add(it.key)
 
         controller._emit(

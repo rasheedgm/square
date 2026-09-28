@@ -289,7 +289,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.pctx:
             return
         self._teardown_controller()
-        self.folder_tree.set_project(self.pctx)
         root = self.pctx.project.root_path
         ledger = IngestLedger.for_project(self.pctx.pipeline.nas_root, self.pctx.code) \
             if root else NullLedger()
@@ -365,10 +364,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             if mapper and mapper.has_map():
-                # only what is tagged (a pattern matched / a media type was
-                # set) -- under the whole root when nothing is picked, under a
-                # picked folder otherwise; rows picked one by one always load,
-                # tagged or not. A plain set (no `.explicit`) means every path
+                # only what a Path Pattern matched -- under the whole root
+                # when nothing is picked, under a picked folder otherwise;
+                # rows picked one by one always load, matched or not. A plain set (no `.explicit`) means every path
                 # in it was picked by hand.
                 if selected_paths is not None and not hasattr(selected_paths, "explicit"):
                     explicit = selected_paths
@@ -391,9 +389,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 where = "under the selected folder(s)" if selected_paths else "yet"
                 QtWidgets.QMessageBox.information(
                     self, "Load",
-                    f"Nothing is tagged {where} -- no Path Pattern matches and no media type "
-                    "was set. Tag some items (or select individual rows in the tree to load "
-                    "them as they are), then Load again.")
+                    f"Nothing matches a Path Pattern {where}. Build a pattern from an item "
+                    "(right-click it in the tree), or select individual rows in the tree to "
+                    "load them as they are, then Load again.")
                 return
             added = self.controller.load(scan_items, replace=not is_update)
             if added:
@@ -549,7 +547,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.controller,
             delivery_root=self.folder_tree.root_path or self._delivery_root,
             path_patterns=self.folder_tree.current_patterns() or self._path_patterns,
-            manual_media_types=self.folder_tree.current_media_types(),
             active_preset=self.folder_tree.active_preset(),
         )
         sess.save(self.session_path)
@@ -616,9 +613,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._path_patterns = sess.path_patterns
         self.session_path = path
         remember_session(path)
-        # bring the delivery folder + its Path Patterns + manual tags back
-        self.folder_tree.restore(sess.delivery_root, sess.path_patterns,
-                                 sess.manual_media_types, sess.active_preset)
+        # bring the delivery folder + its Path Patterns back
+        self.folder_tree.restore(sess.delivery_root, sess.path_patterns, sess.active_preset)
         self.table.rebuild()
         self._update_summary()
         # re-check the rows that hadn't finished

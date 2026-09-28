@@ -7,9 +7,8 @@ every other file under the root. A root can hold several patterns, tried in the
 order they were added — first match wins — so a delivery with more than one
 shape just gets a second pattern.
 
-A lightweight manual per-item media-type tag sits on top as an escape hatch for
-the rare file that matches no saved pattern; everything else (sequence / shot /
-media name / version, and any custom tag a pattern captured) is reviewed and
+Patterns are the only way an item gets tagged; whatever a pattern doesn't
+cover (sequence / shot / media name / version, any custom tag) is reviewed and
 fixed in the ingest table itself.
 
 This object is **in-memory only**. It used to persist to a hidden
@@ -61,14 +60,13 @@ class FolderMapper:
         add_path_pattern(pattern)     — append a template (tried last)
         set_path_patterns(patterns)   — replace the whole ordered list
         match_relative_path(path)     — first pattern (if any) that matches this exact path
-        set_media_type(path, type)    — manual per-item override, always wins over a pattern
-        build_items(...)              — scan + apply patterns + manual overrides -> IngestSequenceItem list
+        build_items(...)              — scan + apply patterns -> IngestSequenceItem list
     """
 
     def __init__(self, root_path):
-        self.root = Path(root_path).resolve()
+        self._given_root = Path(root_path)     # as the tree spells it (Z:\...)
+        self.root = self._given_root.resolve() # as the scanner walks it (may be \\server\...)
         self._path_patterns = []   # list of PathPattern dicts, in try-order
-        self._media_types = {}     # resolved file/folder path str -> media type name (manual)
         self._rep_paths_cache = None
 
     # ------------------------------------------------------------------
@@ -77,7 +75,32 @@ class FolderMapper:
 
     @staticmethod
     def _norm_path(path) -> str:
-        return os.path.normcase(os.path.abspath(str(path)))
+        p = str(path)
+        # long-path prefixes the scanner adds on Windows
+        if p.startswith("\\\\?\\UNC\\"):
+            p = "\\\\" + p[8:]
+        elif p.startswith("\\\\?\\"):
+            p = p[4:]
+        return os.path.normcase(os.path.abspath(p))
+
+    def _to_scan_space(self, paths):
+        """Paths the tree hands over are spelled from the root as it was given
+        (`Z:\\jobs\\...`, a mapped or substituted drive) but the scanner walks
+        the *resolved* root (`\\\\server\\share\\...`), so a straight comparison
+        never matches and a selected row loads nothing. Re-spell them from the
+        resolved root (the originals are kept too)."""
+        if not paths:
+            return paths
+        given = self._norm_path(self._given_root).rstrip(os.sep)
+        real = self._norm_path(self.root).rstrip(os.sep)
+        if given == real:
+            return paths
+        out = set(paths)
+        for p in paths:
+            n = self._norm_path(p)
+            if n == given or n.startswith(given + os.sep):
+                out.add(real + n[len(given):])
+        return out
 
     def _relative_posix(self, path):
         """Path relative to root, POSIX-style — the string a PathPattern matches against."""
@@ -159,36 +182,14 @@ class FolderMapper:
         return self._rep_paths_cache
 
     # ------------------------------------------------------------------
-    # Manual media-type override
-    # ------------------------------------------------------------------
-
-    def set_media_type(self, path, type_name):
-        key = self._norm_path(path)
-        if type_name is None:
-            self._media_types.pop(key, None)
-        else:
-            self._media_types[key] = str(type_name)
-
-    def get_media_type(self, path):
-        return self._media_types.get(self._norm_path(path))
-
-    def get_media_types(self) -> dict:
-        """The manual overrides as a plain {path: type} dict — for the session file."""
-        return dict(self._media_types)
-
-    def set_media_types(self, mapping: dict) -> None:
-        self._media_types = {str(k): str(v) for k, v in (mapping or {}).items()}
-
-    # ------------------------------------------------------------------
     # Query
     # ------------------------------------------------------------------
 
     def has_map(self) -> bool:
-        return bool(self._path_patterns) or bool(self._media_types)
+        return bool(self._path_patterns)
 
     def clear_all(self):
         self._path_patterns.clear()
-        self._media_types.clear()
         self._rep_paths_cache = None
 
     # ------------------------------------------------------------------
@@ -196,22 +197,22 @@ class FolderMapper:
     # ------------------------------------------------------------------
 
     def build_items(self, filter_paths=None, tagged_only=False, explicit_paths=None):
-        """Scan the root into items, applying the Path Patterns and manual
-        media-type tags. `filter_paths` restricts to what the user picked in
-        the tree. `tagged_only` keeps only items a pattern matched or that
-        were tagged by hand -- what a bare "Load" (nothing selected) or a
-        selected folder should bring in, rather than every stray file under
-        it that nothing described. `explicit_paths` are files the user picked
-        one by one: their items are kept even when untagged."""
+        """Scan the root into items, applying the Path Patterns.
+        `filter_paths` restricts to what the user picked in the tree.
+        `tagged_only` keeps only items a pattern matched -- what a bare "Load"
+        (nothing selected) or a selected folder should bring in, rather than
+        every stray file under it that nothing described. `explicit_paths` are
+        files the user picked one by one: their items are kept even when
+        untagged."""
         from square_core.media.scanner import PlateScanner
 
+        filter_paths = self._to_scan_space(filter_paths)
+        explicit_paths = self._to_scan_space(explicit_paths)
         items = PlateScanner(self.root).scan()
         patterns = self.get_path_patterns()
         tagged = []
         for item in items:
-            matched = self._apply_patterns_to_item(item, patterns)
-            manual = self._apply_manual_media_type(item)
-            if matched or manual:
+            if self._apply_patterns_to_item(item, patterns):
                 tagged.append(item)
         if tagged_only:
             if explicit_paths:
@@ -274,13 +275,3 @@ class FolderMapper:
         if extra:
             item.extra_tags.update(extra)
         return True
-
-    def _apply_manual_media_type(self, item) -> bool:
-        if not item.files:
-            return False
-        candidates = (self._norm_path(item.files[0]), self._norm_path(Path(item.files[0]).parent))
-        for key in candidates:
-            if key in self._media_types:
-                item.media_type = self._media_types[key]
-                return True
-        return False

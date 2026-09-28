@@ -542,11 +542,10 @@ Suite: **285 tests green**, ~10s. (Was 369; ~90 old
    the patterns, and selects the preset. Verified save→fresh-window→resume.
 9. **Hidden sidecar scrapped** — `FolderMapper` no longer reads or writes
    `.square_ingest_map.json` (or anything to disk). It's a pure in-memory
-   object: Path Patterns + manual media-type tags. The `_table_state`
+   object: Path Patterns only. The `_table_state`
    "remember the table" feature is gone too — that's the session's job.
    Everything a delivery's tagging needs now round-trips through the
-   `*.sqingest.json` session (`path_patterns`, `manual_media_types`,
-   `active_preset`) and named presets live in `studio_config.json`. Existing
+   `*.sqingest.json` session (`path_patterns`, `active_preset`) and named presets live in `studio_config.json`. Existing
    sidecar files on disk are now inert.
 
 ## Fixes from real-UI testing (round 2)
@@ -594,14 +593,19 @@ fixes are structural rather than one per symptom.
    not its number, since rows above shift on an in-place removal.
 7. **Fewer Kitsu round trips**: the shot list is fetched once per check (it was
    once per distinct shot) and a shot's existing outputs once per media type.
-8. **Load brings in what's tagged.** Load / Update loads only items a Path
-   Pattern matched or that carry a manual media type -- across the whole root
-   when nothing is selected, and under a selected folder otherwise (select the
-   top folder and every tagged item below it loads; no need to pick each row).
-   A sequence/file row picked directly always loads, tagged or not. (No
-   patterns or tags at all still loads everything, since there is nothing to
-   filter on.) The tree's selection is a `PathSelection`: the set of paths plus
-   `.explicit`, the ones picked by hand.
+8. **Load brings in what a pattern matched.** Load / Update loads only items a
+   Path Pattern matched -- across the whole root when nothing is selected, and
+   under a selected folder otherwise (select the top folder and every matched
+   item below it loads; no need to pick each row). A sequence/file row picked
+   directly always loads, matched or not. (No patterns at all still loads
+   everything, since there is nothing to filter on.) The tree's selection is a
+   `PathSelection`: the set of paths plus `.explicit`, the ones picked by hand.
+   A root on a mapped/substituted drive is walked by the scanner as its
+   resolved path, so the mapper re-spells the tree's paths from it -- before
+   that, a row picked from `Z:\...` never matched and Load found nothing.
+   **There is no manual "Tag as <media type>" any more**: the tree's context
+   menu only builds a Path Pattern, and the mapper, the session and presets
+   carry patterns and nothing else.
 9. **Task types are enabled on the project before tasks are created.** A task
    can't be created for a type the project doesn't have, and `ensure_tasks` used to
    quietly make none, so the ingest failed with a bare "no task on SH0100".

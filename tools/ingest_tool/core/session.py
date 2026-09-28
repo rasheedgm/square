@@ -51,7 +51,6 @@ class IngestSession:
 
     delivery_root: str = ""
     path_patterns: list = field(default_factory=list)
-    manual_media_types: dict = field(default_factory=dict)
     active_preset: str = ""
 
     batch_id: str = ""
@@ -64,7 +63,7 @@ class IngestSession:
 
     @classmethod
     def capture(cls, controller, *, delivery_root="", path_patterns=None,
-                manual_media_types=None, active_preset="", dry_run=False) -> "IngestSession":
+                active_preset="", dry_run=False) -> "IngestSession":
         return cls(
             saved_at=_utcnow(),
             project_code=controller.pctx.code,
@@ -72,7 +71,6 @@ class IngestSession:
             dry_run=bool(dry_run),
             delivery_root=delivery_root or "",
             path_patterns=list(path_patterns or []),
-            manual_media_types=dict(manual_media_types or {}),
             active_preset=active_preset or "",
             batch_id=controller.batch_id,
             items=[it.to_dict() for it in controller.items],

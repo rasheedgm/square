@@ -1,18 +1,18 @@
 """
 FolderTreeWidget — Custom QTreeWidget that shows folder/file structure
-with image-sequence grouping and Path Pattern tagging.
+with image-sequence grouping and Path Pattern matching.
 
 Key behaviour:
   - Folders expand/collapse normally; they carry no tag of their own --
     a Path Pattern is built from one real leaf item's whole path (see
     path_pattern_dialog.py) and matched against every file under root.
   - Image sequences are collapsed to one line: NAME.####.EXT  1001-1015 · 15f
-  - Videos and single images appear as file nodes
+  - Videos, single images and any other file appear as file nodes
   - Hidden files (starting with .) are skipped
-  - Leaf items get a coloured badge once a manual tag or a saved pattern
-    identifies them; folders are never coloured.
-  - Right-click on a leaf item: quick media-type tags, or build/apply a
-    Path Pattern from that item's whole path.
+  - Leaf items get a coloured badge once a saved pattern matches them;
+    folders are never coloured.
+  - Right-click on a leaf item: build a Path Pattern from that item's
+    whole path.
 """
 
 import os
@@ -178,8 +178,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._root_path = None
         self._mapper    = None
-        self._pctx = None                       # set via set_project(); drives the
-                                                # media-type context menu (source="delivery")
         self._presets = ingest_presets.load()
         self.setAcceptDrops(True)
         self.setMinimumWidth(340)
@@ -216,7 +214,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._patterns_btn.clicked.connect(self._on_manage_patterns)
 
         self._clear_btn = QtWidgets.QPushButton("Clear")
-        self._clear_btn.setToolTip("Remove all Path Patterns and tags")
+        self._clear_btn.setToolTip("Remove all Path Patterns")
         self._clear_btn.setFixedHeight(28)
         self._clear_btn.setEnabled(False)
         self._clear_btn.clicked.connect(self._on_clear_tags)
@@ -418,23 +416,14 @@ class FolderTreeWidget(QtWidgets.QWidget):
         return [p.to_dict() if hasattr(p, "to_dict") else dict(p)
                 for p in self._mapper.get_path_patterns()]
 
-    def current_media_types(self) -> dict:
-        """Manual per-item media-type overrides {path: type} (for the session file)."""
-        return self._mapper.get_media_types() if self._mapper else {}
-
-    def set_project(self, pctx) -> None:
-        """The current project's config -- drives the context menu's media-type
-        list (`cfg.media_type_names(source="delivery")`), not a hardcoded list."""
-        self._pctx = pctx
-
     def active_preset(self) -> str:
         return self._presets.get("active", "") or ""
 
-    def restore(self, path: str, patterns=None, media_types=None, preset: str = "") -> None:
+    def restore(self, path: str, patterns=None, preset: str = "") -> None:
         """
         Reopen a delivery from a resumed session: load the folder and
-        re-apply its Path Patterns + manual media-type tags. No hidden
-        sidecar is read -- the session file is the only source.
+        re-apply its Path Patterns. No hidden sidecar is read -- the session
+        file is the only source.
         """
         if not path or not os.path.isdir(path):
             return
@@ -442,8 +431,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         if self._mapper:
             if patterns:
                 self._mapper.set_path_patterns(patterns)
-            if media_types:
-                self._mapper.set_media_types(media_types)
         if preset:
             self._presets["active"] = preset
             self._refresh_preset_combo()
@@ -584,22 +571,8 @@ class FolderTreeWidget(QtWidgets.QWidget):
                 return c
         return None
 
-    def _real_key_for(self, path: Path, kind: str, scan_cache=None) -> Path:
-        """A sequence tree node's own ROLE_PATH is a SYNTHETIC display path
-        (frame digits stripped, e.g. `plate.exr` for `plate.1001.exr`) -- it
-        never equals any real file, so tagging/looking-up by it directly is a
-        silent no-op once `FolderMapper.build_items()` re-scans for real
-        files. Resolve to the real first-frame file (same real item
-        `get_selected_file_paths` already resolves to) so the manual tag
-        actually reaches the row it was meant for. Falls back to `path`
-        unresolved for a plain image/video leaf, which already IS real."""
-        real_item = self._resolve_item_for_node(path, kind, scan_cache=scan_cache)
-        if real_item and real_item.files:
-            return Path(real_item.files[0])
-        return path
-
     def _refresh_item_colours(self):
-        """Walk the tree and refresh each leaf item's badge after a tag/pattern change."""
+        """Walk the tree and refresh each leaf item's badge after a pattern change."""
         if not self._mapper:
             return
         scan_cache = {}
@@ -610,9 +583,8 @@ class FolderTreeWidget(QtWidgets.QWidget):
             if path_str and kind in ("sequence", "video", "image", "file"):
                 path = Path(path_str)
                 real_item = self._resolve_item_for_node(path, kind, scan_cache=scan_cache)
-                real_path = Path(real_item.files[0]) if (real_item and real_item.files) else path
-                badge = self._mapper.get_media_type(real_path)
-                if not badge and real_item and real_item.files:
+                badge = None
+                if real_item and real_item.files:
                     _, extracted = self._mapper.match_relative_path(Path(real_item.files[0]))
                     if extracted:
                         from square_core.paths.path_pattern import split_canonical_and_extra
@@ -630,7 +602,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._tree.viewport().update()
 
     # ------------------------------------------------------------------
-    # Context Menu — leaf items only (folders carry no direct tag)
+    # Context Menu — leaf items only (folders carry no pattern of their own)
     # ------------------------------------------------------------------
 
     def _on_context_menu(self, pos):
@@ -707,11 +679,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._refresh_preset_combo()
 
     def _show_media_context_menu(self, item, path: Path, gp):
-        """Context menu for sequence / video / image leaf items. Tags are
-        stored keyed by the item's REAL first-frame file (resolved once,
-        here) -- never the tree's synthetic display path, which never
-        matches anything FolderMapper.build_items() looks up later (see
-        `_real_key_for`)."""
+        """Context menu for a leaf item: build a Path Pattern from its whole path."""
         menu = QtWidgets.QMenu(self)
 
         hdr = menu.addAction(f"  {path.name}")
@@ -719,49 +687,15 @@ class FolderTreeWidget(QtWidgets.QWidget):
         menu.addSeparator()
 
         kind = item.data(0, ROLE_KIND)
-        real_path = self._real_key_for(path, kind) if self._mapper else path
-        current_type = self._mapper.get_media_type(real_path) if self._mapper else None
-
-        media_types = (self._pctx.config.media_type_names(source="delivery")
-                      if self._pctx else [])
-
-        for mtype in media_types:
-            act = menu.addAction(f"Tag as {mtype}")
-            act.setCheckable(True)
-            act.setChecked(current_type == mtype)
-            act.triggered.connect(
-                lambda checked=False, t=mtype, i=item, p=real_path: self._set_media_type(i, p, t)
-            )
-
-        custom_act = menu.addAction("Custom Media Type…")
-        custom_act.triggered.connect(
-            lambda checked=False, i=item, p=real_path: self._set_media_type_custom(i, p)
-        )
-
-        menu.addSeparator()
         build_act = menu.addAction("🏷️ Build Path Pattern…")
         build_act.triggered.connect(
             lambda checked=False, p=path, k=kind: self._open_path_pattern_builder(p, k)
         )
 
-        if current_type:
-            menu.addSeparator()
-            clr_act = menu.addAction("Clear Media Type Tag")
-            clr_act.triggered.connect(
-                lambda checked=False, i=item, p=real_path: self._clear_item_tags(i, p)
-            )
-
         if hasattr(menu, "exec"):
             menu.exec(gp)
         else:
             menu.exec_(gp)
-
-    def _clear_item_tags(self, item, path: Path):
-        """Clears the manual media-type tag for this specific item. `path`
-        must already be the resolved real-file key (see `_real_key_for`)."""
-        if self._mapper:
-            self._mapper.set_media_type(path, None)
-        self._refresh_item_colours()
 
     def _open_path_pattern_builder(self, path: Path, kind: str):
         """Opens the Path Pattern builder, seeded from this leaf item's real whole path."""
@@ -806,30 +740,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         )
         if r == QtWidgets.QMessageBox.StandardButton.Yes:
             self._save_patterns_to_preset(active)
-
-    def _set_media_type(self, item, path: Path, type_name):
-        """Assign or clear a manual media type label on a media tree item."""
-        if self._mapper:
-            self._mapper.set_media_type(path, type_name)
-        item.setData(0, ROLE_MEDIA_TYPE, type_name)
-        # Amber = labelled, muted blue = unlabelled
-        clr = "#FBBF24" if type_name else "#5B7AA8"
-        item.setForeground(0, QtGui.QColor(clr))
-        # Force the tree to repaint this row immediately to update pill badge
-        idx = self._tree.indexFromItem(item)
-        self._tree.update(idx)
-        self._tree.viewport().update()
-
-    def _set_media_type_custom(self, item, path: Path):
-        """Open an input dialog to enter a custom media type name."""
-        current = self._mapper.get_media_type(path) if self._mapper else None
-        text, ok = QtWidgets.QInputDialog.getText(
-            self, "Custom Media Type",
-            "Enter media type name:",
-            text=current or ""
-        )
-        if ok and text.strip():
-            self._set_media_type(item, path, text.strip())
 
     # ------------------------------------------------------------------
     # Button Handlers

@@ -215,7 +215,7 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
 - **Session is a user-named `*.sqingest.json`** the user places. No hidden
   sidecars. Atomic write, debounced autosave, "reopen last session?" prompt.
 - **`FolderMapper` is in-memory only.** The old hidden
-  `.square_ingest_map.json` sidecar is gone; Path Patterns + manual tags
+  `.square_ingest_map.json` sidecar is gone; Path Patterns
   round-trip through the session, named presets through `studio_config.json`.
 - ~~**The session carries a config snapshot**~~ → **Superseded 2026-09-02.**
   The session does **not** snapshot config. On resume the tool reads the live

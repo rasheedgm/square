@@ -100,40 +100,10 @@ class TestFolderMapperPathPatterns(unittest.TestCase):
         self.assertEqual(by_seq["SQ010"].shot_code, "SH0100")
         self.assertEqual(by_seq["SQ020"].shot_code, "SH0200")
 
-    def test_manual_media_type_override_wins_over_pattern(self):
-        (self.tmp / "SQ010" / "SH0100").mkdir(parents=True)
-        exr = self.tmp / "SQ010" / "SH0100" / "plate.1001.exr"
-        exr.write_text("x")
-
-        mapper = FolderMapper(self.tmp)
-        mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/<media_type>.####.exr"))
-        # "plate" (lowercase, from the filename) is what the pattern would
-        # capture; a manual tag on the same path must win over it.
-        mapper.set_media_type(exr, "BG Plate")
-
-        items = mapper.build_items()
-        self.assertEqual(items[0].media_type, "BG Plate")
-
-    def test_media_types_dict_round_trip(self):
-        # FolderMapper is in-memory only now (no hidden sidecar); the session
-        # file persists this via get_media_types / set_media_types.
-        (self.tmp / "SQ010" / "SH0100").mkdir(parents=True)
-        exr = self.tmp / "SQ010" / "SH0100" / "plate.1001.exr"
-        exr.write_text("x")
-
-        mapper = FolderMapper(self.tmp)
-        mapper.set_media_type(exr, "Ref")
-        dumped = mapper.get_media_types()
-
-        other = FolderMapper(self.tmp)
-        other.set_media_types(dumped)
-        self.assertEqual(other.get_media_type(exr), "Ref")
-
     def test_no_sidecar_file_is_written(self):
         (self.tmp / "SQ010").mkdir(parents=True)
         mapper = FolderMapper(self.tmp)
         mapper.add_path_pattern(PathPattern(template="<sequence>"))
-        mapper.set_media_type(self.tmp / "SQ010", "Plate")
         self.assertFalse((self.tmp / ".square_ingest_map.json").exists())
         self.assertFalse(hasattr(mapper, "save"))
 
@@ -148,11 +118,10 @@ class TestFolderMapperPathPatterns(unittest.TestCase):
         self.assertEqual(patterns[0].template, "<sequence>/<shot>.exr")
         self.assertEqual(patterns[1].template, "a/<shot>.exr")
 
-    def test_clear_all_removes_patterns_and_tags(self):
+    def test_clear_all_removes_the_patterns(self):
         (self.tmp / "SQ010").mkdir(parents=True)
         mapper = FolderMapper(self.tmp)
         mapper.add_path_pattern(PathPattern(template="<sequence>"))
-        mapper.set_media_type(self.tmp / "SQ010", "Plate")
         self.assertTrue(mapper.has_map())
 
         mapper.clear_all()
@@ -256,12 +225,6 @@ class TestTaggedOnlyLoading(unittest.TestCase):
 
     def test_without_it_everything_is_still_returned(self):
         self.assertEqual(len(self.mapper.build_items()), 2)
-
-    def test_a_manual_media_type_counts_as_tagged(self):
-        other = next(i for i in self.mapper.build_items() if "other" in i.files[0])
-        self.mapper.set_media_type(other.files[0], "Plate")
-        items = self.mapper.build_items(tagged_only=True)
-        self.assertEqual(len(items), 2)
 
     def test_an_explicit_selection_can_still_pull_in_an_untagged_item(self):
         other = next(i for i in self.mapper.build_items() if "other" in i.files[0])
@@ -422,6 +385,59 @@ class TestMediaInfoFromThePath(unittest.TestCase):
 
         ingest_item.probe_metadata(_Probe)
         self.assertEqual((ingest_item.fps, ingest_item.resolution), (30.0, "1920x1080"))
+
+
+class TestThereIsNoManualTagging(unittest.TestCase):
+    """Path Patterns are the only way an item gets tagged."""
+
+    def test_the_mapper_has_no_manual_media_type_api(self):
+        mapper = FolderMapper(tempfile.mkdtemp())
+        for name in ("set_media_type", "get_media_type", "get_media_types", "set_media_types"):
+            self.assertFalse(hasattr(mapper, name), name)
+
+    def test_the_session_has_no_manual_media_types(self):
+        from tools.ingest_tool.core.session import IngestSession
+        self.assertNotIn("manual_media_types", IngestSession.__dataclass_fields__)
+        # a session saved before this went away still loads; the old key is just ignored
+        loaded = IngestSession.from_dict({"project_code": "ABC", "manual_media_types": {"a": "b"}})
+        self.assertEqual(loaded.project_code, "ABC")
+
+
+class TestRootGivenThroughADriveAlias(unittest.TestCase):
+    """A root on a mapped/substituted drive (Z:\\jobs\\...) is walked by the
+    scanner as its resolved path, so a row picked in the tree (spelled from Z:)
+    never matched and Load said nothing was tagged."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        d = self.tmp / "SQ010" / "SH0100"
+        d.mkdir(parents=True)
+        self.cdl = d / "grade.cdl"
+        self.cdl.write_text("x")
+        self.mapper = FolderMapper(self.tmp)
+        self.mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/grade.cdl"))
+        # the tree spells the root differently from the resolved one
+        self.alias = Path("Q:/aliased/root")
+        self.mapper._given_root = self.alias
+
+    def _aliased(self, *parts):
+        return os.path.normcase(os.path.abspath(str(self.alias.joinpath(*parts))))
+
+    def test_a_picked_row_spelled_from_the_alias_still_loads(self):
+        picked = {self._aliased("SQ010", "SH0100", "grade.cdl")}
+        items = self.mapper.build_items(filter_paths=picked, tagged_only=True, explicit_paths=picked)
+        self.assertEqual([i.name for i in items], ["grade.cdl"])
+
+    def test_a_picked_folder_spelled_from_the_alias_loads_what_is_tagged_under_it(self):
+        picked = {self._aliased("SQ010"), self._aliased("SQ010", "SH0100"),
+                  self._aliased("SQ010", "SH0100", "grade.cdl")}
+        items = self.mapper.build_items(filter_paths=picked, tagged_only=True)
+        self.assertEqual([i.name for i in items], ["grade.cdl"])
+
+    def test_paths_outside_the_root_are_left_alone(self):
+        other = {os.path.normcase(os.path.abspath("/somewhere/else.exr"))}
+        self.assertEqual(self.mapper._to_scan_space(other), other)
 
 
 if __name__ == "__main__":

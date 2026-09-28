@@ -42,7 +42,6 @@ class TestRoundTrip(SessionTestBase):
         sess = IngestSession.capture(
             c, delivery_root=str(self.src),
             path_patterns=[{"template": "<sequence>/<shot>/####.exr"}],
-            manual_media_types={r"/deliv/a.1001.exr": "BG Plate"},
             active_preset="VFX Standard",
         )
         path = sess.save(self.tmp / "showX")
@@ -52,7 +51,6 @@ class TestRoundTrip(SessionTestBase):
         self.assertEqual(loaded.project_code, "ABC")
         self.assertEqual(loaded.delivery_root, str(self.src))
         self.assertEqual(len(loaded.path_patterns), 1)
-        self.assertEqual(loaded.manual_media_types, {r"/deliv/a.1001.exr": "BG Plate"})
         self.assertEqual(loaded.active_preset, "VFX Standard")
 
         # resume reads the LIVE ProjectConfig via the same pctx -- no

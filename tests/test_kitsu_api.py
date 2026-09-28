@@ -193,7 +193,10 @@ class FakeBackend:
         return list(self.output_types)
 
     def new_output_type(self, name, short_name=""):
-        ot = {"id": self._nid("ot"), "name": name, "short_name": short_name or name[:3].lower()}
+        short = short_name or name[:3].lower()
+        if any(o["short_name"] == short for o in self.output_types):
+            raise RuntimeError("('data/output-types', 'A record with the same unique values already exists.')")
+        ot = {"id": self._nid("ot"), "name": name, "short_name": short}
         self.output_types.append(ot)
         return ot
 
@@ -391,6 +394,36 @@ class TestVersions(unittest.TestCase):
         proj = self.api.create_project(code="ABC")
         self.shot = self.api.ensure_shot(proj, self.api.ensure_sequence(proj, "S"), "SH")
         self.tasks = self.api.ensure_tasks(self.shot, ["Comp"])
+
+    def test_two_media_types_that_share_a_short_name_both_get_created(self):
+        plate = self.api.ensure_output_type("Plate")
+        play = self.api.ensure_output_type("Playblast")           # both want "pla"
+        self.assertNotEqual(plate["id"], play["id"])
+        self.assertNotEqual(plate["short_name"], play["short_name"])
+
+    def test_concurrent_creation_of_one_output_type_makes_one(self):
+        import threading
+        got = []
+        threads = [threading.Thread(target=lambda: got.append(self.api.ensure_output_type("CCC")))
+                   for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len({o["id"] for o in got}), 1)
+        self.assertEqual(len(self.api._b.output_types), 1)
+
+    def test_a_type_someone_else_created_meanwhile_is_reused(self):
+        original = self.api._b.new_output_type
+
+        def racing(name, short_name=""):
+            original(name, short_name)                # the other client got there first...
+            raise RuntimeError("A record with the same unique values already exists.")
+
+        self.api._b.new_output_type = racing
+        ot = self.api.ensure_output_type("CCC")
+        self.assertEqual(ot["name"], "CCC")
+        self.assertEqual(len(self.api._b.output_types), 1)
 
     def test_ensure_output_type_idempotent(self):
         a = self.api.ensure_output_type("Plate")

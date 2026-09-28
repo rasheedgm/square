@@ -14,6 +14,8 @@ computation (that's `square_core.paths`).
 from __future__ import annotations
 
 import logging
+import re
+import threading
 
 from square_core.errors import KitsuError, NeedsLogin
 from square_core.model import (
@@ -63,6 +65,9 @@ class KitsuApi:
         self.host = host
         self._tt_cache: list | None = None
         self._ts_cache: list | None = None
+        # ingest publishes rows on worker threads; two rows of one media type
+        # must not both try to create its output type
+        self._output_type_lock = threading.Lock()
 
     # ---- identity --------------------------------------------------
 
@@ -315,11 +320,42 @@ class KitsuApi:
     def output_types(self) -> list:
         return [(o.get("name", ""), o) for o in self._b.all_output_types()]
 
-    def ensure_output_type(self, name: str, short_name: str = "") -> dict:
+    def _find_output_type(self, name: str):
+        want = name.strip().lower()
         for o in self._b.all_output_types():
-            if (o.get("name") or "").lower() == name.lower():
+            if (o.get("name") or "").strip().lower() == want:
                 return o
-        return self._b.new_output_type(name, short_name)
+        return None
+
+    def ensure_output_type(self, name: str, short_name: str = "") -> dict:
+        """The output type called `name`, created if it doesn't exist yet.
+
+        Kitsu refuses a second type with the same (name, short_name) --
+        "A record with the same unique values already exists". That happens
+        when two rows of one media type are published at once (both see no
+        type, both create it) or when another type already owns the short
+        name (the default is the name's first three letters, so "Plate" and
+        "Playblast" both want "pla"). Creation is serialised, and if Kitsu
+        still refuses, the type is looked up again (someone else made it) and
+        otherwise retried with a longer / numbered short name."""
+        with self._output_type_lock:
+            found = self._find_output_type(name)
+            if found:
+                return found
+            slug = re.sub(r"[^a-z0-9]", "", name.lower()) or "type"
+            candidates = [short_name or slug[:3], slug]
+            candidates += [f"{slug}{n}" for n in range(2, 6)]
+            first_error = None
+            for short in dict.fromkeys(candidates):
+                try:
+                    return self._b.new_output_type(name, short)
+                except Exception as e:                      # gazu/Kitsu: 400 unique violation
+                    first_error = first_error or e
+                    found = self._find_output_type(name)    # created by someone else meanwhile
+                    if found:
+                        return found
+                    logger.warning("output type %r with short name %r refused: %s", name, short, e)
+            raise first_error
 
     # ---- versions -------------------------------------
 

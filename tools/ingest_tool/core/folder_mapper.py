@@ -28,11 +28,32 @@ from square_core.paths.path_pattern import PathPattern, match_first, split_canon
 
 logger = logging.getLogger("SquareFolderMapper")
 
-# Metadata fields a Path Pattern default can also cover -- these are never
-# path-tag placeholders (there's no "<fps>" token), just a fallback value for
-# when the file's own metadata can't be read, exactly like a media_type
-# default covers a field that's never part of the path at all.
+# Media-info fields a Path Pattern can supply, either as a tag on a piece of
+# the path (a folder called "2048x1152", a filename ending "_25fps" -- tag the
+# piece with the name fps / resolution / colorspace) or as a typed default for
+# a delivery that never spells it out. Either way it is a fallback: the file's
+# own metadata wins when it can be read.
 METADATA_DEFAULT_FIELDS = ("fps", "resolution", "colorspace")
+
+_FPS_RE = re.compile(r"\d+(?:[.,]\d+)?")
+_RES_RE = re.compile(r"(\d{3,5})\s*[xX\u00d7_]\s*(\d{3,5})")
+
+
+def parse_fps(value):
+    """'25', '25fps', '23.976', '23,976' -> float; None if there is no number."""
+    m = _FPS_RE.search(str(value))
+    if not m:
+        return None
+    try:
+        return float(m.group(0).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def parse_resolution(value):
+    """'2048x1152', '2048X1152', '2048_1152', '2048 x 1152' -> '2048x1152'; None otherwise."""
+    m = _RES_RE.search(str(value))
+    return f"{int(m.group(1))}x{int(m.group(2))}" if m else None
 
 
 class FolderMapper:
@@ -237,12 +258,17 @@ class FolderMapper:
                 continue
             value = extra.pop(f)
             if f == "fps":
-                try:
-                    item.fps = float(value)
-                except (TypeError, ValueError):
-                    continue
+                parsed = parse_fps(value)
+            elif f == "resolution":
+                parsed = parse_resolution(value)
             else:
-                setattr(item, f, value)
+                parsed = str(value).strip() or None
+            if parsed is None:
+                # not a value we can read (e.g. a resolution folder called
+                # "UHD") -- keep it visible as a plain tag rather than lose it
+                extra[f] = value
+                continue
+            setattr(item, f, parsed)
             item.metadata_defaulted.add(f)
 
         if extra:

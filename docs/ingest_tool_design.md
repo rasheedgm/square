@@ -695,3 +695,11 @@ the Kitsu writes are skipped.
   `Warning`}. "Ingest Selected" = those, restricted to the current selection.
 
 Next: the Phase A port onto `square_core` (`pipeline_architecture.md` §12).
+11. **fps / resolution / colorspace can come from the path.** Tag a folder or a
+    piece of the filename FPS / RESOLUTION / COLORSPACE in the Path Pattern
+    dialog (they are ordinary tags named `fps`, `resolution`, `colorspace`).
+    Values are normalised -- `25fps` / `23,976` -> a number, `2048X1152` /
+    `2048_1152` -> `2048x1152`; a value that can't be read (a folder called
+    `UHD`) stays visible as a plain tag instead of being dropped. Precedence:
+    the file's own metadata (when readable) > the path tag > the pattern's
+    typed fallback default.

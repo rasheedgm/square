@@ -489,6 +489,15 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
             btn.clicked.connect(lambda checked=False, r=role: self._tag_selected(r))
             role_row.addWidget(btn)
 
+        for name, label in (("fps", "FPS"), ("resolution", "RESOLUTION"), ("colorspace", "COLORSPACE")):
+            info_btn = QtWidgets.QPushButton(label)
+            info_btn.setToolTip(
+                f"Read the {name} from this piece of the path (a folder or part of the "
+                f"filename). Used when the file's own metadata can't be read.")
+            info_btn.setStyleSheet(f"background-color:{_CUSTOM_BG}; color:{_CUSTOM_FG}; font-weight:bold;")
+            info_btn.clicked.connect(lambda checked=False, r=name: self._tag_selected(r))
+            role_row.addWidget(info_btn)
+
         custom_btn = QtWidgets.QPushButton("Custom Tag…")
         custom_btn.setStyleSheet(f"background-color:{_CUSTOM_BG}; color:{_CUSTOM_FG}; font-weight:bold;")
         custom_btn.clicked.connect(self._tag_custom)
@@ -538,7 +547,8 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
 
         meta_hint = QtWidgets.QLabel(
             "Metadata fallback -- used only when the file's own fps/resolution/"
-            "colorspace can't be read (never a path token):"
+            "colorspace can't be read and the path doesn't carry it (tag a piece of "
+            "the path FPS / RESOLUTION / COLORSPACE above to read it from the path):"
         )
         meta_hint.setWordWrap(True)
         meta_hint.setStyleSheet("color:#94A3B8; font-size:10px;")
@@ -677,8 +687,9 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
     def _current_defaults(self, template: str) -> dict:
         """Only for a field the template never tags -- a default alongside
         its own tag would just be a dead value nothing reads. The metadata
-        fields (fps/resolution/colorspace) are never path tags, so theirs
-        apply unconditionally whenever a value's been typed."""
+        fields (fps/resolution/colorspace) can be tagged in the path too; a
+        typed value here is only the fallback when the path doesn't carry it,
+        and is applied whenever one has been typed."""
         out = {}
         for field, edit in self._default_edits.items():
             value = edit.text().strip()

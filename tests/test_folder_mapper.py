@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.ingest_tool.core.folder_mapper import FolderMapper
+from tools.ingest_tool.core.folder_mapper import FolderMapper, parse_fps, parse_resolution
 from square_core.paths.path_pattern import PathPattern
 
 
@@ -358,6 +358,70 @@ class TestNoExtensionLimit(unittest.TestCase):
         mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/grade.cdl"))
         items = mapper.build_items(tagged_only=True)
         self.assertEqual([(i.shot_code, i.name) for i in items], [("SH0100", "grade.cdl")])
+
+
+class TestMediaInfoFromThePath(unittest.TestCase):
+    """fps / resolution / colorspace can be read from a folder or filename."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _build(self, rel_dir, filename, template, defaults=None):
+        d = self.tmp / rel_dir
+        d.mkdir(parents=True, exist_ok=True)
+        (d / filename).write_text("x")
+        (d / filename.replace("1001", "1002")).write_text("x")
+        mapper = FolderMapper(self.tmp)
+        mapper.add_path_pattern(PathPattern(template=template, defaults=defaults or {}))
+        [item] = mapper.build_items(tagged_only=True)
+        return item
+
+    def test_all_three_from_folders_and_filename(self):
+        item = self._build("SQ010/SH0100/ACEScg/2048x1152", "plate_25fps.1001.exr",
+                           "<sequence>/<shot>/<colorspace>/<resolution>/plate_<fps>fps.####.exr")
+        self.assertEqual((item.colorspace, item.resolution, item.fps), ("ACEScg", "2048x1152", 25.0))
+        self.assertEqual(item.metadata_defaulted, {"colorspace", "resolution", "fps"})
+
+    def test_values_are_normalised(self):
+        self.assertEqual(parse_fps("25fps"), 25.0)
+        self.assertEqual(parse_fps("23,976"), 23.976)
+        self.assertEqual(parse_fps("fps"), None)
+        self.assertEqual(parse_resolution("2048X1152"), "2048x1152")
+        self.assertEqual(parse_resolution("4448_3096"), "4448x3096")
+        self.assertEqual(parse_resolution("2048 x 1152"), "2048x1152")
+        self.assertEqual(parse_resolution("UHD"), None)
+
+    def test_a_value_that_cannot_be_read_stays_visible_as_a_plain_tag(self):
+        item = self._build("SQ010/SH0100/UHD", "plate.1001.exr",
+                           "<sequence>/<shot>/<resolution>/plate.####.exr")
+        self.assertEqual(item.extra_tags.get("resolution"), "UHD")
+        self.assertNotIn("resolution", item.metadata_defaulted)
+
+    def test_a_path_tag_wins_over_the_typed_default(self):
+        item = self._build("SQ010/SH0100/24", "plate.1001.exr",
+                           "<sequence>/<shot>/<fps>/plate.####.exr", defaults={"fps": "30"})
+        self.assertEqual(item.fps, 24.0)
+
+    def test_the_typed_default_applies_when_the_path_does_not_carry_it(self):
+        item = self._build("SQ010/SH0100", "plate.1001.exr",
+                           "<sequence>/<shot>/plate.####.exr", defaults={"fps": "30"})
+        self.assertEqual(item.fps, 30.0)
+
+    def test_the_files_own_metadata_still_wins_over_the_path(self):
+        from tools.ingest_tool.core.item import IngestItem
+        item = self._build("SQ010/SH0100/25", "plate.1001.exr",
+                           "<sequence>/<shot>/<fps>/plate.####.exr")
+        ingest_item = IngestItem.from_scan_item(item)
+        self.assertEqual(ingest_item.fps, 25.0)
+
+        class _Probe:
+            @staticmethod
+            def probe(path):
+                return ({"fps": 30.0, "resolution": "1920x1080", "colorspace": "sRGB"}, "fake")
+
+        ingest_item.probe_metadata(_Probe)
+        self.assertEqual((ingest_item.fps, ingest_item.resolution), (30.0, "1920x1080"))
 
 
 if __name__ == "__main__":

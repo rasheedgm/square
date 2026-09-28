@@ -66,6 +66,9 @@ class OfflineApi:
         return [Task(id=f"offline-task-{n}", task_type_name=n, entity_id=getattr(shot, "id", ""))
                 for n in (names or [])]
 
+    def ensure_project_task_types(self, project, names):
+        return []
+
     def resolve_status(self, name):
         return None
 

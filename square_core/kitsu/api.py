@@ -209,6 +209,41 @@ class KitsuApi:
             out.append(_map.task(t))
         return out
 
+    def ensure_project_task_types(self, project, task_type_names) -> list:
+        """Every named task type exists (studio-wide, scoped Shot) AND is
+        enabled on `project`. A task can't be created for a type the project
+        doesn't have, so this comes first when a tool is about to create
+        tasks (`ensure_tasks` alone silently produced none). Returns the
+        names that still can't be used -- typically a non-admin who can't
+        create a type or enable one on a project."""
+        names = [n for n in (task_type_names or []) if n]
+        if not names:
+            return []
+        tt_by_name = {t["name"].lower(): t for t in self._b.all_task_types()}
+        enabled = {t.get("id") for t in self._b.project_task_types(_id(project))}
+        missing = []
+        for name in names:
+            tt = tt_by_name.get(name.lower())
+            if tt is None:
+                try:
+                    tt = self._b.new_task_type(name, for_entity="Shot")
+                except Exception:
+                    tt = None
+                if tt and tt.get("id"):
+                    tt_by_name[name.lower()] = tt
+            if not (tt and tt.get("id")):
+                missing.append(name)
+                continue
+            if tt["id"] in enabled:
+                continue
+            try:
+                self._b.add_project_task_type(_id(project), tt, len(enabled) + 1)
+                enabled.add(tt["id"])
+            except Exception as e:
+                logger.warning("could not enable task type %r on the project: %s", name, e)
+                missing.append(name)
+        return missing
+
     def resolve_status(self, name: str | None) -> dict | None:
         if not name:
             return None

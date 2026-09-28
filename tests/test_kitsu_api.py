@@ -30,6 +30,8 @@ class FakeBackend:
         self.preview_files = {}
         self.file_tree_set = []
         self.applied_templates = []
+        self.project_tts = {}     # project id -> [task type dict] enabled on it
+        self.fail_enable = set()  # task type names this fake refuses to enable
 
     def _nid(self, p):
         self._id += 1
@@ -117,6 +119,15 @@ class FakeBackend:
         return tt
 
     def update_task_type(self, tt):
+        return tt
+
+    def project_task_types(self, project):
+        return list(self.project_tts.get(project["id"], []))
+
+    def add_project_task_type(self, project, tt, priority):
+        if tt["name"] in self.fail_enable:
+            raise RuntimeError("403 forbidden")
+        self.project_tts.setdefault(project["id"], []).append(tt)
         return tt
 
     def new_task(self, entity, task_type):
@@ -325,6 +336,44 @@ class TestStatusAndReview(unittest.TestCase):
         data = api.preview_data(prev)
         self.assertEqual(data["original_width"], 1920)         # zou's key preserved
         self.assertEqual(data["square"]["shot_code"], "SH")
+
+    # -- task types on a project ------------------------------------------
+
+    def _project_and_api(self):
+        api = _api()
+        proj = api.create_project(code="ABC")
+        return api, proj
+
+    def test_ensure_project_task_types_enables_an_existing_type_on_the_project(self):
+        api, proj = self._project_and_api()
+        api._b.new_task_type("Comp")                        # exists studio-wide, not on the project
+        self.assertEqual(api.ensure_project_task_types(proj, ["Comp"]), [])
+        enabled = [t["name"] for t in api._b.project_task_types({"id": proj.id})]
+        self.assertEqual(enabled, ["Comp"])
+
+    def test_ensure_project_task_types_creates_a_type_that_does_not_exist_yet(self):
+        api, proj = self._project_and_api()
+        self.assertEqual(api.ensure_project_task_types(proj, ["Ingest"]), [])
+        self.assertIn("Ingest", [t["name"] for t in api._b.all_task_types()])
+        self.assertEqual([t["name"] for t in api._b.project_task_types({"id": proj.id})],
+                         ["Ingest"])
+
+    def test_ensure_project_task_types_is_idempotent(self):
+        api, proj = self._project_and_api()
+        api.ensure_project_task_types(proj, ["Comp"])
+        api.ensure_project_task_types(proj, ["comp"])       # any case, second time round
+        self.assertEqual(len(api._b.project_task_types({"id": proj.id})), 1)
+
+    def test_ensure_project_task_types_reports_what_it_could_not_enable(self):
+        api, proj = self._project_and_api()
+        api._b.fail_enable.add("Roto")                       # e.g. not an admin
+        missing = api.ensure_project_task_types(proj, ["Comp", "Roto"])
+        self.assertEqual(missing, ["Roto"])
+        self.assertEqual([t["name"] for t in api._b.project_task_types({"id": proj.id})], ["Comp"])
+
+    def test_ensure_project_task_types_with_nothing_requested_does_nothing(self):
+        api, proj = self._project_and_api()
+        self.assertEqual(api.ensure_project_task_types(proj, []), [])
 
     def test_annotations_round_trip(self):
         api = _api()

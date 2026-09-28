@@ -219,6 +219,14 @@ class GazuBackend:
     def update_task_type(self, tt: dict) -> dict:
         return self.g.task.update_task_type(tt)
 
+    def project_task_types(self, project) -> list:
+        """The task types enabled on a project (its Task Types settings) --
+        a task can only be created for one of these."""
+        return self.g.project.get_project_task_types(_ref(project)) or []
+
+    def add_project_task_type(self, project, task_type, priority: int) -> dict:
+        return self.g.project.add_task_type(_ref(project), _ref(task_type), priority)
+
     def new_task(self, entity, task_type) -> dict:
         return self.g.task.new_task(_ref(entity), task_type)
 

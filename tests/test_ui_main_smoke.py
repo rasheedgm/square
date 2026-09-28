@@ -177,6 +177,12 @@ class MainWindowIngestBugsTest(unittest.TestCase):
         self._wait_job()
         self.assertEqual([i.shot_code for i in self.win.controller.items], ["SH0100"])
 
+    def test_load_including_unmatched_brings_in_the_untagged_too(self):
+        mapper = self._mapper_with_one_tagged_shot()
+        self.win._on_load_requested(str(self.delivery), mapper, None, False, True)
+        self._wait_job()
+        self.assertEqual(len(self.win.controller.items), 2)      # the SH0100 tagged + the untagged one
+
     def test_picking_rows_loads_exactly_those_even_if_untagged(self):
         import os
         mapper = self._mapper_with_one_tagged_shot()

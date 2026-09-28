@@ -358,7 +358,8 @@ class MainWindow(QtWidgets.QMainWindow):
     # Loading media
     # ------------------------------------------------------------------
 
-    def _on_load_requested(self, root_path, mapper, selected_paths, is_update):
+    def _on_load_requested(self, root_path, mapper, selected_paths, is_update,
+                           include_untagged=False):
         if not self.controller:
             QtWidgets.QMessageBox.information(self, "Load", "Choose a project first.")
             return
@@ -374,7 +375,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     explicit = getattr(selected_paths, "explicit", None)
                 scan_items = mapper.build_items(
-                    filter_paths=selected_paths, tagged_only=True,
+                    filter_paths=selected_paths, tagged_only=not include_untagged,
                     explicit_paths=explicit)
                 self._path_patterns = [p.to_dict() if hasattr(p, "to_dict") else p
                                        for p in mapper.get_path_patterns()]

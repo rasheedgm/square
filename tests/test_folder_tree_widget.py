@@ -405,5 +405,42 @@ class TestFolderSelectionLoadsTaggedChildren(unittest.TestCase):
         self.assertTrue(all("plate." in i.files[0] for i in items))
 
 
+class TestLoadDropDown(unittest.TestCase):
+    """Load / Update are split buttons: the click loads matched/tagged only,
+    the drop-down entry also brings in what nothing matched."""
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        d = self.tmp / "SQ010" / "SH0100"
+        d.mkdir(parents=True)
+        (d / "plate.1001.exr").write_text("x")
+        self.tree = FolderTreeWidget()
+        self.tree.load_path(str(self.tmp))
+        self.got = []
+        self.tree.load_requested.connect(lambda *a: self.got.append(a))
+
+    def _entry(self, button, fragment):
+        return next(a for a in button.menu().actions() if fragment in a.text())
+
+    def test_the_main_click_excludes_unmatched(self):
+        self.tree._load_btn.click()
+        self.assertEqual(len(self.got), 1)
+        root, _mapper, _sel, is_update, include_untagged = self.got[0]
+        self.assertFalse(is_update)
+        self.assertFalse(include_untagged)
+
+    def test_the_drop_down_entry_includes_unmatched(self):
+        self._entry(self.tree._load_btn, "everything").trigger()
+        self.assertEqual(self.got[0][3:], (False, True))
+
+    def test_update_has_the_same_pair(self):
+        self._entry(self.tree._update_btn, "everything").trigger()
+        self.assertEqual(self.got[0][3:], (True, True))
+        self.tree._update_btn.click()
+        self.assertEqual(self.got[1][3:], (True, False))
+
+
 if __name__ == "__main__":
     unittest.main()

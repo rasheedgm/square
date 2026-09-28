@@ -149,8 +149,12 @@ class FolderTreeWidget(QtWidgets.QWidget):
     """
 
     # Signal emitted when user clicks Load (is_update=False) or Update (is_update=True)
-    # Signal signature: (root_path: str, mapper: FolderMapper, selected_paths: set/None, is_update: bool)
-    load_requested = QtCore.Signal(str, object, object, bool)
+    # Signal signature: (root_path: str, mapper: FolderMapper, selected_paths: set/None,
+    #                    is_update: bool, include_untagged: bool)
+    # include_untagged is False for the main Load / Update click (only
+    # pattern-matched or tagged items) and True from the drop-down entry that
+    # also brings in what nothing matched.
+    load_requested = QtCore.Signal(str, object, object, bool, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -292,37 +296,62 @@ class FolderTreeWidget(QtWidgets.QWidget):
         load_btn_layout = QtWidgets.QHBoxLayout()
         load_btn_layout.setSpacing(6)
 
-        self._load_btn = QtWidgets.QPushButton("→  Load")
+        self._load_btn = QtWidgets.QToolButton()
+        self._load_btn.setText("→  Load")
+        self._load_btn.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._load_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                     QtWidgets.QSizePolicy.Policy.Fixed)
         self._load_btn.setFixedHeight(36)
-        self._load_btn.setToolTip("Clear table and load selected items from tree")
+        self._load_btn.setToolTip(
+            "Clear table and load the pattern-matched / tagged items "
+            "(under the selected folder, or everywhere if nothing is selected)")
         self._load_btn.setStyleSheet(
-            "QPushButton {"
+            "QToolButton {"
             "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             "               stop:0 #1D4ED8, stop:1 #2563EB);"
             "  color:white; font-weight:bold; font-size:13px;"
             "  border:none; border-radius:6px;"
             "}"
-            "QPushButton:hover {"
+            "QToolButton:hover {"
             "  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             "               stop:0 #2563EB, stop:1 #3B82F6);"
             "}"
-            "QPushButton:disabled { background:#1A2035; color:#374151; }"
+            "QToolButton:disabled { background:#1A2035; color:#374151; }"
+            "QToolButton::menu-button { border:none; border-left:1px solid #60A5FA; width:22px; }"
         )
+        load_menu = QtWidgets.QMenu(self._load_btn)
+        load_menu.addAction("Load matched / tagged only (default)",
+                            lambda: self._on_load(is_update=False))
+        load_menu.addAction("Load everything, including unmatched",
+                            lambda: self._on_load(is_update=False, include_untagged=True))
+        self._load_btn.setMenu(load_menu)
 
-        self._update_btn = QtWidgets.QPushButton("+  Update")
+        self._update_btn = QtWidgets.QToolButton()
+        self._update_btn.setText("+  Update")
+        self._update_btn.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.MenuButtonPopup)
+        self._update_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                       QtWidgets.QSizePolicy.Policy.Fixed)
         self._update_btn.setFixedHeight(36)
-        self._update_btn.setToolTip("Update/append selected items from tree into table without clearing")
+        self._update_btn.setToolTip(
+            "Add the pattern-matched / tagged items to the table without clearing it")
         self._update_btn.setStyleSheet(
-            "QPushButton {"
+            "QToolButton {"
             "  background: #0F766E;"
             "  color:white; font-weight:bold; font-size:13px;"
             "  border:none; border-radius:6px;"
             "}"
-            "QPushButton:hover {"
+            "QToolButton:hover {"
             "  background: #0D9488;"
             "}"
-            "QPushButton:disabled { background:#1A2035; color:#374151; }"
+            "QToolButton:disabled { background:#1A2035; color:#374151; }"
+            "QToolButton::menu-button { border:none; border-left:1px solid #5EEAD4; width:22px; }"
         )
+        update_menu = QtWidgets.QMenu(self._update_btn)
+        update_menu.addAction("Add matched / tagged only (default)",
+                              lambda: self._on_load(is_update=True))
+        update_menu.addAction("Add everything, including unmatched",
+                              lambda: self._on_load(is_update=True, include_untagged=True))
+        self._update_btn.setMenu(update_menu)
 
         self._load_btn.setEnabled(False)
         self._update_btn.setEnabled(False)
@@ -853,7 +882,8 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
         return paths
 
-    def _on_load(self, is_update=False):
+    def _on_load(self, is_update=False, include_untagged=False):
         if self._root_path and self._mapper:
             selected_paths = self.get_selected_file_paths()
-            self.load_requested.emit(self._root_path, self._mapper, selected_paths, is_update)
+            self.load_requested.emit(self._root_path, self._mapper, selected_paths,
+                                     is_update, include_untagged)

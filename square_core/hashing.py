@@ -34,6 +34,10 @@ _CHUNK = 1 << 20   # 1 MiB
 DEFAULT_ALGO = "xxh3_64"
 
 
+class HashCancelled(Exception):
+    """A `should_stop` callable said to give up part-way through a file."""
+
+
 def _new_hasher(algo: str):
     if algo == "xxh3_64":
         if not _HAS_XXHASH:
@@ -69,8 +73,14 @@ class FileHasher:
         digest that will compare equal to hash_file()."""
         return _new_hasher(self.algo)
 
-    def hash_file(self, path: str) -> str:
-        """Hex digest of the file's full content, from cache when unchanged."""
+    def hash_file(self, path: str, should_stop=None) -> str:
+        """Hex digest of the file's full content, from cache when unchanged.
+
+        `should_stop` (a no-arg callable) is polled once per chunk, so a
+        multi-GB file can be abandoned within a megabyte of the caller
+        deciding it no longer matters (a skipped/removed row, a cancelled
+        check, the app closing) instead of running to the end regardless.
+        Raises HashCancelled when it says stop."""
         sig = _signature(path)
         with self._lock:
             hit = self._cache.get(sig)
@@ -80,6 +90,8 @@ class FileHasher:
         hasher = _new_hasher(self.algo)
         with open(path, "rb") as fh:
             while True:
+                if should_stop is not None and should_stop():
+                    raise HashCancelled(path)
                 chunk = fh.read(_CHUNK)
                 if not chunk:
                     break
@@ -90,9 +102,16 @@ class FileHasher:
             self._cache[sig] = digest
         return digest
 
-    def hash_files(self, paths) -> dict[str, str]:
-        """{path: digest} for each path, sequentially (caller parallelizes if wanted)."""
-        return {p: self.hash_file(p) for p in paths}
+    def hash_files(self, paths, should_stop=None, progress=None) -> dict[str, str]:
+        """{path: digest} for each path, sequentially (caller parallelizes if wanted).
+        `progress(done, total)` is called after each file."""
+        paths = list(paths)
+        out = {}
+        for i, p in enumerate(paths, start=1):
+            out[p] = self.hash_file(p, should_stop)
+            if progress is not None:
+                progress(i, len(paths))
+        return out
 
     def prime(self, path: str, digest: str) -> None:
         """

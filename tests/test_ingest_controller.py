@@ -214,7 +214,7 @@ class TestIngest(unittest.TestCase):
     def test_second_delivery_of_identical_content_is_flagged_duplicate(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)
-            controller = _controller(pctx, work)
+            controller = _controller(pctx, work, hash_check=True)
             _load(controller, [_make_item(src, name="bg")])
             controller.run_preflight()
             controller.run_ingest()
@@ -236,7 +236,7 @@ class TestIngest(unittest.TestCase):
     def test_identical_content_delivered_to_a_different_shot_is_duplicate_content(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)
-            controller = _controller(pctx, work)
+            controller = _controller(pctx, work, hash_check=True)
             _load(controller, [_make_item(src, name="bg", shot="SH0100")])
             controller.run_preflight()
             controller.run_ingest()
@@ -254,7 +254,7 @@ class TestIngest(unittest.TestCase):
         # some OTHER destination, not this row's own (empty) slot.
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)
-            controller = _controller(pctx, work)
+            controller = _controller(pctx, work, hash_check=True)
             _load(controller, [_make_item(src, name="bg", shot="SH0100")])
             controller.run_preflight()
             controller.run_ingest()
@@ -275,7 +275,7 @@ class TestIngest(unittest.TestCase):
         # ledger hash match is unaffected by which version number is picked.
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)
-            controller = _controller(pctx, work)
+            controller = _controller(pctx, work, hash_check=True)
             _load(controller, [_make_item(src, name="bg", shot="SH0100")])
             controller.run_preflight()
             controller.run_ingest()
@@ -295,7 +295,7 @@ class TestIngest(unittest.TestCase):
     def test_ignore_on_duplicate_content_makes_it_ingestable_without_touching_version(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)
-            controller = _controller(pctx, work)
+            controller = _controller(pctx, work, hash_check=True)
             _load(controller, [_make_item(src, name="bg", shot="SH0100")])
             controller.run_preflight()
             controller.run_ingest()
@@ -896,5 +896,373 @@ class TestRenameCurrentAndOriginal(unittest.TestCase):
             self.assertEqual(controller.resolve_rename_template(a, "[{current}][{original}]"), "[][]")
 
 
-if __name__ == "__main__":
-    unittest.main()
+# ---------------------------------------------------------------------------
+# The check run: cancellation, per-row progress, batch operations, caching
+# ---------------------------------------------------------------------------
+
+import threading as _threading
+
+from square_core.hashing import FileHasher as _FileHasher, HashCancelled as _HashCancelled
+from tools.ingest_tool.core.item import Status as _Status
+
+
+class _GateExtractor:
+    """Stands in for the metadata extractor; probe() blocks on a per-file
+    gate so a test can hold a row 'mid-check' while it does something else."""
+
+    def __init__(self):
+        self.calls = []
+        self.gates = {}                     # substring of the path -> Event
+        self.started = _threading.Event()
+
+    def probe(self, path):
+        self.calls.append(path)
+        self.started.set()
+        for sub, gate in self.gates.items():
+            if sub in path:
+                gate.wait(5)
+        return ({"resolution": "1920x1080", "fps": 24.0, "colorspace": "ACEScg",
+                 "width": 1920, "height": 1080}, "fake")
+
+
+class TestCheckRun(unittest.TestCase):
+    def _env(self):
+        src = tempfile.TemporaryDirectory()
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(src.cleanup)
+        self.addCleanup(work.cleanup)
+        return src.name, work.name
+
+    def _run_in_thread(self, controller, keys=None):
+        t = _threading.Thread(target=controller.run_preflight, args=(keys,))
+        t.start()
+        return t
+
+    # -- hashing is opt-in ------------------------------------------------
+
+    def test_hashing_is_off_by_default(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        _load(controller, [_make_item(src)])
+        controller.run_preflight()
+        it = controller.items[0]
+        self.assertEqual(it.hashes, {})
+        self.assertEqual(it.status, _Status.NEW)
+
+    def test_hash_check_hashes_every_source_file(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work, hash_check=True)
+        _load(controller, [_make_item(src)])
+        controller.run_preflight()
+        self.assertEqual(len(controller.items[0].hashes), 3)
+
+    def test_ledger_is_still_populated_when_the_check_skipped_hashing(self):
+        """The copy hashes what it writes either way -- the ledger must not
+        end up empty just because the (opt-in) pre-flight hash was off."""
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        _load(controller, [_make_item(src)])
+        controller.run_preflight()
+        controller.run_ingest()
+        self.assertEqual(controller.ledger.count(), 3)
+
+    def test_an_existing_slot_says_the_content_was_not_compared_without_hashing(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        _load(controller, [_make_item(src, name="bg")])
+        controller.run_preflight()
+        controller.run_ingest()
+        with tempfile.TemporaryDirectory() as src2:
+            item2 = _make_item(src2, name="bg")
+            _load(controller, [item2])
+            controller.run_preflight()
+            it2 = controller.get(item2.key)
+            self.assertEqual(it2.status, _Status.CONFLICT)
+            msg = " ".join(i.message for i in it2.issues)
+            self.assertIn("hash check is off", msg)
+
+    # -- skipping / removing / cancelling stops work -----------------------
+
+    def test_a_skipped_row_is_not_scanned_at_all(self):
+        src, work = self._env()
+        ex = _GateExtractor()
+        controller = _controller(_pctx(work), work, extractor=ex)
+        a, b = _make_item(src, name="a"), _make_item(src, name="b", shot="SH0200")
+        _load(controller, [a, b])
+        controller.skip(b.key)
+        controller.run_preflight()
+        self.assertEqual(len(ex.calls), 1)
+        self.assertTrue(controller.get(a.key).preflight_done)
+        self.assertFalse(controller.get(b.key).preflight_done)
+
+    def test_skipping_a_row_mid_check_stops_its_scan(self):
+        src, work = self._env()
+        ex = _GateExtractor()
+        gate = _threading.Event()
+        ex.gates["slow"] = gate
+        controller = _controller(_pctx(work), work, extractor=ex)
+        item = _make_item(src, name="slow")
+        _load(controller, [item])
+        t = self._run_in_thread(controller)
+        self.assertTrue(ex.started.wait(5))
+        controller.skip(item.key)               # while its probe is in flight
+        gate.set()
+        t.join(10)
+        it = controller.get(item.key)
+        self.assertFalse(it.preflight_done)     # it stopped, it did not carry on
+        self.assertEqual(it.status, _Status.SKIPPED)
+        self.assertEqual(it.dest_dir, "")       # never reached the dest / Kitsu step
+
+    def test_removing_a_row_mid_check_stops_its_scan(self):
+        src, work = self._env()
+        ex = _GateExtractor()
+        gate = _threading.Event()
+        ex.gates["slow"] = gate
+        controller = _controller(_pctx(work), work, extractor=ex)
+        item = _make_item(src, name="slow")
+        _load(controller, [item])
+        t = self._run_in_thread(controller)
+        self.assertTrue(ex.started.wait(5))
+        controller.remove(item.key)
+        gate.set()
+        t.join(10)
+        self.assertFalse(t.is_alive())
+        self.assertEqual(controller.items, [])
+        self.assertFalse(item.preflight_done)
+
+    def test_hashing_stops_when_the_row_is_removed_part_way(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work, hash_check=True)
+        item = _make_item(src)
+        _load(controller, [item])
+
+        class _RemovingHasher(_FileHasher):
+            def hash_files(inner, paths, should_stop=None, progress=None):
+                controller.remove(item.key)             # gone while "hashing"
+                assert should_stop() is True
+                raise _HashCancelled(paths[0])
+
+        controller.hasher = _RemovingHasher()
+        controller.run_preflight()
+        self.assertEqual(controller.items, [])
+        self.assertFalse(item.preflight_done)
+
+    def test_a_cancelled_check_does_not_leave_rows_on_checking(self):
+        src, work = self._env()
+        holder = {}
+
+        class _Canceller:
+            def probe(self, path):
+                holder["controller"].cancel()
+                return ({}, "fake")
+
+        controller = _controller(_pctx(work), work, extractor=_Canceller())
+        holder["controller"] = controller
+        item = _make_item(src)
+        _load(controller, [item])
+        controller.run_preflight()
+        it = controller.get(item.key)
+        self.assertEqual(it.status, _Status.CHECK_FAILED)
+        self.assertIn("cancelled", it.check_error)
+
+    # -- progress ----------------------------------------------------------
+
+    def test_each_row_finishes_as_it_completes_not_when_the_slowest_does(self):
+        src, work = self._env()
+        ex = _GateExtractor()
+        gate = _threading.Event()
+        ex.gates["slow"] = gate
+        controller = _controller(_pctx(work), work, extractor=ex)
+        fast = _make_item(src, name="fast")
+        slow = _make_item(src, name="slow", shot="SH0200")
+        _load(controller, [fast, slow])
+        t = self._run_in_thread(controller)
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline and not controller.get(fast.key).preflight_done:
+                time.sleep(0.01)
+            self.assertEqual(controller.get(fast.key).status, _Status.NEW)
+            self.assertEqual(controller.get(slow.key).status, _Status.CHECKING)
+        finally:
+            gate.set()
+            t.join(10)
+
+    def test_check_reports_its_progress(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work, hash_check=True)
+        labels = []
+        controller.subscribe(
+            lambda ev: labels.append(ev.payload.get("stage")) if ev.kind == "item_stage" else None)
+        _load(controller, [_make_item(src)])
+        controller.run_preflight()
+        self.assertIn("Reading metadata", labels)
+        self.assertIn("Hashing 3/3", labels)
+
+    def test_progress_ticks_within_a_stage_are_throttled(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        item = _make_item(src)
+        _load(controller, [item])
+        got = []
+        controller.subscribe(lambda ev: got.append(ev) if ev.kind == "item_stage" else None)
+        for pct in range(100):
+            controller._emit_stage(item, "Copying", pct)        # a burst, well inside 120ms
+        self.assertLess(len(got), 5)
+
+    # -- batch operations --------------------------------------------------
+
+    def _three(self, src, work, **kw):
+        controller = _controller(_pctx(work), work, **kw)
+        items = [_make_item(src, name=f"n{i}", shot=f"SH0{i}00") for i in range(1, 4)]
+        _load(controller, items)
+        controller.run_preflight()
+        return controller, items
+
+    def test_batch_skip_is_one_update_and_one_undo_step(self):
+        src, work = self._env()
+        controller, items = self._three(src, work)
+        events = []
+        controller.subscribe(events.append)
+        keys = [i.key for i in items]
+        undo_before = len(controller._undo)
+        controller.skip_many(keys)
+        kinds = [e.kind for e in events]
+        self.assertEqual(kinds.count("items_updated"), 1)
+        self.assertEqual(kinds.count("item_updated"), 0)
+        self.assertEqual(set(events[0].payload["keys"]), set(keys))
+        self.assertTrue(all(controller.get(k).status == _Status.SKIPPED for k in keys))
+        self.assertEqual(len(controller._undo), undo_before + 1)     # ONE step for the batch
+        controller.undo()
+        self.assertTrue(all(controller.get(k).status == _Status.NEW for k in keys))
+
+    def test_batch_remove_is_one_event_and_leaves_the_rest(self):
+        src, work = self._env()
+        controller, items = self._three(src, work)
+        events = []
+        controller.subscribe(events.append)
+        gone = controller.remove_many([items[0].key, items[1].key])
+        loaded = [e for e in events if e.kind == "items_loaded"]
+        self.assertEqual(len(loaded), 1)
+        self.assertEqual(loaded[0].payload["removed"], sorted(gone))
+        self.assertEqual([i.key for i in controller.items], [items[2].key])
+
+    def test_include_reports_rows_that_still_need_a_check(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        item = _make_item(src)
+        _load(controller, [item])
+        controller.skip(item.key)
+        controller.run_preflight()                      # skipped -> never scanned
+        self.assertEqual(controller.include_many([item.key]), [item.key])
+
+    def test_an_edit_only_redraws_the_rows_it_changed(self):
+        src, work = self._env()
+        controller, items = self._three(src, work)
+        events = []
+        controller.subscribe(events.append)
+        controller.set_field(items[0].key, "media_name", "renamed")
+        touched = set()
+        for e in events:
+            if e.kind == "item_updated":
+                touched.add(e.item.key)
+            elif e.kind == "items_updated":
+                touched.update(e.payload["keys"])
+        self.assertEqual(touched, {items[0].key})
+
+    def test_load_reports_whether_it_replaced_the_table(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        events = []
+        controller.subscribe(events.append)
+        controller.load([_make_item(src, name="a")], replace=True)
+        controller.load([_make_item(src, name="b", shot="SH0200")])
+        loaded = [e.payload for e in events if e.kind == "items_loaded"]
+        self.assertTrue(loaded[0]["replaced"])
+        self.assertFalse(loaded[1]["replaced"])
+
+    # -- Kitsu round trips -------------------------------------------------
+
+    def test_the_shot_list_is_fetched_once_per_check(self):
+        src, work = self._env()
+        pctx = _pctx(work)
+        calls = []
+        orig = pctx.kitsu.shots
+        pctx.kitsu.shots = lambda project: (calls.append(1), orig(project))[1]
+        controller = _controller(pctx, work)
+        _load(controller, [_make_item(src, name=f"n{i}", shot=f"SH0{i}00") for i in range(1, 5)])
+        controller.run_preflight()
+        self.assertEqual(len(calls), 1)
+
+    def test_a_shots_outputs_are_fetched_once_however_many_rechecks(self):
+        src, work = self._env()
+        pctx = _pctx(work)
+        calls = []
+        orig = pctx.kitsu.output_files
+        pctx.kitsu.output_files = lambda shot, **kw: (calls.append(1), orig(shot, **kw))[1]
+        controller = _controller(pctx, work)
+        item = _make_item(src)
+        _load(controller, [item])
+        controller.run_preflight()
+        self.assertEqual(len(calls), 0)             # no such shot in Kitsu yet -> nothing to fetch
+        controller.run_ingest()
+        controller.run_preflight()                  # the shot exists now
+        before = len(calls)
+        for _ in range(3):
+            controller._recheck_one(controller.items[0])
+        self.assertEqual(len(calls), before)        # served from this run's cache
+
+
+# ---------------------------------------------------------------------------
+# Task types: enable them on the project before creating tasks
+# ---------------------------------------------------------------------------
+
+class _KitsuWithTaskTypes(_TrackingKitsu):
+    def __init__(self, missing=(), tasks=True):
+        super().__init__()
+        self.ensured = []
+        self._missing = list(missing)
+        self._tasks = tasks
+
+    def ensure_project_task_types(self, project, names):
+        self.ensured.append(list(names))
+        return list(self._missing)
+
+    def ensure_tasks(self, shot, names):
+        return super().ensure_tasks(shot, names) if self._tasks else []
+
+
+class TestIngestTaskTypes(unittest.TestCase):
+    def _run(self, kitsu):
+        src = tempfile.TemporaryDirectory()
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(src.cleanup)
+        self.addCleanup(work.cleanup)
+        controller = _controller(_pctx(work.name, kitsu), work.name)
+        item = _make_item(src.name)
+        _load(controller, [item])
+        controller.run_preflight()
+        events = []
+        controller.subscribe(events.append)
+        controller.run_ingest()
+        return controller, controller.get(item.key), events
+
+    def test_the_batch_task_types_are_ensured_on_the_project_first(self):
+        kitsu = _KitsuWithTaskTypes()
+        controller, it, _ = self._run(kitsu)
+        self.assertEqual(kitsu.ensured, [["Comp"]])
+        self.assertEqual(it.status.value, "Completed")
+
+    def test_a_type_that_cannot_be_enabled_warns_before_anything_is_touched(self):
+        kitsu = _KitsuWithTaskTypes(missing=["Comp"])
+        controller, it, events = self._run(kitsu)
+        warnings = [e for e in events if e.kind == "warning"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Comp", warnings[0].payload["message"])
+        self.assertIn("Project Settings", warnings[0].payload["message"])
+
+    def test_no_task_created_gives_an_actionable_error_not_a_bare_one(self):
+        kitsu = _KitsuWithTaskTypes(tasks=False)
+        controller, it, _ = self._run(kitsu)
+        self.assertEqual(it.status.value, "Failed")
+        self.assertIn("Task Types", it.ingest_error)
+        self.assertIn("SH0100", it.ingest_error)

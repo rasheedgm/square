@@ -30,6 +30,13 @@ schema.register(
     description="How delivered files reach the NAS. hardlink / symlink need "
                 "the delivery and the NAS on the same filesystem.",
 )
+schema.register(
+    "tools.ingest.hash_check", "bool", scope="both", default=False,
+    description="While checking a delivery, fully hash every source file to "
+                "spot content that was already ingested (an exact-duplicate "
+                "check). Slow on big sequences / network drives, so it's off "
+                "by default -- the copy still verifies every file either way.",
+)
 
 
 def read(pctx, key: str):

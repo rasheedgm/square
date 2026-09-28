@@ -549,6 +549,62 @@ Suite: **285 tests green**, ~10s. (Was 369; ~90 old
    `active_preset`) and named presets live in `studio_config.json`. Existing
    sidecar files on disk are now inert.
 
+## Fixes from real-UI testing (round 2)
+
+Reported against the check stage and the table; the causes were shared, so the
+fixes are structural rather than one per symptom.
+
+1. **Rows finish one by one.** A check used to emit its results only after
+   the *slowest* row of the batch was done, so one big delivery left every
+   row on "Checking" (and a refresh only showed up when something unrelated
+   re-emitted the rows -- unticking Preview "finished" it). Each row now
+   settles the moment its own scan completes and shows live progress in the
+   Progress column ("Reading metadata", "Hashing 3/12", "Checking Kitsu").
+2. **Hashing is opt-in** (`tools.ingest.hash_check`, default off). Fully
+   hashing every frame was what made the check slow, and all it buys is an
+   early "identical content was ingested before". The copy still verifies every
+   file, and the ledger is now filled from the copy's own hashes, so it stays
+   populated either way. With it off, an occupied slot reads "already exists
+   (content wasn't compared)" instead of claiming the content differs.
+3. **Skipping / removing a row stops its scan**, even mid-file: hashing polls a
+   stop callback once per chunk, and a run notices a row that was skipped,
+   removed or replaced (undo). Skipped rows aren't scanned at all; including one
+   again checks it. A cancelled check marks unfinished rows *Check Failed*
+   ("Re-check to finish it") instead of leaving them on Checking forever.
+4. **No more stale controllers.** Switching project / resuming a session used
+   to leave the old controller's check running (and its events poking the new
+   table into rebuilds). The old controller is now shut down and its bridge
+   disconnected first, and closing the window waits for the job -- which stops
+   within a chunk of a file, so the process really exits instead of carrying on
+   hashing in the background. A cancel that arrives while a job thread is still
+   starting is no longer wiped out by the run's own start-up.
+5. **A check requested while a job runs is queued**, not silently dropped (rows
+   loaded meanwhile were never scanned).
+6. **Batch actions are batch operations.** `skip_many` / `include_many` /
+   `remove_many` do one undo entry, one reassemble and one UI update. A
+   reassemble now reports only the rows whose status/issues actually changed
+   (plus the ones just edited) -- it used to re-emit *every* row on every edit,
+   so a K-row skip cost K x N row redraws and a remove rebuilt the whole table
+   once per row. The table removes rows in place, updates several rows in one
+   repaint, throttles progress ticks (~8/s per row), and only re-applies a
+   stylesheet when it changed. Its per-row checkboxes remember the row's *key*,
+   not its number, since rows above shift on an in-place removal.
+7. **Fewer Kitsu round trips**: the shot list is fetched once per check (it was
+   once per distinct shot) and a shot's existing outputs once per media type.
+8. **Load brings in what's tagged.** With nothing selected in the tree, Load /
+   Update loads only items a Path Pattern matched or that carry a manual media
+   type; selecting rows loads exactly those. (No patterns or tags at all still
+   loads everything, since there is nothing to filter on.)
+9. **Task types are enabled on the project before tasks are created.** A task
+   can't be created for a type the project doesn't have, and `ensure_tasks` used to
+   quietly make none, so the ingest failed with a bare "no task on SH0100".
+   `KitsuApi.ensure_project_task_types` now creates/enables the batch's types
+   first; if that can't be done (typically a non-admin) a warning names the
+   types and where to add them, and the row's error says the same.
+
+Also fixed on the way: controller `payload={...}` events arrived wrapped as
+`{"payload": {...}}`, so no listener could read them; they're flat now.
+
 ## Performance rework (copy + preview)
 
 1. **Preview is off the critical path.** `_ingest_core` now finishes — files

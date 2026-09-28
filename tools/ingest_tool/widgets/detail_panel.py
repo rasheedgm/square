@@ -49,7 +49,17 @@ class DetailPanel(QtWidgets.QScrollArea):
         self._render()
 
     def _on_event(self, ev) -> None:
-        if ev.kind in ("item_updated", "undo", "preflight_finished", "ingest_finished") and self._keys:
+        if not self._keys:
+            return
+        if ev.kind == "item_updated":
+            # only when it's a row being shown -- during a check every row
+            # finishing used to rebuild the panel for the selection
+            if ev.item is not None and ev.item.key in self._keys:
+                self._render()
+        elif ev.kind == "items_updated":
+            if set(ev.payload.get("keys", ())) & set(self._keys):
+                self._render()
+        elif ev.kind in ("undo", "preflight_finished", "ingest_finished"):
             self._render()
 
     # ------------------------------------------------------------------

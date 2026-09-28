@@ -253,9 +253,12 @@ class MainWindow(QtWidgets.QMainWindow):
             def rename_cells(self, *a): return 0
             def resolve_rename_template(self, key, template, attr=None): return template
             def skip(self, *a): pass
+            def skip_many(self, *a): pass
             def include(self, *a): pass
+            def include_many(self, *a): pass
             def preflight(self, *a): pass
             def remove(self, *a): pass
+            def remove_many(self, *a): return []
             def set_field(self, *a): pass
             def set_preview(self, *a): pass
             def set_convert_to_exr(self, *a): pass
@@ -266,9 +269,26 @@ class MainWindow(QtWidgets.QMainWindow):
     # Controller lifecycle
     # ------------------------------------------------------------------
 
+    def _teardown_controller(self) -> None:
+        """Stop the outgoing controller for good before a new one replaces it
+        (project switch, session resume, settings change). Left running, its
+        check kept hashing in the background and its events kept poking the
+        window -- rebuilding the table from stale rows -- long after the row
+        it was working on was gone."""
+        if self._autosaver:
+            self._autosaver.flush()
+            self._autosaver.stop()
+            self._autosaver = None
+        if self.bridge:
+            old, self.bridge = self.bridge, None
+            old.close()
+            old.deleteLater()
+        self.controller = None
+
     def _rebuild_controller(self) -> None:
         if not self.pctx:
             return
+        self._teardown_controller()
         self.folder_tree.set_project(self.pctx)
         root = self.pctx.project.root_path
         ledger = IngestLedger.for_project(self.pctx.pipeline.nas_root, self.pctx.code) \
@@ -279,6 +299,7 @@ class MainWindow(QtWidgets.QMainWindow):
             task_types=config_keys.read(self.pctx, "task_types") or list(_DEFAULT_TASK_TYPES),
             ingest_task_status=config_keys.read(self.pctx, "task_status"),
             transfer_mode=config_keys.read(self.pctx, "transfer_mode"),
+            hash_check=bool(config_keys.read(self.pctx, "hash_check")),
             ingested_by=getattr(self.ctx.user, "email", ""),
         )
         self._attach_bridge()
@@ -343,7 +364,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         try:
             if mapper and mapper.has_map():
-                scan_items = mapper.build_items(filter_paths=selected_paths)
+                # nothing picked in the tree -> only what's been tagged (a
+                # pattern matched / a media type was set); picking rows
+                # explicitly loads exactly those, tagged or not
+                scan_items = mapper.build_items(filter_paths=selected_paths,
+                                                tagged_only=selected_paths is None)
                 self._path_patterns = [p.to_dict() if hasattr(p, "to_dict") else p
                                        for p in mapper.get_path_patterns()]
             else:
@@ -354,8 +379,16 @@ class MainWindow(QtWidgets.QMainWindow):
                         if {os.path.normcase(os.path.abspath(f)) for f in s.files} & set(selected_paths)
                     ]
             self._delivery_root = root_path
-            self.controller.load(scan_items, replace=not is_update)
-            self.bridge.preflight()
+            if not scan_items and mapper and mapper.has_map() and selected_paths is None:
+                QtWidgets.QMessageBox.information(
+                    self, "Load",
+                    "Nothing is tagged yet -- no Path Pattern matches and no media type was "
+                    "set. Tag some items (or select rows in the tree to load them as they are), "
+                    "then Load again.")
+                return
+            added = self.controller.load(scan_items, replace=not is_update)
+            if added:
+                self.bridge.preflight([i.key for i in added])
         except Exception as e:
             logger.exception("[IngestMainUI] load failed")
             QtWidgets.QMessageBox.critical(self, "Load", f"Could not load media:\n{e}")
@@ -365,11 +398,18 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_controller_event(self, ev):
+        if ev.kind == "warning":
+            msg = ev.payload.get("message", "")
+            self.statusBar().showMessage(msg, 20000)
+            QtWidgets.QMessageBox.warning(self, "Ingest", msg)
+            return
         if self._autosaver and ev.kind in (
-            "item_updated", "items_loaded", "preflight_finished", "ingest_finished", "undo",
+            "item_updated", "items_updated", "items_loaded", "preflight_finished",
+            "ingest_finished", "undo",
         ):
             self._autosaver.mark_dirty()
-        if ev.kind in ("preflight_finished", "ingest_finished", "items_loaded", "item_updated", "undo"):
+        if ev.kind in ("preflight_finished", "ingest_finished", "items_loaded",
+                       "item_updated", "items_updated", "undo"):
             self._update_summary()
 
     def _on_job_started(self, kind):
@@ -469,7 +509,8 @@ class MainWindow(QtWidgets.QMainWindow):
         total = len(self.controller.items)
         ready = len(self.controller.ingestable_items())
         parts = [f"{total} rows", f"{ready} ready"]
-        for k in ("Conflict", "Needs Info", "Skipped", "Already Ingested", "Completed", "Failed"):
+        for k in ("Checking", "Check Failed", "Conflict", "Needs Info", "Skipped",
+                  "Already Ingested", "Completed", "Failed"):
             if s.get(k):
                 parts.append(f"{s[k]} {k.lower()}")
         self.summary_lbl.setText("  ·  ".join(parts))
@@ -587,9 +628,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if self._autosaver:
             self._autosaver.flush()
             self._autosaver.stop()
+        # stop all background work and wait for it: checks now stop within a
+        # chunk of a file, so this is quick -- and the process really exits
+        # instead of carrying on hashing in the background after the window
+        # is gone
         if self.bridge:
-            self.bridge.cancel()
-            self.bridge.wait(3000)
-        if self.controller:
+            self.bridge.close()
+        elif self.controller:
             self.controller.shutdown()
         super().closeEvent(event)

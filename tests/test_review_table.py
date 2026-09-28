@@ -147,5 +147,68 @@ class ReviewTableTest(unittest.TestCase):
         self.assertEqual(self._t().item(0, C_MEDIA).text(), "SH0100_renamed")
 
 
+class ReviewTableBulkTest(ReviewTableTest):
+    """Removing rows / batch actions must update the table in place, not
+    rebuild it (every row's widgets recreated) once per row."""
+
+    def _rows_keys(self):
+        return list(self.table._rows)
+
+    def test_removing_rows_updates_in_place_without_a_rebuild(self):
+        self._load(self._item("a"), self._item("b", shot="SH0200"), self._item("c", shot="SH0300"))
+        keys = [i.key for i in self.ctrl.items]
+        with patch.object(self.table, "rebuild", wraps=self.table.rebuild) as rb:
+            self.bridge.remove_many([keys[0], keys[1]])
+            rb.assert_not_called()
+        self.assertEqual(self._t().rowCount(), 1)
+        self.assertEqual(self._rows_keys(), [keys[2]])
+
+    def test_checkboxes_still_target_their_own_row_after_removals(self):
+        """Regression guard for removing in place: the preview checkbox used
+        to remember a ROW NUMBER, which shifts when rows above it go."""
+        self._load(self._item("a"), self._item("b", shot="SH0200"))
+        first, second = [i.key for i in self.ctrl.items]
+        self.bridge.remove_many([first])
+        chk = self._t().cellWidget(0, C_PREV).findChild(QtWidgets.QCheckBox)
+        chk.setChecked(not chk.isChecked())
+        self.assertEqual(self.ctrl.get(second).preview_wanted, chk.isChecked())
+
+    def test_batch_skip_updates_every_row(self):
+        self._load(self._item("a"), self._item("b", shot="SH0200"), self._item("c", shot="SH0300"))
+        self.bridge.preflight(); self._wait_job()
+        self.bridge.skip_many([i.key for i in self.ctrl.items])
+        for r in range(3):
+            self.assertEqual(self._t().cellWidget(r, C_STATUS).text(), Status.SKIPPED.value)
+        self.bridge.include_many([i.key for i in self.ctrl.items])
+        self._wait_job()
+        for r in range(3):
+            self.assertNotEqual(self._t().cellWidget(r, C_STATUS).text(), Status.SKIPPED.value)
+
+    def test_more_rows_are_appended_without_rebuilding(self):
+        self._load(self._item("a"))
+        with patch.object(self.table, "rebuild", wraps=self.table.rebuild) as rb:
+            self.bridge.load([self._item("b", shot="SH0200")])
+            rb.assert_not_called()
+        self.assertEqual(self._t().rowCount(), 2)
+
+    def test_a_stale_event_for_a_row_that_is_gone_does_not_rebuild(self):
+        [it] = self._load(self._item("a"))
+        self.bridge.remove_many([it.key])
+        with patch.object(self.table, "rebuild", wraps=self.table.rebuild) as rb:
+            self.ctrl._emit("item_updated", item=it)          # a scan finishing after removal
+            self.app.processEvents()
+            rb.assert_not_called()
+        self.assertEqual(self._t().rowCount(), 0)
+
+    def test_progress_shows_while_a_row_is_checking(self):
+        [it] = self._load(self._item("a"))
+        it.preflight_done = False
+        it.check_stage, it.check_pct = "Hashing 2/5", 40
+        self.table._update_row(it)
+        bar = self._t().cellWidget(0, 16)
+        self.assertEqual(bar.value(), 40)
+        self.assertIn("Hashing 2/5", bar.format())
+
+
 if __name__ == "__main__":
     unittest.main()

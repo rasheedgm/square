@@ -151,5 +151,67 @@ class MainWindowSmoke(unittest.TestCase):
         loop.exec()
 
 
+class MainWindowIngestBugsTest(unittest.TestCase):
+    """Round-2 real-UI bugs: what Load brings in, and what happens to the
+    outgoing controller when a new one replaces it."""
+
+    # the same window fixture as the smoke tests above, without re-running them
+    setUp = MainWindowSmoke.setUp
+    _wait_job = MainWindowSmoke._wait_job
+
+    def _mapper_with_one_tagged_shot(self):
+        from tools.ingest_tool.core.folder_mapper import FolderMapper
+        from square_core.paths.path_pattern import PathPattern
+        d = self.delivery / "SQ010" / "SH0200"
+        d.mkdir(parents=True)
+        for i in range(3):
+            (d / f"other.{1001 + i}.exr").write_bytes(b"x")
+        mapper = FolderMapper(self.delivery)
+        mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr"))
+        return mapper
+
+    def test_a_bare_load_only_brings_in_what_is_tagged(self):
+        mapper = self._mapper_with_one_tagged_shot()
+        self.win._on_load_requested(str(self.delivery), mapper, None, False)
+        self._wait_job()
+        self.assertEqual([i.shot_code for i in self.win.controller.items], ["SH0100"])
+
+    def test_picking_rows_loads_exactly_those_even_if_untagged(self):
+        import os
+        mapper = self._mapper_with_one_tagged_shot()
+        other = next(i for i in mapper.build_items() if "other" in i.files[0])
+        picked = {os.path.normcase(os.path.abspath(f)) for f in other.files}
+        self.win._on_load_requested(str(self.delivery), mapper, picked, False)
+        self._wait_job()
+        self.assertEqual(len(self.win.controller.items), 1)
+        self.assertIn("other", self.win.controller.items[0].source_files[0])
+
+    def test_nothing_tagged_and_nothing_picked_says_so_instead_of_loading_everything(self):
+        from tools.ingest_tool.core.folder_mapper import FolderMapper
+        from square_core.paths.path_pattern import PathPattern
+        mapper = FolderMapper(self.delivery)
+        mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/nomatch.####.exr"))
+        with patch("tools.ingest_tool.ui_main.QtWidgets.QMessageBox.information") as info:
+            self.win._on_load_requested(str(self.delivery), mapper, None, False)
+        info.assert_called_once()
+        self.assertEqual(self.win.controller.items, [])
+
+    def test_replacing_the_controller_stops_the_old_one(self):
+        old_controller, old_bridge = self.win.controller, self.win.bridge
+        self.win._rebuild_controller()
+        self.assertIsNot(self.win.controller, old_controller)
+        self.assertTrue(old_controller._cancel.is_set())      # its work is told to stop
+        self.assertTrue(old_bridge._closed)
+        self.assertIs(self.win.table.bridge, self.win.bridge)
+
+    def test_a_warning_event_reaches_the_user(self):
+        from tools.ingest_tool.core.controller import ControllerEvent
+        with patch("tools.ingest_tool.ui_main.QtWidgets.QMessageBox.warning") as warn:
+            self.win._on_controller_event(ControllerEvent(
+                kind="warning", payload={"message": "Task type Comp is not on the project"}))
+        warn.assert_called_once()
+        self.assertIn("Task type Comp", warn.call_args[0][2])
+
+
 if __name__ == "__main__":
     unittest.main()

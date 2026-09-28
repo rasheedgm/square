@@ -32,11 +32,12 @@ import tempfile
 import logging
 import datetime
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from square_core.hashing import FileHasher
+from square_core.hashing import FileHasher, HashCancelled
 from square_core.services import breakdown, media as media_service
 
 from . import preflight
@@ -72,7 +73,8 @@ def _wants_preview(pctx, media_type: str) -> bool:
 class IngestController:
     def __init__(self, pctx, *, ledger, task_types, hasher: FileHasher | None = None,
                  extractor=None, converter=None, ingested_by: str = "",
-                 ingest_task_status: str = "Done", transfer_mode: str = "copy"):
+                 ingest_task_status: str = "Done", transfer_mode: str = "copy",
+                 hash_check: bool = False):
         self.pctx = pctx
         self.ledger = ledger
         self.task_types = list(task_types or [])
@@ -84,6 +86,12 @@ class IngestController:
         self.converter = converter
         self.ingested_by = ingested_by or getattr(pctx.pipeline.user, "email", "")
         self.ingest_task_status = ingest_task_status
+        # Fully hashing every source file during the check is what makes a
+        # check slow (every byte of every frame is read, over the network
+        # for a delivery on a share) and all it buys is an early "this exact
+        # content was ingested before" -- the copy itself always verifies
+        # every file. Off unless the studio opts in (tools.ingest.hash_check).
+        self.hash_check = bool(hash_check)
 
         self.items: list[IngestItem] = []
         self._by_key: dict[str, IngestItem] = {}
@@ -94,7 +102,17 @@ class IngestController:
         self._undo: list[dict] = []
         self._scanned: set[str] = set()          # keys whose metadata+hashes are done
         self._slot_state: dict[str, tuple] = {}   # key -> (state, detail) from last Kitsu inspect
-        self._shot_cache: dict[str, object] = {}  # sequence/shot code -> Shot | None (this batch)
+        # One Kitsu round trip per RUN, not per row: the whole shot list is
+        # fetched once and indexed, and a (shot, media type)'s existing
+        # output files once. Rebuilt at the start of every check.
+        self._shot_index: dict | None = None     # shot code (lower) -> Shot
+        self._outputs_cache: dict = {}            # (shot id, media_type) -> [Output]
+        self._kitsu_lock = threading.Lock()
+        # Every mutation of the item list / an assemble pass runs under this,
+        # so a check finishing on the job thread can't interleave with an
+        # edit on the UI thread and emit a half-updated picture.
+        self._state_lock = threading.RLock()
+        self._stage_emitted: dict[str, tuple] = {}   # key -> (stage, monotonic time)
 
         # Preview encode + upload runs OFF the ingest critical path, same as
         # before the port: the row goes Completed the moment files are
@@ -115,8 +133,13 @@ class IngestController:
     def subscribe(self, fn) -> None:
         self._listeners.append(fn)
 
-    def _emit(self, kind, item=None, **payload) -> None:
-        ev = ControllerEvent(kind=kind, item=item, payload=payload)
+    def _emit(self, kind, item=None, payload=None, **extra) -> None:
+        # callers pass either payload={...} or loose keywords -- both end up
+        # as ONE flat dict on the event (payload={...} used to arrive wrapped
+        # as {"payload": {...}}, so nothing could actually read it)
+        data = dict(payload or {})
+        data.update(extra)
+        ev = ControllerEvent(kind=kind, item=item, payload=data)
         for fn in list(self._listeners):
             try:
                 fn(ev)
@@ -128,100 +151,192 @@ class IngestController:
     # ------------------------------------------------------------------
 
     def load(self, scan_items, *, replace=False) -> list[IngestItem]:
-        if replace:
-            self.items.clear()
-            self._by_key.clear()
-            self._scanned.clear()
-            self._slot_state.clear()
-
         added = []
-        for si in scan_items:
-            item = si if isinstance(si, IngestItem) else IngestItem.from_scan_item(si)
-            if item.key in self._by_key:
-                continue
-            item.preview_default = _wants_preview(self.pctx, item.media_type)
-            item.preview_wanted = item.preview_default
-            item.original_values = {a: getattr(item, a) for a in self.RENAMEABLE_ATTRS}
-            self.items.append(item)
-            self._by_key[item.key] = item
-            added.append(item)
+        with self._state_lock:
+            if replace:
+                self.items.clear()
+                self._by_key.clear()
+                self._scanned.clear()
+                self._slot_state.clear()
 
-        self._emit("items_loaded", payload={"added": [i.key for i in added], "total": len(self.items)})
+            for si in scan_items:
+                item = si if isinstance(si, IngestItem) else IngestItem.from_scan_item(si)
+                if item.key in self._by_key:
+                    continue
+                item.preview_default = _wants_preview(self.pctx, item.media_type)
+                item.preview_wanted = item.preview_default
+                item.original_values = {a: getattr(item, a) for a in self.RENAMEABLE_ATTRS}
+                self.items.append(item)
+                self._by_key[item.key] = item
+                added.append(item)
+
+        self._emit("items_loaded", payload={
+            "added": [i.key for i in added], "total": len(self.items), "replaced": bool(replace)})
         return added
 
     def get(self, key) -> IngestItem | None:
         return self._by_key.get(key)
 
     def remove(self, key) -> None:
-        item = self._by_key.pop(key, None)
-        if item:
-            self.items.remove(item)
-            self._scanned.discard(key)
-            self._slot_state.pop(key, None)
-            self._reassemble_all()
-            self._emit("items_loaded", payload={"removed": [key], "total": len(self.items)})
+        self.remove_many([key])
+
+    def remove_many(self, keys) -> list:
+        """Drop rows from the batch in ONE pass (one list rebuild, one
+        cross-row reassemble, one event) -- removing rows one at a time
+        redrew the whole table once per row. A scan still running for a
+        removed row notices (its row is no longer `_by_key`'s) and stops."""
+        with self._state_lock:
+            gone = {k for k in keys if k in self._by_key}
+            if not gone:
+                return []
+            for k in gone:
+                self._by_key.pop(k, None)
+                self._scanned.discard(k)
+                self._slot_state.pop(k, None)
+                self._stage_emitted.pop(k, None)
+            self.items[:] = [i for i in self.items if i.key not in gone]
+        self._emit("items_loaded", payload={"removed": sorted(gone), "total": len(self.items)})
+        self._reassemble_all()
+        return sorted(gone)
 
     # ------------------------------------------------------------------
     # Pre-flight (read-only: never creates anything in Kitsu)
     # ------------------------------------------------------------------
 
-    def run_preflight(self, keys=None) -> None:
+    def reset_cancel(self) -> None:
+        """Forget an earlier cancel. A caller that starts the work on another
+        thread (the Qt bridge) does this BEFORE starting it, so a cancel that
+        arrives while the thread is still spinning up isn't wiped out by the
+        run's own start-up."""
         self._cancel.clear()
-        targets = self._resolve_targets(keys)
+
+    def run_preflight(self, keys=None, *, reset_cancel: bool = True) -> None:
+        if reset_cancel:
+            self._cancel.clear()
+        # A skipped row is out of the batch -- don't spend a scan on it; it
+        # gets checked when it's included again.
+        targets = [i for i in self._resolve_targets(keys) if not i.skipped]
         if not targets:
             return
-        # a shot ingested since the last preflight (this run or an earlier
-        # one) must be visible to THIS run's slot check -- a cache that
-        # outlives one run would keep serving a stale "doesn't exist yet"
-        self._shot_cache.clear()
+        # Kitsu state (the shot list, each shot's output files) is fetched
+        # once per RUN, and must reflect anything ingested since the last one.
+        self._forget_kitsu_cache()
         self._emit("preflight_started", payload={"keys": [i.key for i in targets]})
 
         for it in targets:
             it.preflight_done = False
             it.check_error = ""
-            self._emit("item_updated", item=it)
+            it.check_stage, it.check_pct = "Queued", 0
+        self._emit_items(targets)
 
         workers = max(1, min(self.pctx.config.copy_workers, len(targets)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ingest-check") as pool:
             futs = {pool.submit(self._scan_one, it): it for it in targets}
             for fut in as_completed(futs):
                 it = futs[fut]
                 try:
-                    fut.result()
+                    ok = fut.result()
                 except Exception as e:
                     it.check_error = str(e)
+                    it.check_stage, it.check_pct = "", 0
                     logger.exception("[IngestController] pre-flight failed for %s", it.key)
+                    self._emit("item_updated", item=it)
+                    continue
+                if ok:
+                    # this row is done NOW -- don't leave it on "Checking"
+                    # until the slowest row in the batch finishes
+                    self._settle_item(it)
 
-        self._reassemble_all()
+        if self._cancel.is_set():
+            for it in targets:
+                if (not it.preflight_done and not it.check_error and not it.skipped
+                        and self._by_key.get(it.key) is it):
+                    it.check_error = "Check cancelled -- Re-check to finish it"
+                    it.check_stage, it.check_pct = "", 0
+        # the cross-row issues (collisions, near-duplicates) need every row
+        # checked first, so they're added in this final pass
+        self._reassemble_all(also=[i.key for i in targets])
         self._emit("preflight_finished", payload={"keys": [i.key for i in targets]})
 
-    def _scan_one(self, item: IngestItem) -> None:
-        """Parallel-safe per-item work: metadata probe, hashing, dest, Kitsu slot."""
-        if self._cancel.is_set():
-            return
-        if item.key not in self._scanned:
-            item.probe_metadata(self.extractor)
-            if item.source_files:
-                item.hashes = self.hasher.hash_files(item.source_files)
-            self._scanned.add(item.key)
-        self._recheck_one(item)
+    def _should_stop(self, item: IngestItem) -> bool:
+        """True once work on this row no longer matters: the run was
+        cancelled, the row was skipped, or it was removed / replaced (undo)
+        while its scan was still going."""
+        return (self._cancel.is_set() or item.skipped
+                or self._by_key.get(item.key) is not item)
+
+    def _scan_one(self, item: IngestItem) -> bool:
+        """Parallel-safe per-item work: metadata probe, (opt-in) hashing, dest,
+        Kitsu slot. Returns False if it stopped early (skipped / removed /
+        cancelled) -- the row is then left as it was."""
+        def stop() -> bool:
+            return self._should_stop(item)
+
+        try:
+            if stop():
+                return self._abandon(item)
+            if item.key not in self._scanned:
+                self._set_check_stage(item, "Reading metadata", 5)
+                item.probe_metadata(self.extractor)
+                self._scanned.add(item.key)
+            if self.hash_check and item.source_files and not item.hashes:
+                if stop():
+                    return self._abandon(item)
+                item.hashes = self.hasher.hash_files(
+                    item.source_files, should_stop=stop,
+                    progress=lambda done, total, it=item: self._set_check_stage(
+                        it, f"Hashing {done}/{total}", 10 + int(80 * done / max(1, total))),
+                )
+            if stop():
+                return self._abandon(item)
+            self._set_check_stage(item, "Checking Kitsu", 92)
+            self._recheck_one(item)
+        except HashCancelled:
+            return self._abandon(item)
         item.preflight_done = True
+        item.check_stage, item.check_pct = "", 0
+        return True
+
+    @staticmethod
+    def _abandon(item: IngestItem) -> bool:
+        item.check_stage, item.check_pct = "", 0
+        return False
+
+    def _forget_kitsu_cache(self) -> None:
+        with self._kitsu_lock:
+            self._shot_index = None
+            self._outputs_cache.clear()
 
     def _find_shot(self, sequence_code: str, shot_code: str):
-        """Read-only shot lookup, cached per batch. Preflight must never
-        create a shot -- that's ensure_shot's job, at real ingest time only."""
-        key = f"{sequence_code}/{shot_code}".lower()
-        if key not in self._shot_cache:
-            shot = None
+        """Read-only shot lookup against ONE fetch of the project's shot list
+        per run (it used to refetch the whole list for every distinct shot).
+        Preflight must never create a shot -- that's ensure_shot's job, at
+        real ingest time only."""
+        with self._kitsu_lock:
+            if self._shot_index is None:
+                index: dict = {}
+                try:
+                    for s in self.pctx.kitsu.shots(self.pctx.project):
+                        index.setdefault((getattr(s, "code", "") or "").lower(), s)
+                except Exception:
+                    index = {}
+                self._shot_index = index
+            return self._shot_index.get((shot_code or "").lower())
+
+    def _existing_outputs(self, shot, media_type: str) -> list:
+        """A shot's already-published outputs of one media type -- fetched once
+        per run per (shot, media type), not once per row and per re-check."""
+        key = (getattr(shot, "id", None) or id(shot), media_type)
+        with self._kitsu_lock:
+            cached = self._outputs_cache.get(key)
+        if cached is None:
             try:
-                for s in self.pctx.kitsu.shots(self.pctx.project):
-                    if (getattr(s, "code", "") or "").lower() == shot_code.lower():
-                        shot = s
-                        break
+                cached = list(self.pctx.kitsu.output_files(shot, output_type_name=media_type))
             except Exception:
-                shot = None
-            self._shot_cache[key] = shot
-        return self._shot_cache[key]
+                cached = []
+            with self._kitsu_lock:
+                self._outputs_cache[key] = cached
+        return cached
 
     def _recheck_one(self, item: IngestItem) -> None:
         """Cheap re-evaluation after an edit: dest path + Kitsu slot state. No re-hash."""
@@ -272,11 +387,8 @@ class IngestController:
         if shot is None:
             return preflight.SLOT_EMPTY, ""
         name = item.media_name or "main"
-        try:
-            existing = [o for o in self.pctx.kitsu.output_files(shot, output_type_name=item.media_type)
-                       if o.name == name and o.revision == item.version]
-        except Exception:
-            return preflight.SLOT_EMPTY, ""
+        existing = [o for o in self._existing_outputs(shot, item.media_type)
+                    if o.name == name and o.revision == item.version]
         if not existing:
             return preflight.SLOT_EMPTY, ""
         rec = existing[0]
@@ -286,25 +398,76 @@ class IngestController:
             return preflight.SLOT_ALREADY, (
                 f"v{item.version:03d} already holds exactly this content."
             )
+        # without the (opt-in) hash check there's nothing to compare the
+        # existing content against -- say so, rather than claiming it differs
+        why = ("with different content" if current_hash
+               else "(content wasn't compared -- hash check is off)")
         return preflight.SLOT_CONFLICT, (
-            f"v{item.version:03d} already exists in Kitsu with different content. "
+            f"v{item.version:03d} already exists in Kitsu {why}. "
             f"Version up, or overwrite it."
         )
 
-    def _reassemble_all(self) -> None:
-        """Rebuild every item's issue list -- cross-item issues depend on the whole batch."""
-        cross = preflight.cross_item_issues(self.items)
-        for it in self.items:
-            if not it.preflight_done and it.key not in self._slot_state:
-                continue
-            state, detail = self._slot_state.get(it.key, (preflight.SLOT_EMPTY, ""))
-            it.issues = preflight.assemble_issues(
-                it, state, detail,
-                cross=cross.get(it.key, []),
-                known_media_types=self.known_media_types or None,
-            )
-            self._maybe_preview_nonvisual_issue(it)
-            self._emit("item_updated", item=it)
+    # -- assembling issues / telling the UI -------------------------------
+
+    def _assemble_one(self, it: IngestItem, cross) -> None:
+        state, detail = self._slot_state.get(it.key, (preflight.SLOT_EMPTY, ""))
+        it.issues = preflight.assemble_issues(
+            it, state, detail, cross=cross,
+            known_media_types=self.known_media_types or None,
+        )
+        self._maybe_preview_nonvisual_issue(it)
+
+    def _settle_item(self, it: IngestItem) -> None:
+        with self._state_lock:
+            self._assemble_one(it, [])
+        self._emit("item_updated", item=it)
+
+    @staticmethod
+    def _signature(it: IngestItem) -> tuple:
+        return (it.status.value, tuple((i.id, it.is_resolved(i.id)) for i in it.issues))
+
+    def _reassemble_all(self, also=()) -> list:
+        """Rebuild every item's issue list (cross-item issues depend on the
+        whole batch) and tell the UI about ONLY the rows that actually
+        changed, plus `also` (rows the caller just edited, whose other
+        fields moved). It used to emit every row on every call -- N redraws
+        per edit, K*N for a batch action."""
+        with self._state_lock:
+            cross = preflight.cross_item_issues(self.items)
+            changed = {k for k in also if k in self._by_key}
+            for it in self.items:
+                if not it.preflight_done and it.key not in self._slot_state:
+                    continue
+                before = self._signature(it)
+                self._assemble_one(it, cross.get(it.key, []))
+                if self._signature(it) != before:
+                    changed.add(it.key)
+            batch = [it for it in self.items if it.key in changed]
+        self._emit_items(batch)
+        return [i.key for i in batch]
+
+    def _emit_items(self, items) -> None:
+        items = list(items)
+        if not items:
+            return
+        if len(items) == 1:
+            self._emit("item_updated", item=items[0])
+        else:
+            self._emit("items_updated", payload={"keys": [i.key for i in items]})
+
+    def _set_check_stage(self, item: IngestItem, label: str, pct: int) -> None:
+        item.check_stage, item.check_pct = label, pct
+        self._emit_stage(item, label, pct)
+
+    def _emit_stage(self, item: IngestItem, label: str, pct: int) -> None:
+        """Throttled: a stage change always goes out, but progress within a
+        stage (per file hashed, per frame copied) at most ~8 times a second
+        per row -- a 1000-frame sequence used to queue a thousand redraws."""
+        now = time.monotonic()
+        last_label, last_at = self._stage_emitted.get(item.key, ("", 0.0))
+        if label != last_label or now - last_at >= 0.12:
+            self._stage_emitted[item.key] = (label, now)
+            self._emit("item_stage", item=item, stage=label, pct=pct)
 
     def _maybe_preview_nonvisual_issue(self, item: IngestItem) -> None:
         if item.preview_wanted and (item.media_type or "").strip().lower() in _NON_VISUAL:
@@ -353,7 +516,7 @@ class IngestController:
             self.items[idx] = restored
             self._by_key[k] = restored
             self._recheck_one(restored)
-        self._reassemble_all()
+        self._reassemble_all(also=list(entry["items"]))
         self._emit("undo", payload={"label": entry["label"], "remaining": len(self._undo)})
         return True
 
@@ -381,32 +544,55 @@ class IngestController:
             if not item.preview_user_set:
                 item.preview_wanted = item.preview_default
         self._recheck_one(item)
-        self._reassemble_all()
+        self._reassemble_all(also=[key])
 
     def set_preview(self, key, wanted: bool) -> None:
         item = self._by_key[key]
         self._push_undo("toggle preview", [key])
         item.preview_wanted = bool(wanted)
         item.preview_user_set = True
-        self._reassemble_all()
+        self._reassemble_all(also=[key])
 
     def set_convert_to_exr(self, key, wanted: bool) -> None:
         item = self._by_key[key]
         self._push_undo("toggle convert to EXR", [key])
         item.convert_to_exr = bool(wanted)
-        self._reassemble_all()
+        self._reassemble_all(also=[key])
 
     def skip(self, key) -> None:
-        self._push_undo("skip", [key])
-        self._by_key[key].skipped = True
-        self._reassemble_all()
+        self.skip_many([key])
 
-    def include(self, key) -> None:
-        self._push_undo("include", [key])
-        self._by_key[key].include()
-        self._reassemble_all()
+    def skip_many(self, keys) -> None:
+        """Skip a whole selection in one pass: one undo entry, one reassemble,
+        one UI update -- not one of each per row."""
+        keys = [k for k in keys if k in self._by_key]
+        if not keys:
+            return
+        self._push_undo("skip" if len(keys) == 1 else f"skip ×{len(keys)}", keys)
+        with self._state_lock:
+            for k in keys:
+                self._by_key[k].skipped = True
+        self._reassemble_all(also=keys)
 
-    def resolve(self, key, issue_id, action: Action, *, _record_undo=True) -> None:
+    def include(self, key) -> list:
+        return self.include_many([key])
+
+    def include_many(self, keys) -> list:
+        """Undo a skip for a whole selection. Returns the keys that still need
+        a check (a row skipped mid-scan never finished being checked, and
+        skipped rows aren't scanned) so the caller can run one."""
+        keys = [k for k in keys if k in self._by_key]
+        if not keys:
+            return []
+        self._push_undo("include" if len(keys) == 1 else f"include ×{len(keys)}", keys)
+        with self._state_lock:
+            for k in keys:
+                self._by_key[k].include()
+        self._reassemble_all(also=keys)
+        return [k for k in keys if not self._by_key[k].preflight_done]
+
+    def resolve(self, key, issue_id, action: Action, *, _record_undo=True,
+                _reassemble=True) -> None:
         item = self._by_key[key]
         if _record_undo:
             self._push_undo(f"resolve {action.value}", [key])
@@ -429,7 +615,8 @@ class IngestController:
             self._recheck_one(item)
         elif action == Action.OVERWRITE:
             self._recheck_one(item)
-        self._reassemble_all()
+        if _reassemble:
+            self._reassemble_all(also=[key])
 
     def resolve_many(self, keys, issue_kind: IssueKind, action: Action) -> None:
         keys = [k for k in keys if k in self._by_key]
@@ -447,7 +634,8 @@ class IngestController:
             return
         self._push_undo(f"resolve {action.value} ×{len(targets)}", [k for k, _ in targets])
         for key, iid in targets:
-            self.resolve(key, iid, action, _record_undo=False)
+            self.resolve(key, iid, action, _record_undo=False, _reassemble=False)
+        self._reassemble_all(also=[k for k, _ in targets])
 
     # ------------------------------------------------------------------
     # Batch rename
@@ -561,7 +749,7 @@ class IngestController:
                     item.preview_wanted = item.preview_default
             self._recheck_one(item)
             changed += 1
-        self._reassemble_all()
+        self._reassemble_all(also=keys)
         return changed
 
     def rename_batch(self, keys, field_name: str, template: str) -> int:
@@ -584,9 +772,11 @@ class IngestController:
         pool = self._resolve_targets(keys)
         return [i for i in pool if i.ingestable]
 
-    def run_ingest(self, keys=None, *, dry_run=False, transfer_mode: str = None) -> dict:
+    def run_ingest(self, keys=None, *, dry_run=False, transfer_mode: str = None,
+                   reset_cancel: bool = True) -> dict:
         transfer_mode = transfer_mode or self.transfer_mode
-        self._cancel.clear()
+        if reset_cancel:
+            self._cancel.clear()
         targets = self.ingestable_items(keys)
         if not targets:
             self._emit("ingest_finished", payload={"done": 0, "failed": 0, "dry_run": dry_run})
@@ -598,6 +788,8 @@ class IngestController:
             it.stage_pct = 0
             it.ingest_error = ""
             it.preview_state = ""
+
+        self._ensure_task_types()
 
         cw = max(1, self.pctx.config.copy_workers)
         item_workers = max(1, min(cw, len(targets)))
@@ -641,6 +833,28 @@ class IngestController:
 
         return {"done": done, "failed": failed, "items": [i.key for i in targets]}
 
+    def _ensure_task_types(self) -> list:
+        """Before touching any shot: every task type this batch records
+        against must exist in Kitsu AND be enabled on the project -- a task
+        can't be created for a type the project doesn't have, and the ingest
+        then had nothing to attach its record to. Returns the names that
+        still can't be used (also announced as a `warning` event)."""
+        names = list(dict.fromkeys(self.task_types))
+        if not names:
+            return []
+        try:
+            missing = list(self.pctx.kitsu.ensure_project_task_types(self.pctx.project, names))
+        except Exception as e:
+            logger.warning("[IngestController] couldn't verify the project's task types: %s", e)
+            return []
+        if missing:
+            self._emit("warning", payload={"message": (
+                f"Task type(s) {', '.join(missing)} aren't available on project "
+                f"{self.pctx.code} in Kitsu and couldn't be added (adding one needs a Kitsu "
+                f"admin: Project Settings > Task Types). Rows can't record their ingest "
+                f"against a missing type.")})
+        return missing
+
     def _await_previews(self, futures) -> None:
         for f in futures:
             try:
@@ -657,7 +871,7 @@ class IngestController:
         self._cancel.clear()
         # a stale per-preflight shot cache (or none at all on a bare resume)
         # would make _find_shot miss a shot that really does exist now
-        self._shot_cache.clear()
+        self._forget_kitsu_cache()
         pending = [
             it for it in self.items
             if it.ingested and it.preview_wanted
@@ -709,7 +923,7 @@ class IngestController:
     def _set_stage(self, item: IngestItem, stage: Stage, pct: int) -> None:
         item.stage = stage
         item.stage_pct = pct
-        self._emit("item_stage", item=item, stage=stage.value, pct=pct)
+        self._emit_stage(item, stage.value, pct)
 
     # ------------------------------------------------------------------
     # Core ingest (critical path: files safe on disk + Kitsu has the version)
@@ -773,7 +987,13 @@ class IngestController:
         tasks = breakdown.build_task_grid(self.pctx, [shot], self.task_types)
         ingest_task = self.pctx.kitsu.ingest_task(tasks) if tasks else None
         if ingest_task is None:
-            raise RuntimeError(f"no task on {item.shot_code} to record the ingest against")
+            wanted = ", ".join(self.task_types) or "any task type"
+            raise RuntimeError(
+                f"no task could be created on {item.shot_code} to record the ingest against "
+                f"({wanted}). The task type(s) probably aren't enabled on project "
+                f"{self.pctx.code} in Kitsu -- add them under Project Settings > Task Types, "
+                f"or pick a task type the project already has."
+            )
 
         # 2-5. Folders + copy (verified, progress-tracked) + Kitsu record + ledger
         self._set_stage(item, Stage.COPYING, 18)
@@ -794,6 +1014,10 @@ class IngestController:
             comment=f"Ingested by {self.ingested_by}" if self.ingested_by else "",
         )
         item.dest_dir = result.dir
+        # this row's slot just changed -- a later re-check must see the new output
+        with self._kitsu_lock:
+            self._outputs_cache.pop(
+                (getattr(shot, "id", None) or id(shot), item.media_type), None)
 
         if scratch_dir:
             # The review proxy (if any) reads straight from `files_to_publish`
@@ -818,7 +1042,7 @@ class IngestController:
             self.pctx.kitsu.comment(ingest_task, note)
 
         checksum = next(iter(result.checksums.values()), "") if result.checksums else ""
-        self._write_ledger(item, result.dir, result.files, checksum)
+        self._write_ledger(item, result.dir, result.files, checksum, result.checksums)
 
         item.ingest_result = {
             "dest_dir": result.dir, "files": result.files, "checksum": checksum,
@@ -851,12 +1075,17 @@ class IngestController:
         self._emit("item_updated", item=item)
         return preview_fut
 
-    def _write_ledger(self, item, dest_dir, dest_files, checksum) -> None:
+    def _write_ledger(self, item, dest_dir, dest_files, checksum, dest_hashes=None) -> None:
         from .ledger import LedgerRecord
         now = _utcnow()
         recs = []
+        # The check only hashes when the studio opts in, but the copy itself
+        # always hashes what it writes -- fall back to that, so the ledger is
+        # populated either way (a dest file's digest == its source's).
+        by_dest = {os.path.normcase(os.path.normpath(k)): v
+                   for k, v in (dest_hashes or {}).items()}
         for src, dst in zip(item.source_files, dest_files):
-            h = item.hashes.get(src)
+            h = item.hashes.get(src) or by_dest.get(os.path.normcase(os.path.normpath(dst)))
             if not h:
                 continue
             try:

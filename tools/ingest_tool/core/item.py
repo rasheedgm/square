@@ -218,6 +218,11 @@ class IngestItem:
     # check results
     preflight_done: bool = False
     check_error: str = ""                 # non-empty => Check Failed
+    # live progress of the check itself ("Reading metadata", "Hashing 3/12") --
+    # separate from `stage`, which means an INGEST stage (any non-idle stage
+    # reads as Ingesting). Only meaningful while status is Checking.
+    check_stage: str = ""
+    check_pct: int = 0
     issues: list[Issue] = field(default_factory=list)
     resolutions: dict = field(default_factory=dict)         # {issue_id: Action}
     hashes: dict = field(default_factory=dict)              # {source_path: digest}

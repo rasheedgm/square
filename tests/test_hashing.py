@@ -119,5 +119,47 @@ class TestFileHasher(unittest.TestCase):
         self.assertEqual(FileHasher().algo, "xxh3_64")
 
 
+class TestInterruptibleHashing(unittest.TestCase):
+    """A check used to hash every byte of a multi-GB file to the end even
+    after the row was skipped, removed or the window closed -- which also
+    kept the process alive in the background."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _big(self, mib=3):
+        p = self.tmp / "big.bin"
+        p.write_bytes(b"x" * (mib * (1 << 20)))
+        return str(p)
+
+    def test_should_stop_abandons_the_file_within_a_chunk(self):
+        from square_core.hashing import HashCancelled
+        calls = []
+
+        def stop():
+            calls.append(1)
+            return len(calls) > 1               # let the first chunk through, then stop
+
+        with self.assertRaises(HashCancelled):
+            FileHasher().hash_file(self._big(), should_stop=stop)
+        self.assertEqual(len(calls), 2)          # not one poll per remaining chunk
+
+    def test_an_abandoned_hash_is_not_cached_as_if_it_finished(self):
+        from square_core.hashing import HashCancelled
+        big = self._big()
+        h = FileHasher()
+        with self.assertRaises(HashCancelled):
+            h.hash_file(big, should_stop=lambda: True)
+        self.assertEqual(h.hash_file(big), FileHasher().hash_file(big))
+
+    def test_hash_files_reports_progress_per_file(self):
+        a = self.tmp / "a.bin"; a.write_bytes(b"a")
+        b = self.tmp / "b.bin"; b.write_bytes(b"b")
+        seen = []
+        FileHasher().hash_files([str(a), str(b)], progress=lambda d, n: seen.append((d, n)))
+        self.assertEqual(seen, [(1, 2), (2, 2)])
+
+
 if __name__ == "__main__":
     unittest.main()

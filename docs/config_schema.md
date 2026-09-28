@@ -84,7 +84,13 @@ schema.register("tools.ingest.task_types", "list", item_kind="str", scope="both"
 schema.register("tools.ingest.task_status", "str", scope="both", default="Done")
 schema.register("tools.ingest.transfer_mode", "enum", scope="both",
                 default="copy", choices=("copy", "hardlink", "symlink"))
+schema.register("tools.ingest.hash_check", "bool", scope="both", default=False)
 ```
+
+`hash_check` is the opt-in for the slow part of the ingest **check**: fully
+hashing every source file to spot content that was already ingested. Off by
+default -- a check then only reads metadata and asks Kitsu, and the copy itself
+still verifies every file it writes either way.
 
 `copy_workers` is **not** an ingest key — it's a **core** top-level key
 (`square_core/config/schema.py`) because `services.media.publish` uses it for

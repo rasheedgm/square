@@ -355,8 +355,20 @@ class IngestItem:
     def warning_issues(self) -> list[Issue]:
         return [i for i in self.unresolved_issues if i.severity == Severity.WARN]
 
+    @property
+    def carries_media_metadata(self) -> bool:
+        """Resolution / fps / colorspace only mean something for images and
+        video. A grade (.cdl), a LUT, a note... has none, and must not be
+        blocked on Needs Info for values it can never have."""
+        from square_core.media.scanner import SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS
+        ext = (self.ext or "").lower()
+        return (self.is_video or not ext
+                or ext in SUPPORTED_IMAGE_EXTS or ext in SUPPORTED_VIDEO_EXTS)
+
     def missing_fields(self) -> list[str]:
         out = [f for f in REQUIRED_FIELDS if not (getattr(self, f) or "").strip()]
+        if not self.carries_media_metadata:
+            return out
         for f in REQUIRED_METADATA:
             if not self.metadata_verified.get(f) and not (str(getattr(self, f) or "")).strip():
                 out.append(f)

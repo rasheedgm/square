@@ -220,7 +220,8 @@ class TestIngestPresetsPreserveDefaults(unittest.TestCase):
         QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.state_dir = self.tmp / "state"
+        self.state_dir = Path(tempfile.mkdtemp())      # outside the scanned root
+        self.addCleanup(shutil.rmtree, self.state_dir, ignore_errors=True)
         self._old_state_dir = os.environ.get("SQUARE_STATE_DIR")
         os.environ["SQUARE_STATE_DIR"] = str(self.state_dir)
         self.addCleanup(self._restore_state_dir)
@@ -274,7 +275,8 @@ class TestActivePresetSync(unittest.TestCase):
         QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.state_dir = self.tmp / "state"
+        self.state_dir = Path(tempfile.mkdtemp())      # outside the scanned root
+        self.addCleanup(shutil.rmtree, self.state_dir, ignore_errors=True)
         self._old_state_dir = os.environ.get("SQUARE_STATE_DIR")
         os.environ["SQUARE_STATE_DIR"] = str(self.state_dir)
         self.addCleanup(self._restore_state_dir)
@@ -440,6 +442,47 @@ class TestLoadDropDown(unittest.TestCase):
         self.assertEqual(self.got[0][3:], (True, True))
         self.tree._update_btn.click()
         self.assertEqual(self.got[1][3:], (True, False))
+
+
+class TestEveryFileTypeIsShown(unittest.TestCase):
+    """The tree must not hide a file just because its extension is unfamiliar."""
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        d = self.tmp / "SQ010" / "SH0100"
+        d.mkdir(parents=True)
+        for name in ("grade.cdl", "look.lut", "notes.txt", "plate.1001.exr",
+                     "lensgrid.1001.xyz", "lensgrid.1002.xyz", "v_001.cdl",
+                     ".hidden", "Thumbs.db"):
+            (d / name).write_text("x")
+        self.tree = FolderTreeWidget()
+        self.tree.load_path(str(self.tmp))
+
+    def _labels(self):
+        out = []
+
+        def walk(it):
+            out.append((it.text(0), it.data(0, 257)))
+            for i in range(it.childCount()):
+                walk(it.child(i))
+        walk(self.tree._tree.topLevelItem(0))
+        return out
+
+    def test_unfamiliar_extensions_are_listed_as_files(self):
+        labels = dict(self._labels())
+        for name in ("grade.cdl", "look.lut", "notes.txt", "v_001.cdl"):
+            self.assertEqual(labels.get(name), "file", name)
+
+    def test_numbered_files_of_any_type_still_group_into_a_sequence(self):
+        seqs = [t for t, k in self._labels() if k == "sequence"]
+        self.assertTrue(any(t.startswith("lensgrid.") and "2f" in t for t in seqs), seqs)
+
+    def test_hidden_and_os_junk_files_stay_out(self):
+        names = [t for t, _k in self._labels()]
+        self.assertNotIn(".hidden", names)
+        self.assertNotIn("Thumbs.db", names)
 
 
 if __name__ == "__main__":

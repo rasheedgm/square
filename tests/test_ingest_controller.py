@@ -1306,6 +1306,41 @@ class _KitsuWithTaskTypes(_TrackingKitsu):
         return super().ensure_tasks(shot, names) if self._tasks else []
 
 
+class TestNonMediaFiles(unittest.TestCase):
+    """A grade (.cdl), LUT or note has no resolution / fps / colorspace and
+    must not be blocked on Needs Info for values it can never have."""
+
+    def _cdl(self, src):
+        from square_core.media.scanner import PlateScanner
+        (Path(src) / "grade.cdl").write_text("<ColorDecisionList/>")
+        [scan_item] = PlateScanner(src).scan()
+        item = IngestItem.from_scan_item(scan_item)
+        item.sequence_code, item.shot_code = "SQ010", "SH0100"
+        item.media_type, item.media_name = "Plate", "grade"
+        return item
+
+    def test_a_cdl_is_not_blocked_on_media_metadata_and_ingests(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
+            controller = _controller(_pctx(work), work)
+            item = self._cdl(src)
+            _load(controller, [item])
+            controller.run_preflight()
+            self.assertFalse(item.carries_media_metadata)
+            self.assertEqual(item.blocking_issues, [])
+            self.assertEqual(item.missing_fields(), [])
+            controller.run_ingest()
+            self.assertTrue(item.ingested, item.ingest_error)
+            published = list(Path(work).rglob("*.cdl"))
+            self.assertEqual(len(published), 1)
+
+    def test_images_and_videos_still_need_their_metadata(self):
+        item = IngestItem(key="k", source_files=["a.1001.exr"], ext=".exr",
+                          sequence_code="SQ010", shot_code="SH0100", media_type="Plate",
+                          media_name="a")
+        self.assertTrue(item.carries_media_metadata)
+        self.assertEqual(set(item.missing_fields()), {"resolution", "fps", "colorspace"})
+
+
 class TestIngestTaskTypes(unittest.TestCase):
     def _run(self, kitsu):
         src = tempfile.TemporaryDirectory()

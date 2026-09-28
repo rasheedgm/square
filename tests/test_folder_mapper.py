@@ -309,5 +309,56 @@ class TestExplicitPathsWithTaggedOnly(unittest.TestCase):
         self.assertEqual(sorted("other" in i.files[0] for i in items), [False, True])
 
 
+class TestNoExtensionLimit(unittest.TestCase):
+    """The scanner used to drop anything that was not an image or a video."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        d = self.tmp / "SQ010" / "SH0100"
+        d.mkdir(parents=True)
+        for name in ("grade.cdl", "notes.txt", "plate.1001.exr", "plate.1002.exr",
+                     "lens.1001.xyz", "lens.1002.xyz", "lens.1003.xyz", "look_001.lut",
+                     ".DS_Store", "Thumbs.db"):
+            (d / name).write_text("x")
+        self.d = d
+
+    def _by_name(self):
+        from square_core.media.scanner import PlateScanner
+        return {i.name: i for i in PlateScanner(self.tmp).scan()}
+
+    def test_a_cdl_and_other_odd_files_come_through_as_items(self):
+        items = self._by_name()
+        self.assertEqual(items["grade.cdl"].files, [str(self.d / "grade.cdl")])
+        self.assertIn("notes.txt", items)
+        self.assertFalse(items["grade.cdl"].is_video)
+
+    def test_numbered_files_of_an_unknown_type_form_a_sequence(self):
+        items = self._by_name()
+        self.assertEqual(len(items["lens"].files), 3)
+        self.assertEqual(items["lens"].ext, ".xyz")
+        self.assertEqual((items["lens"].start_frame, items["lens"].end_frame), (1001, 1003))
+
+    def test_a_lone_numbered_file_of_an_unknown_type_is_just_a_file(self):
+        items = self._by_name()
+        self.assertIn("look_001.lut", items)
+        self.assertEqual(len(items["look_001.lut"].files), 1)
+
+    def test_hidden_files_and_thumbnail_caches_are_ignored(self):
+        names = set(self._by_name())
+        self.assertNotIn(".DS_Store", names)
+        self.assertNotIn("Thumbs.db", names)
+
+    def test_images_still_group_as_before(self):
+        self.assertEqual(len(self._by_name()["plate"].files), 2)
+
+    def test_a_pattern_can_tag_a_cdl(self):
+        from tools.ingest_tool.core.folder_mapper import FolderMapper
+        mapper = FolderMapper(self.tmp)
+        mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/grade.cdl"))
+        items = mapper.build_items(tagged_only=True)
+        self.assertEqual([(i.shot_code, i.name) for i in items], [("SH0100", "grade.cdl")])
+
+
 if __name__ == "__main__":
     unittest.main()

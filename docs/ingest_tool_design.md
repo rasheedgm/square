@@ -608,6 +608,15 @@ fixes are structural rather than one per symptom.
    `KitsuApi.ensure_project_task_types` now creates/enables the batch's types
    first; if that can't be done (typically a non-admin) a warning names the
    types and where to add them, and the row's error says the same.
+10. **No extension limit.** The scanner and the folder tree used to drop
+    anything that wasn't an image or a video, so a `.cdl` (or any future
+    format) never appeared. Every file now comes through; the extension only
+    decides grouping -- image/video types and any `name.####.ext` set of two or
+    more group into sequences, everything else is a single file. Hidden files
+    and `Thumbs.db` / `desktop.ini` are ignored. Load still brings in only what
+    is tagged by default, so unfamiliar files don't flood the table. Files that
+    aren't images/video (`IngestItem.carries_media_metadata`) aren't blocked on
+    Needs Info for resolution / fps / colorspace they can never have.
 
 Also fixed on the way: controller `payload={...}` events arrived wrapped as
 `{"payload": {...}}`, so no listener could read them; they're flat now.

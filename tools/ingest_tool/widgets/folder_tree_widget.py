@@ -24,7 +24,7 @@ from Qt import QtWidgets, QtCore, QtGui
 
 from tools.ingest_tool.core.folder_mapper import FolderMapper
 from tools.ingest_tool.core import presets as ingest_presets
-from square_core.media.scanner import SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS
+from square_core.media.scanner import SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS, is_ignored_file
 from tools.ingest_tool.widgets.path_pattern_dialog import PathPatternBuilderDialog, PathPatternManagerDialog
 from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED, PEN_STYLE_NO_PEN
 
@@ -91,6 +91,9 @@ RE_BARE = re.compile(
     r"^(\d{3,6})\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE
 )
 
+# any other extension: name.####.ext is still a frame sequence (needs 2+ files)
+RE_OTHER_DOTTED = re.compile(r"^(.+?)[._](\d{3,6})\.([^.]+)$")
+
 IMG_EXTS  = {e.lstrip(".") for e in SUPPORTED_IMAGE_EXTS}
 VID_EXTS  = {e.lstrip(".") for e in SUPPORTED_VIDEO_EXTS}
 
@@ -99,9 +102,12 @@ def _group_files(folder: Path, files: list):
     """
     Split a list of file names into:
       sequences: [(prefix, ext, frame_list), ...]
-      singles:   [(name, kind), ...]   kind = 'video' | 'image' | 'other'
+      singles:   [(name, kind), ...]   kind = 'video' | 'image' | 'file'
+    Every file is kept: an extension only decides how it is grouped.
     """
     seq_groups = defaultdict(list)  # (prefix, ext) -> [frame_num, ...]
+    other_groups = defaultdict(list)  # same, for extensions we have no special case for
+    other_names = {}
     singles = []
 
     for name in files:
@@ -123,7 +129,19 @@ def _group_files(folder: Path, files: list):
         elif ext in IMG_EXTS:
             singles.append((name, "image"))
         else:
-            pass  # skip .json, .txt, etc.
+            m_other = RE_OTHER_DOTTED.match(name)
+            if m_other:
+                other_groups[(m_other.group(1), m_other.group(3).lower())].append(int(m_other.group(2)))
+                other_names.setdefault((m_other.group(1), m_other.group(3).lower()), []).append(name)
+            else:
+                singles.append((name, "file"))
+
+    # a lone numbered file of an unfamiliar type is a file, not a 1-frame sequence
+    for key, frames in other_groups.items():
+        if len(frames) >= 2:
+            seq_groups[key].extend(frames)
+        else:
+            singles.extend((n, "file") for n in other_names[key])
 
     sequences = []
     for (prefix, ext), frames in seq_groups.items():
@@ -490,7 +508,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         subdirs.append(Path(entry.path))
-                    elif entry.is_file(follow_symlinks=False):
+                    elif entry.is_file(follow_symlinks=False) and not is_ignored_file(entry.name):
                         file_names.append(entry.name)
         except PermissionError:
             return item
@@ -589,7 +607,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         def walk(tree_item):
             kind = tree_item.data(0, ROLE_KIND)
             path_str = tree_item.data(0, ROLE_PATH)
-            if path_str and kind in ("sequence", "video", "image"):
+            if path_str and kind in ("sequence", "video", "image", "file"):
                 path = Path(path_str)
                 real_item = self._resolve_item_for_node(path, kind, scan_cache=scan_cache)
                 real_path = Path(real_item.files[0]) if (real_item and real_item.files) else path
@@ -625,7 +643,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
         kind     = item.data(0, ROLE_KIND)
         path_str = item.data(0, ROLE_PATH)
-        if not path_str or kind not in ("sequence", "video", "image"):
+        if not path_str or kind not in ("sequence", "video", "image", "file"):
             return
 
         gp = self._tree.viewport().mapToGlobal(pos)

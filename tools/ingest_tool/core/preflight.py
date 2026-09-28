@@ -42,7 +42,7 @@ def field_issues(item: IngestItem, known_media_types=None) -> list[Issue]:
                 severity=Severity.BLOCK, column=f,
             ))
 
-    for f in REQUIRED_METADATA:
+    for f in (REQUIRED_METADATA if item.carries_media_metadata else ()):
         verified = item.metadata_verified.get(f, False)
         has_value = bool(str(getattr(item, f) or "").strip())
         if not verified and not has_value:

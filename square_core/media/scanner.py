@@ -3,8 +3,20 @@ import re
 from pathlib import Path
 from collections import defaultdict
 
+# Extensions the pipeline knows how to treat as image frames / video. They
+# only decide how a file is *grouped* (frame sequence, single video); they
+# never decide whether it is shown -- any other file (a .cdl grade, a .lut, a
+# format nobody has thought of yet) still comes through as a plain item.
 SUPPORTED_IMAGE_EXTS = {".exr", ".dpx", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 SUPPORTED_VIDEO_EXTS = {".mov", ".mp4", ".mkv", ".m4v"}
+
+# OS / tooling droppings that are never part of a delivery
+_IGNORED_NAMES = {"thumbs.db", "desktop.ini"}
+
+
+def is_ignored_file(name: str) -> bool:
+    """Hidden files and OS thumbnail caches -- never delivery content."""
+    return name.startswith(".") or name.lower() in _IGNORED_NAMES
 
 class IngestSequenceItem:
     """Represents a discovered media sequence or video file."""
@@ -115,6 +127,10 @@ class PlateScanner:
 
         pattern_dotted = re.compile(r"^(.*?)[._](\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
         pattern_standalone = re.compile(r"^(\d+)\.(exr|dpx|png|jpg|jpeg|tif|tiff)$", re.IGNORECASE)
+        # any other extension: name.####.ext is still a frame sequence
+        pattern_other = re.compile(r"^(.+?)[._](\d{3,6})\.([^.]+)$")
+        other_groups = defaultdict(list)
+        other_singles = []
 
         root_path_str = str(self.search_path.resolve())
         if os.name == 'nt' and not root_path_str.startswith('\\\\?\\') and len(root_path_str) > 240:
@@ -123,6 +139,8 @@ class PlateScanner:
         for root, dirs, files in os.walk(root_path_str, onerror=lambda err: None, followlinks=False):
             folder_name = os.path.basename(root)
             for file in files:
+                if is_ignored_file(file):
+                    continue
                 filepath = os.path.join(root, file)
                 ext = os.path.splitext(file)[1].lower()
 
@@ -141,10 +159,27 @@ class PlateScanner:
 
                     group_key = (root, base_prefix, ext)
                     sequence_groups[group_key].append(filepath)
+                else:
+                    m_other = pattern_other.match(file)
+                    if m_other:
+                        other_groups[(root, m_other.group(1), ext)].append(filepath)
+                    else:
+                        other_singles.append(IngestSequenceItem(file, [filepath], ext, is_video=False))
 
         items = []
         for (root, base_prefix, ext), file_list in sequence_groups.items():
             items.append(IngestSequenceItem(base_prefix, file_list, ext, is_video=False))
 
+        # A lone numbered file of an unfamiliar type is a file, not a
+        # one-frame sequence (a versioned grade, a numbered note); two or more
+        # is a sequence.
+        for (root, base_prefix, ext), file_list in other_groups.items():
+            if len(file_list) >= 2:
+                items.append(IngestSequenceItem(base_prefix, file_list, ext, is_video=False))
+            else:
+                other_singles.append(
+                    IngestSequenceItem(os.path.basename(file_list[0]), file_list, ext, is_video=False))
+
+        items.extend(other_singles)
         items.extend(single_videos)
         return items

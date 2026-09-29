@@ -42,7 +42,6 @@ class TestRoundTrip(SessionTestBase):
         sess = IngestSession.capture(
             c, delivery_root=str(self.src),
             path_patterns=[{"template": "<sequence>/<shot>/####.exr"}],
-            active_preset="VFX Standard",
         )
         path = sess.save(self.tmp / "showX")
         self.assertTrue(path.endswith(SESSION_SUFFIX))
@@ -51,7 +50,6 @@ class TestRoundTrip(SessionTestBase):
         self.assertEqual(loaded.project_code, "ABC")
         self.assertEqual(loaded.delivery_root, str(self.src))
         self.assertEqual(len(loaded.path_patterns), 1)
-        self.assertEqual(loaded.active_preset, "VFX Standard")
 
         # resume reads the LIVE ProjectConfig via the same pctx -- no
         # config_snapshot to rebuild a controller from

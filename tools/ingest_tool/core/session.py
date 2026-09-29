@@ -51,7 +51,6 @@ class IngestSession:
 
     delivery_root: str = ""
     path_patterns: list = field(default_factory=list)
-    active_preset: str = ""
 
     batch_id: str = ""
     items: list = field(default_factory=list)        # list[IngestItem.to_dict()]
@@ -63,7 +62,7 @@ class IngestSession:
 
     @classmethod
     def capture(cls, controller, *, delivery_root="", path_patterns=None,
-                active_preset="", dry_run=False) -> "IngestSession":
+                dry_run=False) -> "IngestSession":
         return cls(
             saved_at=_utcnow(),
             project_code=controller.pctx.code,
@@ -71,7 +70,6 @@ class IngestSession:
             dry_run=bool(dry_run),
             delivery_root=delivery_root or "",
             path_patterns=list(path_patterns or []),
-            active_preset=active_preset or "",
             batch_id=controller.batch_id,
             items=[it.to_dict() for it in controller.items],
             undo_stack=list(getattr(controller, "_undo", []) or []),

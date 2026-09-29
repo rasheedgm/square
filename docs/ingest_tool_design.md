@@ -536,17 +536,16 @@ Suite: **285 tests green**, ~10s. (Was 369; ~90 old
 8. **Resume didn't restore the tree view / patterns** — the session file *did*
    store `delivery_root` + `path_patterns`, but `_resume` only rebuilt the
    table, leaving the folder tree empty. Now `_write_session` pulls the live
-   root + Path Patterns + active preset from the folder tree, the session
-   gained an `active_preset` field, and `FolderTreeWidget.restore(root,
-   patterns, preset)` reopens the folder, repopulates the tree, re-applies
-   the patterns, and selects the preset. Verified save→fresh-window→resume.
+   root + Path Patterns from the folder tree, and `FolderTreeWidget.restore(
+   root, patterns)` reopens the folder, repopulates the tree, and re-applies
+   the patterns. Verified save→fresh-window→resume.
 9. **Hidden sidecar scrapped** — `FolderMapper` no longer reads or writes
    `.square_ingest_map.json` (or anything to disk). It's a pure in-memory
    object: Path Patterns only. The `_table_state`
    "remember the table" feature is gone too — that's the session's job.
    Everything a delivery's tagging needs now round-trips through the
-   `*.sqingest.json` session (`path_patterns`, `active_preset`) and named presets live in `studio_config.json`. Existing
-   sidecar files on disk are now inert.
+   `*.sqingest.json` session (`path_patterns`). Existing sidecar files on
+   disk are now inert.
 
 ## Fixes from real-UI testing (round 2)
 
@@ -604,8 +603,22 @@ fixes are structural rather than one per symptom.
    resolved path, so the mapper re-spells the tree's paths from it -- before
    that, a row picked from `Z:\...` never matched and Load found nothing.
    **There is no manual "Tag as <media type>" any more**: the tree's context
-   menu only builds a Path Pattern, and the mapper, the session and presets
-   carry patterns and nothing else.
+   menu only builds a Path Pattern, and the mapper and the session carry
+   patterns and nothing else.
+9b. **Named presets are gone; a pattern list is a plain file.** The tree's
+   preset dropdown and "Save Tagging as Preset…" are gone, and so is
+   `tools/ingest_tool/core/presets.py` (a `~/.square/ingest_presets.json`
+   registry of named, active-tracked pattern lists). The Path Patterns
+   manager (`path_pattern_dialog.py`) now has **Save As…**, **Import
+   (Replace)…** and **Import (Append)…** instead: Save As writes the current
+   ordered pattern list (including each pattern's Defaults) to a `.json`
+   file wherever the user chooses; Import reads one back, either swapping the
+   current list or adding to the end of it. Nothing is remembered about which
+   file a root's patterns came from, so editing patterns afterward never
+   prompts to "update the preset" — that tracking (and the bug where an
+   edit's defaults could vanish on the round trip) doesn't exist any more.
+   Reordering (first match wins) was already supported (▲/▼ in the same
+   dialog) and is unaffected.
 9. **Task types are enabled on the project before tasks are created.** A task
    can't be created for a type the project doesn't have, and `ensure_tasks` used to
    quietly make none, so the ingest failed with a bare "no task on SH0100".

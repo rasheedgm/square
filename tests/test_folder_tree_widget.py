@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import tempfile
@@ -8,8 +9,8 @@ from unittest.mock import patch
 from Qt import QtWidgets
 
 from square_core.paths.path_pattern import PathPattern
-from tools.ingest_tool.core import presets as ingest_presets
 from tools.ingest_tool.widgets.folder_tree_widget import FolderTreeWidget
+from tools.ingest_tool.widgets.path_pattern_dialog import PathPatternManagerDialog
 
 
 class TestSessionRestore(unittest.TestCase):
@@ -136,156 +137,106 @@ class TestSingleSequenceSelection(unittest.TestCase):
         self.assertFalse(any("fg." in p for p in result))
 
 
-class TestIngestPresetsPreserveDefaults(unittest.TestCase):
-    """
-    Confirmed bug: saving the current tagging as an Ingest Preset kept only
-    each pattern's bare template STRING, so a pattern's "Defaults for Fields
-    Not in the Path" (e.g. media_type defaulted to "Plate" because it's never
-    part of this vendor's folder structure) silently vanished the moment it
-    round-tripped through a preset -- reselecting the preset later reapplied
-    the template but never the default again.
-    """
+class TestPatternManagerSaveAndImport(unittest.TestCase):
+    """Save As... / Import... in the Path Patterns manager: a reusable
+    pattern list is a plain file the user places, not a named preset
+    registry -- there is no active/loaded-preset tracking left afterward."""
 
     def setUp(self):
         QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.state_dir = Path(tempfile.mkdtemp())      # outside the scanned root
-        self.addCleanup(shutil.rmtree, self.state_dir, ignore_errors=True)
-        self._old_state_dir = os.environ.get("SQUARE_STATE_DIR")
-        os.environ["SQUARE_STATE_DIR"] = str(self.state_dir)
-        self.addCleanup(self._restore_state_dir)
-
         d = self.tmp / "SQ010" / "SH0100"
         d.mkdir(parents=True)
         (d / "plate.1001.exr").write_text("x")
+        self.tree = FolderTreeWidget()
+        self.tree.load_path(str(self.tmp))
+        self.tree._mapper.add_path_pattern(PathPattern(
+            template="<sequence>/<shot>/plate.####.exr", defaults={"media_type": "Plate"}))
+        self.save_dir = Path(tempfile.mkdtemp())       # outside the scanned root
+        self.addCleanup(shutil.rmtree, self.save_dir, ignore_errors=True)
+        self.out = self.save_dir / "saved.json"
 
-    def _restore_state_dir(self):
-        if self._old_state_dir is None:
-            os.environ.pop("SQUARE_STATE_DIR", None)
-        else:
-            os.environ["SQUARE_STATE_DIR"] = self._old_state_dir
+    def _dlg(self):
+        return PathPatternManagerDialog(self.tree._mapper)
 
-    def test_saving_and_reapplying_a_preset_keeps_the_pattern_s_defaults(self):
-        from unittest.mock import patch
+    def test_save_as_writes_the_full_pattern_including_its_defaults(self):
+        dlg = self._dlg()
+        with patch.object(QtWidgets.QFileDialog, "getSaveFileName",
+                          return_value=(str(self.out), "")):
+            dlg._on_save_as()
+        self.assertTrue(self.out.exists())
+        data = json.loads(self.out.read_text())
+        self.assertEqual(len(data["patterns"]), 1)
+        self.assertEqual(data["patterns"][0]["defaults"], {"media_type": "Plate"})
 
-        tree = FolderTreeWidget()
-        tree.load_path(str(self.tmp))
-        tree._mapper.add_path_pattern(PathPattern(
-            template="<sequence>/<shot>/plate.####.exr",
-            defaults={"media_type": "Plate"},
-        ))
+    def test_save_as_appends_json_if_the_user_left_it_off(self):
+        dlg = self._dlg()
+        bare = str(self.tmp / "saved")
+        with patch.object(QtWidgets.QFileDialog, "getSaveFileName", return_value=(bare, "")):
+            dlg._on_save_as()
+        self.assertTrue((self.tmp / "saved.json").exists())
 
-        with patch.object(QtWidgets.QInputDialog, "getText", return_value=("Vendor", True)):
-            tree._on_save_ingest_preset()
+    def test_import_replace_swaps_the_pattern_list(self):
+        self.out.write_text(json.dumps({"patterns": [
+            {"template": "<sequence>/<shot>/other.####.exr"}]}))
+        dlg = self._dlg()
+        with patch.object(QtWidgets.QFileDialog, "getOpenFileName",
+                          return_value=(str(self.out), "")):
+            dlg._on_import(replace=True)
+        patterns = self.tree._mapper.get_path_patterns()
+        self.assertEqual(len(patterns), 1)
+        self.assertEqual(patterns[0].template, "<sequence>/<shot>/other.####.exr")
+        self.assertTrue(dlg.changed)
 
-        # simulate a fresh session: a brand new tree, presets reloaded from disk
+    def test_import_append_keeps_what_was_already_there(self):
+        self.out.write_text(json.dumps({"patterns": [
+            {"template": "<sequence>/<shot>/other.####.exr"}]}))
+        dlg = self._dlg()
+        with patch.object(QtWidgets.QFileDialog, "getOpenFileName",
+                          return_value=(str(self.out), "")):
+            dlg._on_import(replace=False)
+        patterns = self.tree._mapper.get_path_patterns()
+        self.assertEqual([p.template for p in patterns],
+                         ["<sequence>/<shot>/plate.####.exr", "<sequence>/<shot>/other.####.exr"])
+
+    def test_a_bare_list_file_is_also_accepted(self):
+        self.out.write_text(json.dumps([{"template": "<sequence>/<shot>/other.####.exr"}]))
+        dlg = self._dlg()
+        with patch.object(QtWidgets.QFileDialog, "getOpenFileName",
+                          return_value=(str(self.out), "")):
+            dlg._on_import(replace=True)
+        self.assertEqual(len(self.tree._mapper.get_path_patterns()), 1)
+
+    def test_an_unreadable_file_is_reported_and_changes_nothing(self):
+        bad = self.tmp / "bad.json"
+        bad.write_text("not json")
+        dlg = self._dlg()
+        with patch.object(QtWidgets.QFileDialog, "getOpenFileName", return_value=(str(bad), "")),              patch.object(QtWidgets.QMessageBox, "warning") as warn:
+            dlg._on_import(replace=True)
+        warn.assert_called_once()
+        self.assertEqual(len(self.tree._mapper.get_path_patterns()), 1)   # untouched
+        self.assertFalse(dlg.changed)
+
+    def test_round_trip_preserves_everything_a_pattern_needs(self):
+        with patch.object(QtWidgets.QFileDialog, "getSaveFileName",
+                          return_value=(str(self.out), "")):
+            self._dlg()._on_save_as()
         tree2 = FolderTreeWidget()
         tree2.load_path(str(self.tmp))
-        tree2._on_preset_selected("Vendor")
-
-        patterns = tree2._mapper.get_path_patterns()
-        self.assertEqual(len(patterns), 1)
-        self.assertEqual(patterns[0].defaults, {"media_type": "Plate"})
-
+        dlg2 = PathPatternManagerDialog(tree2._mapper)
+        with patch.object(QtWidgets.QFileDialog, "getOpenFileName",
+                          return_value=(str(self.out), "")):
+            dlg2._on_import(replace=True)
         items = tree2._mapper.build_items()
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].media_type, "Plate")
 
-
-class TestActivePresetSync(unittest.TestCase):
-    """
-    Feature: once a preset is active, a pattern edit made afterward (via
-    either the builder or the Path Patterns manager) offers to update that
-    preset instead of silently drifting out of sync with what's actually
-    tagging this root.
-    """
-
-    def setUp(self):
-        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-        self.tmp = Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.state_dir = Path(tempfile.mkdtemp())      # outside the scanned root
-        self.addCleanup(shutil.rmtree, self.state_dir, ignore_errors=True)
-        self._old_state_dir = os.environ.get("SQUARE_STATE_DIR")
-        os.environ["SQUARE_STATE_DIR"] = str(self.state_dir)
-        self.addCleanup(self._restore_state_dir)
-        d = self.tmp / "SQ010" / "SH0100"
-        d.mkdir(parents=True)
-        (d / "plate.1001.exr").write_text("x")
-
-    def _restore_state_dir(self):
-        if self._old_state_dir is None:
-            os.environ.pop("SQUARE_STATE_DIR", None)
-        else:
-            os.environ["SQUARE_STATE_DIR"] = self._old_state_dir
-
-    def _tree_with_saved_preset(self):
-        tree = FolderTreeWidget()
-        tree.load_path(str(self.tmp))
-        tree._mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/plate.####.exr"))
-        with patch.object(QtWidgets.QInputDialog, "getText", return_value=("Vendor", True)):
-            tree._on_save_ingest_preset()
-        return tree
-
-    def test_no_prompt_when_no_preset_is_active(self):
-        tree = FolderTreeWidget()
-        tree.load_path(str(self.tmp))
-        with patch.object(QtWidgets.QMessageBox, "question") as q:
-            tree._maybe_sync_active_preset()
-            q.assert_not_called()
-
-    def test_accepting_the_prompt_updates_the_saved_preset(self):
-        tree = self._tree_with_saved_preset()
-        tree._mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/other.####.exr"))
-
-        yes = QtWidgets.QMessageBox.StandardButton.Yes
-        with patch.object(QtWidgets.QMessageBox, "question", return_value=yes):
-            tree._maybe_sync_active_preset()
-
-        reloaded = ingest_presets.load()
-        self.assertEqual(len(reloaded["presets"]["Vendor"]["patterns"]), 2)
-
-    def test_declining_the_prompt_leaves_the_saved_preset_untouched(self):
-        tree = self._tree_with_saved_preset()
-        tree._mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/other.####.exr"))
-
-        no = QtWidgets.QMessageBox.StandardButton.No
-        with patch.object(QtWidgets.QMessageBox, "question", return_value=no):
-            tree._maybe_sync_active_preset()
-
-        reloaded = ingest_presets.load()
-        self.assertEqual(len(reloaded["presets"]["Vendor"]["patterns"]), 1)
-
-    def test_manage_patterns_dialog_offers_sync_only_when_something_changed(self):
-        tree = self._tree_with_saved_preset()
-
-        with patch("tools.ingest_tool.widgets.folder_tree_widget.PathPatternManagerDialog") as MgrDlg, \
-             patch.object(tree, "_maybe_sync_active_preset") as sync:
-            inst = MgrDlg.return_value
-            inst.exec.return_value = 1
-            inst.changed = False
-            tree._on_manage_patterns()
-            sync.assert_not_called()
-
-            inst.changed = True
-            tree._on_manage_patterns()
-            sync.assert_called_once()
-
-    def test_open_pattern_builder_offers_sync_when_a_pattern_is_saved(self):
-        from tools.qt_compat import DIALOG_ACCEPTED
-
-        tree = self._tree_with_saved_preset()
-        with patch("tools.ingest_tool.widgets.folder_tree_widget.PathPatternBuilderDialog") as Dlg, \
-             patch.object(tree, "_maybe_sync_active_preset") as sync:
-            inst = Dlg.return_value
-            inst.exec.return_value = DIALOG_ACCEPTED
-            inst.result_pattern = PathPattern(template="<sequence>/<shot>/other.####.exr")
-            inst.result_replace_index = None
-            tree._resolve_item_for_node = lambda *a, **k: type(
-                "S", (), {"files": [str(self.tmp / "SQ010" / "SH0100" / "plate.1001.exr")]})()
-            tree._open_path_pattern_builder(self.tmp / "SQ010" / "SH0100" / "plate.exr", "sequence")
-            sync.assert_called_once()
+    def test_there_is_no_named_preset_tracking_left(self):
+        for name in ("_on_save_ingest_preset", "_on_preset_selected",
+                    "_maybe_sync_active_preset", "_refresh_preset_combo", "_presets",
+                    "active_preset"):
+            self.assertFalse(hasattr(self.tree, name), name)
 
 
 class TestFolderSelectionLoadsTaggedChildren(unittest.TestCase):

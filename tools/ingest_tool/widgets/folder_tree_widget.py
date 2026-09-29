@@ -13,6 +13,10 @@ Key behaviour:
     folders are never coloured.
   - Right-click on a leaf item: build a Path Pattern from that item's
     whole path.
+  - Saving/loading a reusable set of patterns is a plain file -- Save As... /
+    Import... in the Path Patterns manager (path_pattern_dialog.py). There is
+    no dropdown of named presets and no tracking of which file a root's
+    patterns came from: importing just replaces or appends the pattern list.
 """
 
 import os
@@ -23,7 +27,6 @@ from collections import defaultdict
 from Qt import QtWidgets, QtCore, QtGui
 
 from tools.ingest_tool.core.folder_mapper import FolderMapper
-from tools.ingest_tool.core import presets as ingest_presets
 from square_core.media.scanner import SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS, is_ignored_file
 from tools.ingest_tool.widgets.path_pattern_dialog import PathPatternBuilderDialog, PathPatternManagerDialog
 from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED, PEN_STYLE_NO_PEN
@@ -178,7 +181,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._root_path = None
         self._mapper    = None
-        self._presets = ingest_presets.load()
         self.setAcceptDrops(True)
         self.setMinimumWidth(340)
         self._build_ui()
@@ -201,12 +203,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._browse_btn.setFixedHeight(28)
         self._browse_btn.clicked.connect(self._on_browse)
 
-        self._preset_combo = QtWidgets.QComboBox()
-        self._preset_combo.setFixedHeight(28)
-        self._preset_combo.setToolTip("Load or Save an Ingest Preset (a saved list of Path Patterns)")
-        self._refresh_preset_combo()
-        self._preset_combo.activated.connect(self._on_preset_combo_activated)
-
         self._patterns_btn = QtWidgets.QPushButton("Patterns…")
         self._patterns_btn.setToolTip("Manage the Path Patterns active for this incoming folder")
         self._patterns_btn.setFixedHeight(28)
@@ -220,15 +216,12 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._clear_btn.clicked.connect(self._on_clear_tags)
 
         # Give each button a floor at its own natural (unclipped) width, so
-        # a narrow panel squeezes the preset combo (which degrades fine,
-        # showing "..." on a long preset name) instead of truncating a
-        # button's own label into something unreadable.
+        # a narrow panel doesn't truncate a button's own label.
         for btn in (self._browse_btn, self._patterns_btn, self._clear_btn):
             btn.setMinimumWidth(btn.sizeHint().width())
-        self._preset_combo.setMinimumWidth(60)
 
         btn_row.addWidget(self._browse_btn)
-        btn_row.addWidget(self._preset_combo, stretch=1)
+        btn_row.addStretch(1)
         btn_row.addWidget(self._patterns_btn)
         btn_row.addWidget(self._clear_btn)
         layout.addLayout(btn_row)
@@ -416,10 +409,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         return [p.to_dict() if hasattr(p, "to_dict") else dict(p)
                 for p in self._mapper.get_path_patterns()]
 
-    def active_preset(self) -> str:
-        return self._presets.get("active", "") or ""
-
-    def restore(self, path: str, patterns=None, preset: str = "") -> None:
+    def restore(self, path: str, patterns=None) -> None:
         """
         Reopen a delivery from a resumed session: load the folder and
         re-apply its Path Patterns. No hidden sidecar is read -- the session
@@ -428,12 +418,8 @@ class FolderTreeWidget(QtWidgets.QWidget):
         if not path or not os.path.isdir(path):
             return
         self.load_path(path)
-        if self._mapper:
-            if patterns:
-                self._mapper.set_path_patterns(patterns)
-        if preset:
-            self._presets["active"] = preset
-            self._refresh_preset_combo()
+        if self._mapper and patterns:
+            self._mapper.set_path_patterns(patterns)
         self._refresh_item_colours()
 
     # ------------------------------------------------------------------
@@ -621,63 +607,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         gp = self._tree.viewport().mapToGlobal(pos)
         self._show_media_context_menu(item, Path(path_str), gp)
 
-    def _refresh_preset_combo(self):
-        """Refreshes the Ingest Preset dropdown list with options + Save action."""
-        self._preset_combo.blockSignals(True)
-        self._preset_combo.clear()
-        self._preset_combo.addItem("Presets ▼")
-        for name in self._presets.get("presets", {}).keys():
-            self._preset_combo.addItem(f"  {name}")
-        self._preset_combo.addItem("💾 Save Tagging as Preset…")
-        self._preset_combo.blockSignals(False)
-
-    def _on_preset_combo_activated(self, index):
-        text = self._preset_combo.itemText(index).strip()
-        if text.startswith("💾 Save"):
-            self._on_save_ingest_preset()
-        elif text.startswith("Presets"):
-            return
-        else:
-            preset_name = text
-            self._on_preset_selected(preset_name)
-
-    def _on_preset_selected(self, preset_name):
-        """Applies a saved Ingest Preset (an ordered list of Path Patterns) to the tree."""
-        presets = self._presets.get("presets", {})
-        if not self._mapper or preset_name not in presets:
-            return
-
-        data = presets[preset_name]
-        self._mapper.set_path_patterns(data.get("patterns", []))
-        self._presets["active"] = preset_name
-        ingest_presets.save(self._presets)
-
-        self._refresh_item_colours()
-
-    def _on_save_ingest_preset(self):
-        """Saves the current tree's active Path Patterns as a new (or existing) Ingest Preset."""
-        if not self._mapper:
-            QtWidgets.QMessageBox.information(self, "Save Preset", "Please load a folder tree first before saving a preset.")
-            return
-
-        text, ok = QtWidgets.QInputDialog.getText(self, "Save Ingest Preset", "Preset Name:")
-        if ok and text.strip():
-            self._save_patterns_to_preset(text.strip())
-
-    def _save_patterns_to_preset(self, preset_name: str) -> None:
-        """(Over)writes `preset_name` with the mapper's current, full Path
-        Pattern list -- as dicts, not bare template strings, or a pattern's
-        Defaults for Fields Not in the Path would silently vanish the next
-        time this preset is applied."""
-        preset_data = {
-            "name": preset_name,
-            "patterns": [p.to_dict() for p in self._mapper.get_path_patterns()],
-        }
-        self._presets.setdefault("presets", {})[preset_name] = preset_data
-        self._presets["active"] = preset_name
-        ingest_presets.save(self._presets)
-        self._refresh_preset_combo()
-
     def _show_media_context_menu(self, item, path: Path, gp):
         """Context menu for a leaf item: build a Path Pattern from its whole path."""
         menu = QtWidgets.QMenu(self)
@@ -713,7 +642,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
             else:
                 self._mapper.add_path_pattern(dlg.result_pattern)
             self._refresh_item_colours()
-            self._maybe_sync_active_preset()
 
     def _on_manage_patterns(self):
         """Open the full ordered list of active Path Patterns for this root."""
@@ -722,24 +650,6 @@ class FolderTreeWidget(QtWidgets.QWidget):
         dlg = PathPatternManagerDialog(self._mapper, parent=self)
         dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
         self._refresh_item_colours()
-        if dlg.changed:
-            self._maybe_sync_active_preset()
-
-    def _maybe_sync_active_preset(self):
-        """A pattern the studio tagged came from (or now feeds into) an
-        active Ingest Preset -- ask whether this change should be saved back
-        into it, rather than the preset silently drifting out of sync with
-        what's actually being applied to this root."""
-        active = self.active_preset()
-        if not active or not self._mapper:
-            return
-        r = QtWidgets.QMessageBox.question(
-            self, "Update Preset",
-            f'Update the "{active}" preset with this change?',
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if r == QtWidgets.QMessageBox.StandardButton.Yes:
-            self._save_patterns_to_preset(active)
 
     # ------------------------------------------------------------------
     # Button Handlers

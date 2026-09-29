@@ -547,7 +547,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.controller,
             delivery_root=self.folder_tree.root_path or self._delivery_root,
             path_patterns=self.folder_tree.current_patterns() or self._path_patterns,
-            active_preset=self.folder_tree.active_preset(),
         )
         sess.save(self.session_path)
         remember_session(self.session_path)
@@ -614,7 +613,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.session_path = path
         remember_session(path)
         # bring the delivery folder + its Path Patterns back
-        self.folder_tree.restore(sess.delivery_root, sess.path_patterns, sess.active_preset)
+        self.folder_tree.restore(sess.delivery_root, sess.path_patterns)
         self.table.rebuild()
         self._update_summary()
         # re-check the rows that hadn't finished

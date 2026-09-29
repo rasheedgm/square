@@ -13,10 +13,14 @@ marking a piece a wildcard is how the user explicitly says "ignore this."
 
 PathPatternManagerDialog lists the patterns already saved for the current
 root -- order matters, since the first to match a file wins -- and lets the
-studio reorder, quick-edit, or remove them.
+studio reorder, quick-edit, or remove them, and Save As.../Import... a
+reusable pattern list as a plain .json file (a lightweight "preset" -- there
+is no name registry or tracking of which file a root's patterns came from;
+importing just replaces or appends the current list).
 """
 
 import html
+import json
 import re
 from pathlib import Path
 
@@ -783,16 +787,14 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
 
 
 class PathPatternManagerDialog(QtWidgets.QDialog):
-    """Lists, reorders, quick-edits, and removes the Path Patterns saved for the current root."""
+    """Lists, reorders, quick-edits, and removes the Path Patterns saved for
+    the current root, and saves/imports the whole list as a plain .json file."""
 
     def __init__(self, mapper, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Path Patterns")
         self.setMinimumSize(680, 380)
         self.mapper = mapper
-        # True once move/edit/remove actually changed something -- lets the
-        # caller (folder_tree_widget._on_manage_patterns) offer to sync an
-        # active Ingest Preset only when there's really something to sync.
         self.changed = False
         self._build_ui()
         self._refresh_table()
@@ -833,6 +835,27 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+
+        # ── Save / Import a reusable pattern list (a plain file, wherever
+        #    the user chooses -- no named-preset registry or dropdown) ──
+        file_row = QtWidgets.QHBoxLayout()
+        file_hdr = QtWidgets.QLabel("Reusable list:")
+        file_hdr.setStyleSheet("color:#94A3B8;")
+        file_row.addWidget(file_hdr)
+        save_btn = QtWidgets.QPushButton("Save As…")
+        save_btn.setToolTip("Save the patterns above to a file you choose")
+        save_btn.clicked.connect(self._on_save_as)
+        import_replace_btn = QtWidgets.QPushButton("Import (Replace)…")
+        import_replace_btn.setToolTip("Load a saved file, replacing the patterns above")
+        import_replace_btn.clicked.connect(lambda: self._on_import(replace=True))
+        import_append_btn = QtWidgets.QPushButton("Import (Append)…")
+        import_append_btn.setToolTip("Load a saved file, adding its patterns after the ones above")
+        import_append_btn.clicked.connect(lambda: self._on_import(replace=False))
+        file_row.addWidget(save_btn)
+        file_row.addWidget(import_replace_btn)
+        file_row.addWidget(import_append_btn)
+        file_row.addStretch()
+        layout.addLayout(file_row)
 
     def _refresh_table(self):
         patterns = self.mapper.get_path_patterns()
@@ -880,3 +903,59 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
             self.mapper.remove_path_pattern(idx)
             self.changed = True
             self._refresh_table()
+
+    # -- Save As... / Import... ---------------------------------------
+
+    def _on_save_as(self):
+        patterns = self.mapper.get_path_patterns()
+        if not patterns:
+            QtWidgets.QMessageBox.information(self, "Save As", "There are no patterns to save yet.")
+            return
+        path, _flt = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Save Path Patterns", "", "Ingest Patterns (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        data = {"patterns": [p.to_dict() for p in patterns]}
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+        except OSError as e:
+            QtWidgets.QMessageBox.warning(self, "Save As", f"Could not save the file:\n{e}")
+
+    def _load_patterns_file(self, path):
+        """The file's patterns as PathPattern objects, or None (+ a shown
+        warning) if the file isn't readable/valid. Accepts either
+        {"patterns": [...]} (what Save As writes) or a bare list."""
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as e:
+            QtWidgets.QMessageBox.warning(self, "Import", f"Could not read this file:\n{e}")
+            return None
+        raw = data.get("patterns") if isinstance(data, dict) else data
+        if not isinstance(raw, list):
+            QtWidgets.QMessageBox.warning(self, "Import", "This file doesn't hold a list of patterns.")
+            return None
+        try:
+            return [PathPattern.from_dict(d) for d in raw]
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Import", f"Could not read the patterns in this file:\n{e}")
+            return None
+
+    def _on_import(self, replace: bool):
+        path, _flt = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Import Path Patterns", "", "Ingest Patterns (*.json);;All Files (*)")
+        if not path:
+            return
+        patterns = self._load_patterns_file(path)
+        if patterns is None:
+            return
+        if replace:
+            self.mapper.set_path_patterns(patterns)
+        else:
+            for p in patterns:
+                self.mapper.add_path_pattern(p)
+        self.changed = True
+        self._refresh_table()

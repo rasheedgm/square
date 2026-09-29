@@ -215,8 +215,11 @@ Full design in `pipeline_architecture.md`. The load-bearing calls:
 - **Session is a user-named `*.sqingest.json`** the user places. No hidden
   sidecars. Atomic write, debounced autosave, "reopen last session?" prompt.
 - **`FolderMapper` is in-memory only.** The old hidden
-  `.square_ingest_map.json` sidecar is gone; Path Patterns
-  round-trip through the session, named presets through `studio_config.json`.
+  `.square_ingest_map.json` sidecar is gone; Path Patterns round-trip through
+  the session. A reusable pattern list is a plain `.json` file the user saves
+  and imports (Save As.../Import... in the Path Patterns manager) — not a
+  named preset registry; there is no `studio_config.json` involvement and no
+  tracking of which file a root's patterns came from.
 - ~~**The session carries a config snapshot**~~ → **Superseded 2026-09-02.**
   The session does **not** snapshot config. On resume the tool reads the live
   `ProjectConfig`. Rationale: a JSON snapshot inside the session file is itself

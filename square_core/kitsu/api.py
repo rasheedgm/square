@@ -68,6 +68,12 @@ class KitsuApi:
         # ingest publishes rows on worker threads; two rows of one media type
         # must not both try to create its output type
         self._output_type_lock = threading.Lock()
+        # ...and two rows of one SHOT (a plate, a reference and a grade all
+        # land on the same shot) must not both look, find nothing, and create
+        # the same sequence / shot / task -- Kitsu answers the loser
+        # "Task already exists". One lock per entity being ensured.
+        self._guards: dict = {}
+        self._guards_lock = threading.Lock()
 
     # ---- identity --------------------------------------------------
 
@@ -133,15 +139,24 @@ class KitsuApi:
 
     # ---- breakdown ---------------------------------------------
 
+    def _guard(self, *key) -> threading.Lock:
+        with self._guards_lock:
+            lock = self._guards.get(key)
+            if lock is None:
+                lock = self._guards[key] = threading.Lock()
+            return lock
+
     def ensure_sequence(self, project, code: str):
-        return _map.sequence(self._b.get_or_create_sequence(_id(project), code))
+        with self._guard("sequence", str(_id(project)), code.lower()):
+            return _map.sequence(self._b.get_or_create_sequence(_id(project), code))
 
     def ensure_shot(self, project, sequence, code: str, *, frame_in=1001, frame_out=1100,
                     fps=None, nb_frames=None):
-        raw = self._b.get_or_create_shot(
-            _id(project), _id(sequence), code,
-            frame_in=frame_in, frame_out=frame_out, fps=fps, nb_frames=nb_frames,
-        )
+        with self._guard("shot", str(_id(sequence)), code.lower()):
+            raw = self._b.get_or_create_shot(
+                _id(project), _id(sequence), code,
+                frame_in=frame_in, frame_out=frame_out, fps=fps, nb_frames=nb_frames,
+            )
         return _map.shot(raw)
 
     def sequences(self, project) -> list:
@@ -190,6 +205,12 @@ class KitsuApi:
         if not names:
             return []
         shot_ref = _id(shot)
+        # read-then-create must be one step per shot: rows of the same shot
+        # ingest in parallel, and each used to see "no task yet"
+        with self._guard("tasks", str(shot_ref)):
+            return self._ensure_tasks_locked(shot_ref, names)
+
+    def _ensure_tasks_locked(self, shot_ref, names) -> list:
         tt_by_name = {t["name"].lower(): t for t in self._b.all_task_types()}
         existing = {t["task_type_id"]: t for t in self._b.all_tasks_for_shot(shot_ref)}
         out = []
@@ -207,7 +228,20 @@ class KitsuApi:
                     pass
             if not (tt and tt.get("id")):
                 continue
-            t = existing.get(tt["id"]) or self._b.new_task(shot_ref, tt)
+            t = existing.get(tt["id"])
+            if t is None:
+                try:
+                    t = self._b.new_task(shot_ref, tt)
+                except Exception:
+                    # another client (or an earlier read that missed it)
+                    # created it first -- "Task already exists". Look again;
+                    # only a task that really isn't there is an error.
+                    fresh = {x["task_type_id"]: x
+                             for x in self._b.all_tasks_for_shot(shot_ref)}
+                    t = fresh.get(tt["id"])
+                    if t is None:
+                        raise
+                    existing.update(fresh)
             existing[tt["id"]] = t
             if isinstance(t, dict):
                 t.setdefault("task_type_name", tt.get("name", name))

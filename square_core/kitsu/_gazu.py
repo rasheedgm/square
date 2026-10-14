@@ -163,7 +163,13 @@ class GazuBackend:
         proj = _ref(project)
         seq = self.g.shot.get_sequence_by_name(proj, name)
         if not seq:
-            seq = self.g.shot.new_sequence(proj, name)
+            try:
+                seq = self.g.shot.new_sequence(proj, name)
+            except Exception:
+                # created by another client between the lookup and here
+                seq = self.g.shot.get_sequence_by_name(proj, name)
+                if not seq:
+                    raise
         return seq
 
     def get_or_create_shot(self, project, sequence, name, *, frame_in=1001, frame_out=1100,
@@ -175,11 +181,18 @@ class GazuBackend:
         data = {"frame_in": frame_in, "frame_out": frame_out}
         if fps:
             data["fps"] = fps
-        return self.g.shot.new_shot(
-            proj, seq, name,
-            nb_frames=nb_frames if nb_frames is not None else max(1, frame_out - frame_in + 1),
-            data=data,
-        )
+        try:
+            return self.g.shot.new_shot(
+                proj, seq, name,
+                nb_frames=nb_frames if nb_frames is not None else max(1, frame_out - frame_in + 1),
+                data=data,
+            )
+        except Exception:
+            # created by another client between the lookup and here
+            shot = self.g.shot.get_shot_by_name(seq, name)
+            if not shot:
+                raise
+            return shot
 
     def all_shots_for_project(self, project) -> list:
         return self.g.shot.all_shots_for_project(_ref(project)) or []

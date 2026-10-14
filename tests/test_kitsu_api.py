@@ -594,5 +594,99 @@ class TestProjectTaskTypesFallback(unittest.TestCase):
             b.project_task_types({"id": "p1"})
 
 
+class TestEnsureIsSafeUnderParallelIngest(unittest.TestCase):
+    """A plate, a reference and a grade for ONE shot are ingested by parallel
+    workers; each used to look, find no task, and create it -- Kitsu answered
+    the losers "Task already exists" and those rows failed."""
+
+    def _backend(self):
+        import time
+
+        class Strict(FakeBackend):
+            def new_task(self, entity, task_type):
+                time.sleep(0.02)                        # widen the race window
+                if task_type["id"] in self.tasks.get(entity["id"], {}):
+                    raise RuntimeError("('data/tasks', 'Task already exists.')")
+                return super().new_task(entity, task_type)
+
+            def get_or_create_shot(self, project, sequence, name, **f):
+                time.sleep(0.01)
+                return super().get_or_create_shot(project, sequence, name, **f)
+
+        return Strict()
+
+    def test_parallel_rows_of_one_shot_create_each_task_once(self):
+        import threading
+        b = self._backend()
+        api = KitsuApi(b, host="http://kitsu.test")
+        proj = api.create_project(code="ABC")
+        seq = api.ensure_sequence(proj, "SQ010")
+        shot = api.ensure_shot(proj, seq, "SH0100")
+        errors, got = [], []
+
+        def row():
+            try:
+                got.append(api.ensure_tasks(shot, ["Comp", "Ingest"]))
+            except Exception as e:                          # pragma: no cover - the bug
+                errors.append(e)
+
+        threads = [threading.Thread(target=row) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(b.tasks[shot.id]), 2)
+        self.assertEqual(len(got), 8)
+
+    def test_a_task_that_appears_between_the_read_and_the_create_is_used(self):
+        b = FakeBackend()
+        api = KitsuApi(b, host="http://kitsu.test")
+        proj = api.create_project(code="ABC")
+        shot = api.ensure_shot(proj, api.ensure_sequence(proj, "SQ010"), "SH0100")
+        tt = b.new_task_type("Comp")
+        real_new_task = b.new_task
+        calls = {"n": 0}
+
+        def racing(entity, task_type):
+            calls["n"] += 1
+            real_new_task(entity, task_type)           # someone else created it just now...
+            raise RuntimeError("('data/tasks', 'Task already exists.')")
+
+        b.new_task = racing
+        out = api.ensure_tasks(shot, ["Comp"])
+        self.assertEqual(len(out), 1)
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(len(b.tasks[shot.id]), 1)
+
+    def test_a_task_that_genuinely_cannot_be_created_still_raises(self):
+        b = FakeBackend()
+        api = KitsuApi(b, host="http://kitsu.test")
+        proj = api.create_project(code="ABC")
+        shot = api.ensure_shot(proj, api.ensure_sequence(proj, "SQ010"), "SH0100")
+
+        def nope(entity, task_type):
+            raise RuntimeError("403 forbidden")
+
+        b.new_task = nope
+        with self.assertRaises(RuntimeError):
+            api.ensure_tasks(shot, ["Comp"])
+
+    def test_parallel_ensure_shot_makes_one_shot(self):
+        import threading
+        b = self._backend()
+        api = KitsuApi(b, host="http://kitsu.test")
+        proj = api.create_project(code="ABC")
+        seq = api.ensure_sequence(proj, "SQ010")
+        ids = []
+        threads = [threading.Thread(target=lambda: ids.append(api.ensure_shot(proj, seq, "SH0100").id))
+                   for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(set(ids)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

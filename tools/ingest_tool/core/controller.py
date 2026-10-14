@@ -275,6 +275,13 @@ class IngestController:
             it.preflight_done = False
             it.check_error = ""
             it.check_stage, it.check_pct = "Queued", 0
+            if it.ingest_error and not it.ingested:
+                # Re-checking a Failed row is how it gets another go: nothing
+                # of the failed attempt remains (a failed copy is rolled back,
+                # and nothing is recorded until the copy has finished), and a
+                # row that stays "Failed" is never ingestable again.
+                it.ingest_error = ""
+                it.stage, it.stage_pct = Stage.QUEUED, 0
         self._emit_items(targets)
 
         workers = max(1, min(self.pctx.config.copy_workers, len(targets)))

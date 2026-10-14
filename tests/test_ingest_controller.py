@@ -1521,3 +1521,21 @@ class TestPatternOwnedMetadata(unittest.TestCase):
             controller.set_field(item.key, "fps", 30.0)          # not pattern-owned -> editable
             self.assertEqual(item.fps, 30.0)
 
+
+class TestRetryAFailedRow(unittest.TestCase):
+    def test_rechecking_a_failed_row_makes_it_ingestable_again(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
+            controller = _controller(_pctx(work), work)
+            item = _make_item(src)
+            _load(controller, [item])
+            controller.run_preflight()
+            item.ingest_error = "Task already exists."        # what a failed run leaves
+            from tools.ingest_tool.core.item import Stage
+            item.stage = Stage.FAILED
+            self.assertEqual(item.status.value, "Failed")
+            self.assertFalse(item.ingestable)
+            controller.run_preflight([item.key])
+            self.assertEqual(item.ingest_error, "")
+            self.assertTrue(item.ingestable)
+            controller.run_ingest()
+            self.assertTrue(item.ingested)

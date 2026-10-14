@@ -56,6 +56,7 @@ DEFAULT_PROJECT_CONFIG: dict[str, Any] = {
     "version_pad": 3,
     "frame_pad": 4,
     "copy_workers": 4,          # parallel file copies for any media.publish transfer
+    "copy_verify": "size",      # size | full -- how a copy is verified (full re-reads every file)
     "slugify": {"spaces_to": "_", "strip": '<>:"/\\|?*', "collapse": "_"},
 
     "roots": {
@@ -204,6 +205,11 @@ class ProjectConfig:
     @property
     def copy_workers(self) -> int:
         return int(self._scalar("copy_workers", DEFAULT_PROJECT_CONFIG["copy_workers"]))
+
+    @property
+    def copy_verify(self) -> str:
+        v = str(self._scalar("copy_verify", DEFAULT_PROJECT_CONFIG["copy_verify"]))
+        return v if v in ("size", "full") else DEFAULT_PROJECT_CONFIG["copy_verify"]
 
     @property
     def slugify(self) -> dict:

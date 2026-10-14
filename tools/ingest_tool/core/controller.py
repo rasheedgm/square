@@ -39,6 +39,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from square_core.hashing import FileHasher, HashCancelled
 from square_core.services import breakdown, media as media_service
+from square_core.storage.transfer import TransferCancelled
 
 from . import preflight
 from .item import IngestItem, Stage, Action, IssueKind, Status
@@ -47,6 +48,10 @@ logger = logging.getLogger("SquareIngestController")
 
 
 HASH_MODES = ("off", "first", "first_last", "first_middle_last", "all")
+
+# what _ingest_core hands back for a row that was skipped / cancelled before it
+# finished -- distinct from None (done, no preview pending)
+_STOPPED = object()
 
 
 def normalize_hash_mode(value) -> str:
@@ -156,7 +161,18 @@ class IngestController:
 
     @property
     def known_media_types(self) -> list:
-        return self.pctx.config.media_type_names(source="delivery")
+        """Media types that have a destination template configured -- what the
+        "no destination template" check compares a row's type against.
+
+        Deliberately NOT filtered by `source`: that field says which tool
+        stage *offers* a type (delivery / publish / work), not whether it has
+        a path. A type given its own `dir` but left on the default
+        `source: publish` is perfectly able to receive an ingest, and used to
+        be flagged "no destination template" anyway."""
+        reg = self.pctx.config.media_types
+        return [name for name, entry in reg.items()
+                if name != "_default" and isinstance(entry, dict)
+                and (entry.get("dir") or entry.get("file"))]
 
     # ------------------------------------------------------------------
     # Events
@@ -582,6 +598,8 @@ class IngestController:
             raise ValueError(f"not an editable field: {field_name}")
         if field_name == "version":
             value = int(value)
+        if item.metadata_locked(field_name):
+            return          # the Path Pattern (or the media type) owns this value
         self._push_undo(f"edit {field_name}", [key])
         setattr(item, field_name, value)
         if field_name in ("resolution", "fps", "colorspace"):
@@ -770,7 +788,8 @@ class IngestController:
         number of cells actually changed."""
         template = (template or "").strip()
         pairs = [(self._by_key[k], attr) for k, attr in cell_targets
-                if k in self._by_key and attr in self.RENAMEABLE_ATTRS]
+                if k in self._by_key and attr in self.RENAMEABLE_ATTRS
+                and not self._by_key[k].metadata_locked(attr)]
         if not pairs or not template:
             return 0
 
@@ -842,7 +861,7 @@ class IngestController:
 
         cw = max(1, self.pctx.config.copy_workers)
         item_workers = max(1, min(cw, len(targets)))
-        done = failed = 0
+        done = failed = stopped = 0
         preview_futs = []
 
         # One shared pool for EVERY frame transfer in the batch: total
@@ -856,9 +875,12 @@ class IngestController:
                 it = futs[fut]
                 try:
                     pv = fut.result()
-                    if pv is not None:
-                        preview_futs.append(pv)
-                    done += 1
+                    if pv is _STOPPED:
+                        stopped += 1                  # skipped / cancelled: not done, not failed
+                    else:
+                        if pv is not None:
+                            preview_futs.append(pv)
+                        done += 1
                 except Exception as e:
                     failed += 1
                     it.ingest_error = str(e)
@@ -868,6 +890,7 @@ class IngestController:
 
         self._emit("ingest_finished", payload={
             "done": done, "failed": failed, "dry_run": dry_run,
+            "stopped": stopped, "cancelled": self._cancel.is_set(),
             "previews_pending": sum(1 for f in preview_futs if not f.done()),
         })
 
@@ -880,7 +903,8 @@ class IngestController:
         elif preview_futs:
             self._emit("previews_finished", payload={})
 
-        return {"done": done, "failed": failed, "items": [i.key for i in targets]}
+        return {"done": done, "failed": failed, "stopped": stopped,
+                "items": [i.key for i in targets]}
 
     def _ensure_task_types(self) -> list:
         """Before touching any shot: every task type this batch records
@@ -894,7 +918,13 @@ class IngestController:
         try:
             missing = list(self.pctx.kitsu.ensure_project_task_types(self.pctx.project, names))
         except Exception as e:
-            logger.warning("[IngestController] couldn't verify the project's task types: %s", e)
+            # Not fatal: the ingest goes on, and a row that then can't get a
+            # task says exactly what to enable. (Typically a Kitsu server
+            # whose task-types route isn't open to this user.)
+            logger.warning(
+                "[IngestController] couldn't read the project's task types from Kitsu "
+                "(%s: %s) -- continuing; if tasks can't be created, enable %s under "
+                "Project Settings > Task Types.", type(e).__name__, e, ", ".join(names))
             return []
         if missing:
             self._emit("warning", payload={"message": (
@@ -978,9 +1008,42 @@ class IngestController:
     # Core ingest (critical path: files safe on disk + Kitsu has the version)
     # ------------------------------------------------------------------
 
+    def _convert(self, video, out_dir, start_frame, progress, should_stop):
+        """Run the (injectable) video->EXR converter, handing it progress /
+        stop hooks only if it accepts them -- a converter written before
+        those existed still works."""
+        import inspect
+        try:
+            params = inspect.signature(self.converter).parameters
+        except (TypeError, ValueError):
+            params = {}
+        kw = {}
+        if "progress" in params:
+            kw["progress"] = progress
+        if "should_stop" in params:
+            kw["should_stop"] = should_stop
+        return self.converter(video, out_dir, start_frame=start_frame, **kw)
+
+    def _ingest_stopped(self, item: IngestItem):
+        """This row won't be ingested after all (Cancel, or it was skipped /
+        removed while waiting or copying). Whatever the copy wrote was already
+        removed by media.publish; put the row back to what it was so it can be
+        run again, and tell the table."""
+        item.stage = Stage.QUEUED
+        item.stage_pct = 0
+        item.ingest_error = ""
+        self._reassemble_all(also=[item.key])
+        return _STOPPED
+
     def _ingest_core(self, item: IngestItem, dry_run: bool, transfer_mode: str, copy_pool):
-        if self._cancel.is_set():
-            return None
+        # Everything below re-asks this at its next safe point: a row skipped
+        # (or the whole ingest cancelled) after the run began must not START,
+        # and one already copying must stop and give back what it wrote.
+        def stop() -> bool:
+            return self._should_stop(item)
+
+        if stop():
+            return self._ingest_stopped(item)
 
         if dry_run:
             converting = item.is_video and item.convert_to_exr
@@ -1014,17 +1077,27 @@ class IngestController:
         if item.is_video and item.convert_to_exr:
             self._set_stage(item, Stage.CONVERTING, 2)
             scratch_dir = tempfile.mkdtemp(prefix="ingest_exr_")
+
+            def _conv(pct, _it=item):
+                self._set_stage(_it, Stage.CONVERTING, 2 + int(pct * 0.14))
+
             try:
-                converted = self.converter(
-                    item.source_files[0], scratch_dir, start_frame=item.start_frame or 1001,
-                )
+                converted = self._convert(item.source_files[0], scratch_dir,
+                                          item.start_frame or 1001, _conv, stop)
             except Exception:
                 shutil.rmtree(scratch_dir, ignore_errors=True)
+                if stop():
+                    return self._ingest_stopped(item)
                 raise
             if not converted:
                 shutil.rmtree(scratch_dir, ignore_errors=True)
                 raise RuntimeError("video-to-EXR conversion produced no frames")
             files_to_publish = converted
+
+        if stop():
+            if scratch_dir:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+            return self._ingest_stopped(item)
 
         # 1. Kitsu shot / tasks
         self._set_stage(item, Stage.KITSU_SHOT, 5)
@@ -1053,15 +1126,28 @@ class IngestController:
         from square_core.model import MediaInfo
         media_info = MediaInfo(fps=item.fps, resolution=item.resolution, colorspace=item.colorspace)
 
-        result = media_service.publish(
-            self.pctx, shot, item.media_type, ingest_task,
-            files=files_to_publish, name=item.media_name or "main", version=item.version,
-            media_info=media_info, transfer_mode=transfer_mode,
-            pool=copy_pool, progress=_cp,
-            make_review_proxy=(item.preview_wanted if not self._cancel.is_set() else False),
-            preview_pool=self._preview_pool,
-            comment=f"Ingested by {self.ingested_by}" if self.ingested_by else "",
-        )
+        if stop():
+            if scratch_dir:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+            return self._ingest_stopped(item)
+
+        try:
+            result = media_service.publish(
+                self.pctx, shot, item.media_type, ingest_task,
+                files=files_to_publish, name=item.media_name or "main", version=item.version,
+                media_info=media_info, transfer_mode=transfer_mode,
+                pool=copy_pool, progress=_cp,
+                make_review_proxy=(item.preview_wanted if not self._cancel.is_set() else False),
+                preview_pool=self._preview_pool,
+                comment=f"Ingested by {self.ingested_by}" if self.ingested_by else "",
+                # what the check already hashed isn't read again to verify
+                source_hashes=(item.hashes if item.source_files == files_to_publish else None),
+                should_stop=stop,
+            )
+        except TransferCancelled:
+            if scratch_dir:
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+            return self._ingest_stopped(item)
         item.dest_dir = result.dir
         # this row's slot just changed -- a later re-check must see the new output
         with self._kitsu_lock:

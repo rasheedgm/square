@@ -29,6 +29,7 @@ from Qt import QtWidgets, QtCore, QtGui
 from tools.ingest_tool.core.folder_mapper import FolderMapper
 from square_core.media.scanner import SUPPORTED_IMAGE_EXTS, SUPPORTED_VIDEO_EXTS, is_ignored_file
 from tools.ingest_tool.widgets.path_pattern_dialog import PathPatternBuilderDialog, PathPatternManagerDialog
+from tools.ingest_tool.widgets.busy import BusyProgress
 from tools.qt_compat import CONTEXT_MENU_CUSTOM, ALIGN_CENTER, EXTENDED_SELECTION, SCROLLBAR_AS_NEEDED, DIALOG_ACCEPTED, PEN_STYLE_NO_PEN
 
 # Item data roles (integer literals for Qt5/Qt6 compatibility)
@@ -395,8 +396,9 @@ class FolderTreeWidget(QtWidgets.QWidget):
         self._update_btn.setEnabled(True)
         self._drop_hint.hide()
 
-        self._populate_tree()
-        self._refresh_item_colours()
+        with BusyProgress(self, "Loading folder", "Reading folders…") as busy:
+            self._populate_tree(busy)
+            self._refresh_item_colours(busy)
 
     # ------------------------------------------------------------------
     # Session state (delivery root + Path Patterns)
@@ -437,15 +439,16 @@ class FolderTreeWidget(QtWidgets.QWidget):
             if os.path.isdir(path):
                 self.load_path(path)
 
-    def _populate_tree(self):
+    def _populate_tree(self, busy=None):
         """Rebuild the tree from scratch using fast os.scandir."""
         self._tree.setUpdatesEnabled(False)
         self._tree.clear()
+        self._folders_read = 0
         try:
             if not self._root_path:
                 return
             root_path = Path(self._root_path)
-            root_item = self._build_dir_item(root_path, is_root=True)
+            root_item = self._build_dir_item(root_path, is_root=True, busy=busy)
             if root_item:
                 self._tree.addTopLevelItem(root_item)
                 root_item.setExpanded(True)
@@ -460,8 +463,11 @@ class FolderTreeWidget(QtWidgets.QWidget):
         finally:
             self._tree.setUpdatesEnabled(True)
 
-    def _build_dir_item(self, folder: Path, is_root=False):
+    def _build_dir_item(self, folder: Path, is_root=False, busy=None):
         """Recursively build a QTreeWidgetItem for a directory using os.scandir."""
+        self._folders_read = getattr(self, "_folders_read", 0) + 1
+        if busy is not None:
+            busy.update("Reading folders", self._folders_read, 0)
         item = QtWidgets.QTreeWidgetItem()
         name = folder.name if not is_root else folder.name
         item.setText(0, name)
@@ -524,7 +530,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
 
         # Recurse into subdirs
         for sub in subdirs:
-            child = self._build_dir_item(sub)
+            child = self._build_dir_item(sub, busy=busy)
             item.addChild(child)
 
         return item
@@ -557,16 +563,24 @@ class FolderTreeWidget(QtWidgets.QWidget):
                 return c
         return None
 
-    def _refresh_item_colours(self):
+    def _refresh_item_colours(self, busy=None):
         """Walk the tree and refresh each leaf item's badge after a pattern change."""
         if not self._mapper:
             return
+        own_busy = None
+        if busy is None:
+            own_busy = busy = BusyProgress(self, "Matching patterns", "Matching patterns…")
         scan_cache = {}
+        counted = [0]
+        total = self._count_leaves()
 
         def walk(tree_item):
             kind = tree_item.data(0, ROLE_KIND)
             path_str = tree_item.data(0, ROLE_PATH)
             if path_str and kind in ("sequence", "video", "image", "file"):
+                counted[0] += 1
+                if counted[0] % 10 == 0 or counted[0] == total:
+                    busy.update("Matching patterns", counted[0], total)
                 path = Path(path_str)
                 real_item = self._resolve_item_for_node(path, kind, scan_cache=scan_cache)
                 badge = None
@@ -582,10 +596,24 @@ class FolderTreeWidget(QtWidgets.QWidget):
             for i in range(tree_item.childCount()):
                 walk(tree_item.child(i))
 
-        root = self._tree.invisibleRootItem()
-        for i in range(root.childCount()):
-            walk(root.child(i))
-        self._tree.viewport().update()
+        try:
+            root = self._tree.invisibleRootItem()
+            for i in range(root.childCount()):
+                walk(root.child(i))
+            self._tree.viewport().update()
+        finally:
+            if own_busy is not None:
+                own_busy.close()
+
+    def _count_leaves(self) -> int:
+        n = 0
+        stack = [self._tree.invisibleRootItem()]
+        while stack:
+            it = stack.pop()
+            if it.data(0, ROLE_KIND) in ("sequence", "video", "image", "file"):
+                n += 1
+            stack.extend(it.child(i) for i in range(it.childCount()))
+        return n
 
     # ------------------------------------------------------------------
     # Context Menu — leaf items only (folders carry no pattern of their own)

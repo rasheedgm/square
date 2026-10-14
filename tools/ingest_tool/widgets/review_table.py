@@ -297,6 +297,16 @@ class IngestReviewTable(QtWidgets.QWidget):
         verified = item.metadata_verified.get(field, False)
         val = getattr(item, field)
         locked = item.status in (Status.COMPLETED, Status.INGESTING)
+        if not item.carries_media_metadata:
+            cell = self._cell(r, c, "—", tip="Not applicable to this kind of file")
+            cell.setForeground(QtGui.QBrush(QtGui.QColor("#64748B")))
+            return
+        if item.metadata_locked(field):
+            cell = self._cell(r, c, "" if val in (None, "") else val,
+                              tip="Set by the Path Pattern — change it in the pattern "
+                                  "(Patterns… › Edit), not per row")
+            cell.setForeground(QtGui.QBrush(QtGui.QColor("#38BDF8")))
+            return
         cell = self._cell(r, c, "" if val in (None, "") else val, editable=not locked)
         if val in (None, ""):
             cell.setText("set…")

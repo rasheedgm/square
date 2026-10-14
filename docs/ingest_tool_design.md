@@ -720,3 +720,46 @@ Next: the Phase A port onto `square_core` (`pipeline_architecture.md` §12).
     `UHD`) stays visible as a plain tag instead of being dropped. Precedence:
     the file's own metadata (when readable) > the path tag > the pattern's
     typed fallback default.
+12. **Cancel and skip reach a running ingest.** `_ingest_core` used to look at
+    the cancel flag once, before starting a row -- a row skipped after "Ingest"
+    was pressed still ran, and Cancel didn't stop anything that had begun (and
+    left unstarted rows stuck on *Queued*). Now every row re-asks `_should_stop`
+    (cancelled / skipped / removed) before it starts, between phases, before
+    each file and *inside* the copy (CopyFileEx's progress routine returns
+    `PROGRESS_CANCEL`; video->EXR and proxy encodes terminate their ffmpeg). A
+    row that stops is **rolled back**: `media.publish` removes only the files
+    *it* wrote (never a file that was already in the slot) and the folder if it
+    created it, nothing has been written to Kitsu or the ledger yet (that comes
+    after the copy), and the row returns to its previous status so it can be run
+    again. A row whose copy already finished is allowed to finish recording --
+    Cancel never leaves a half-recorded version.
+13. **Copy speed.** The studio's `.bat` is one read + one write per file. Ours
+    was CopyFileEx (one read, one write) **plus** a hash of the destination
+    (second read, over the network for a share) **plus** a hash of the source
+    (third read) -- and `publish` never passed the check's source hashes down
+    even when `hash_check` had computed them. Verification is now
+    `copy_verify`: `size` (default) is CopyFileEx + a byte-count compare, i.e.
+    the bat's cost; `full` keeps the exact check, and no longer re-hashes a
+    source the check already hashed. Same-server SMB copies can additionally be
+    offloaded by CopyFileEx so the bytes never cross the client -- re-reading
+    the destination defeats that. `copy_workers` (default 4) is the other knob.
+14. **ffmpeg shows progress and can be stopped.** `run_ffmpeg` (square_core/media/
+    proxy.py) runs ffmpeg with `-progress pipe:1`: percent goes to the row's
+    Progress cell while converting, a line is printed to the terminal every
+    couple of seconds, and Cancel / Skip terminate the process.
+15. **Load no longer looks frozen.** The scanner read a file header per item
+    nothing used (`from_scan_item` ignores them) -- off now (`read_metadata`).
+    Folder load, pattern re-matching and Load show a progress dialog
+    (`widgets/busy.py`, only after 250 ms) with a count; Load's can be cancelled.
+16. **"No destination template" was a false alarm for types left on
+    `source: publish`.** The check compared against types whose `source` is
+    `delivery` -- which says which stage *offers* a type, not whether it has a
+    path. It now looks at whether the type has its own `dir` / `file`.
+17. **Pattern-supplied fps / resolution / colorspace are locked per row**
+    (`metadata_from_path`) until the file's own value is read; a non-media file
+    (`.cdl`) shows "—" and carries none. The Path Patterns manager shows each
+    pattern's Name and its "Edit…" renames / re-templates it.
+18. **Task-type lookup falls back to the project record** when Zou's
+    `.../settings/task-types` route isn't available to the user, instead of
+    logging and carrying on blind.
+

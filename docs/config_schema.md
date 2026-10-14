@@ -95,9 +95,15 @@ hash just those frames of a sequence; `all` hashes every frame. Only `all` is
 exact -- a sampled match is reported as "likely identical". The copy itself
 verifies every file it writes in every mode.
 
-`copy_workers` is **not** an ingest key — it's a **core** top-level key
-(`square_core/config/schema.py`) because `services.media.publish` uses it for
-every transfer, not just ingest's. A tool never registers its own "which
+`copy_workers` and `copy_verify` are **not** ingest keys — they're **core**
+top-level keys (`square_core/config/schema.py`) because `services.media.publish`
+uses them for every transfer, not just ingest's. `copy_verify` is `size`
+(default: the copy is native `CopyFileEx` and only the byte count is compared —
+no file is read back) or `full` (the destination is read back and hashed, and
+so is the source unless the check already did; exact, but it makes a copy read
+each file two to three times, which is slow over a network). Only `full`
+records content hashes in the ledger by itself; with `size` the ledger holds
+whatever the check hashed (`hash_check`). A tool never registers its own "which
 media types do I offer" list either — see §3.1.
 
 ### 3.1 Absence means "use the code default," not "invalid"

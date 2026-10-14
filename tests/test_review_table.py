@@ -9,7 +9,7 @@ from Qt import QtCore, QtWidgets
 from tools.ingest_tool.core.item import Status
 from tools.ingest_tool.controller_bridge import ControllerBridge
 from tools.ingest_tool.widgets.review_table import (
-    IngestReviewTable, C_SHOT, C_VER, C_STATUS, C_PREV, C_CS, C_MEDIA,
+    IngestReviewTable, C_SHOT, C_VER, C_STATUS, C_PREV, C_CS, C_MEDIA, C_FPS, C_RES,
 )
 from tests.test_ingest_controller import _pctx, _controller, _make_item, _load
 
@@ -208,6 +208,25 @@ class ReviewTableBulkTest(ReviewTableTest):
         bar = self._t().cellWidget(0, 16)
         self.assertEqual(bar.value(), 40)
         self.assertIn("Hashing 2/5", bar.format())
+
+
+class PatternOwnedCellsTest(unittest.TestCase):
+    # borrows the fixture instead of subclassing it -- a subclass would re-run
+    # every ReviewTableTest test again and pile up live bridges/threads
+    setUp = ReviewTableTest.setUp
+    _item = ReviewTableTest._item
+    _load = ReviewTableTest._load
+    _t = ReviewTableTest._t
+    def test_a_pattern_supplied_cell_is_not_editable_and_says_why(self):
+        from Qt import QtCore
+        it = self._item("a")
+        it.metadata_from_path = ["resolution"]
+        [it] = self._load(it)
+        cell = self._t().item(0, C_RES)
+        self.assertFalse(bool(cell.flags() & QtCore.Qt.ItemFlag.ItemIsEditable))
+        self.assertIn("Path Pattern", cell.toolTip())
+        fps = self._t().item(0, C_FPS)
+        self.assertTrue(bool(fps.flags() & QtCore.Qt.ItemFlag.ItemIsEditable))
 
 
 if __name__ == "__main__":

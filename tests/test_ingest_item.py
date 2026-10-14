@@ -268,5 +268,53 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(again.key, it.key)
 
 
+class TestMetadataOwnedByThePattern(unittest.TestCase):
+    """fps / resolution / colorspace a Path Pattern supplied are the pattern's
+    to change -- not editable per row -- until the file itself yields a value."""
+
+    def _scan_item(self, **defaulted):
+        from square_core.media.scanner import IngestSequenceItem
+        s = IngestSequenceItem("plate", ["/d/plate.1001.exr", "/d/plate.1002.exr"], ".exr")
+        s.metadata_defaulted = set(defaulted)
+        for k, v in defaulted.items():
+            setattr(s, k, v)
+        return s
+
+    def test_a_pattern_supplied_value_is_locked(self):
+        item = IngestItem.from_scan_item(self._scan_item(resolution="2048x1152"))
+        self.assertTrue(item.metadata_locked("resolution"))
+        self.assertFalse(item.metadata_locked("colorspace"))      # the pattern said nothing
+        self.assertEqual(item.resolution, "2048x1152")
+
+    def test_a_value_read_from_the_file_unlocks_it(self):
+        item = IngestItem.from_scan_item(self._scan_item(resolution="2048x1152"))
+
+        class _Probe:
+            @staticmethod
+            def probe(path):
+                return ({"resolution": "4096x2160"}, "fake")
+
+        item.probe_metadata(_Probe)
+        self.assertEqual(item.resolution, "4096x2160")
+        self.assertFalse(item.metadata_locked("resolution"))
+
+    def test_a_non_media_file_has_no_media_metadata_at_all(self):
+        from square_core.media.scanner import IngestSequenceItem
+        s = IngestSequenceItem("grade.cdl", ["/d/grade.cdl"], ".cdl")
+        item = IngestItem.from_scan_item(s)
+        self.assertEqual((item.fps, item.resolution, item.colorspace), (None, "", ""))
+        for f in ("fps", "resolution", "colorspace"):
+            self.assertTrue(item.metadata_locked(f))
+
+    def test_other_fields_are_never_locked(self):
+        item = IngestItem.from_scan_item(self._scan_item(fps=25.0))
+        self.assertFalse(item.metadata_locked("shot_code"))
+
+    def test_the_lock_survives_the_session_file(self):
+        item = IngestItem.from_scan_item(self._scan_item(colorspace="ACEScg"))
+        again = IngestItem.from_dict(item.to_dict())
+        self.assertTrue(again.metadata_locked("colorspace"))
+
+
 if __name__ == "__main__":
     unittest.main()

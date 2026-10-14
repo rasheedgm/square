@@ -196,22 +196,29 @@ class FolderMapper:
     # Build IngestSequenceItems
     # ------------------------------------------------------------------
 
-    def build_items(self, filter_paths=None, tagged_only=False, explicit_paths=None):
+    def build_items(self, filter_paths=None, tagged_only=False, explicit_paths=None,
+                    progress=None, should_stop=None):
         """Scan the root into items, applying the Path Patterns.
         `filter_paths` restricts to what the user picked in the tree.
         `tagged_only` keeps only items a pattern matched -- what a bare "Load"
         (nothing selected) or a selected folder should bring in, rather than
         every stray file under it that nothing described. `explicit_paths` are
         files the user picked one by one: their items are kept even when
-        untagged."""
-        from square_core.media.scanner import PlateScanner
+        untagged. `progress(label, done, total)` / `should_stop()` -- the
+        scan reports and can be abandoned (ScanCancelled)."""
+        from square_core.media.scanner import PlateScanner, ScanCancelled
 
         filter_paths = self._to_scan_space(filter_paths)
         explicit_paths = self._to_scan_space(explicit_paths)
-        items = PlateScanner(self.root).scan()
+        items = PlateScanner(self.root).scan(progress=progress, should_stop=should_stop)
         patterns = self.get_path_patterns()
         tagged = []
-        for item in items:
+        total = len(items)
+        for n, item in enumerate(items, start=1):
+            if should_stop is not None and should_stop():
+                raise ScanCancelled(str(self.root))
+            if progress is not None and (n % 25 == 0 or n == total):
+                progress("Matching patterns", n, total)
             if self._apply_patterns_to_item(item, patterns):
                 tagged.append(item)
         if tagged_only:

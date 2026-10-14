@@ -19,7 +19,8 @@ from square_core import __version__
 from square_core.context import PipelineContext
 from square_core.config import PipelineConfig
 from square_core.errors import NeedsLogin
-from square_core.media.scanner import PlateScanner
+from square_core.media.scanner import PlateScanner, ScanCancelled
+from tools.ingest_tool.widgets.busy import BusyProgress
 
 from tools.qt_compat import (FONT_BOLD, ORIENTATION_HORIZONTAL, DIALOG_ACCEPTED,
                              exec_dialog, MSGBOX_YES)
@@ -53,6 +54,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.bridge: ControllerBridge | None = None
         self.session_path: str | None = None
         self._autosaver: SessionAutosaver | None = None
+        self._ingest_cancelled = False         # Cancel was pressed during the running job
         self._delivery_root = ""
         self._path_patterns: list = []
 
@@ -132,6 +134,8 @@ class MainWindow(QtWidgets.QMainWindow):
         tl.addWidget(self.project_combo)
 
         refresh = QtWidgets.QPushButton("↻")
+        refresh.setToolTip("Reload the project list from Kitsu "
+                           "(F5 re-checks the rows in the table)")
         refresh.clicked.connect(self._load_projects)
         tl.addWidget(refresh)
 
@@ -203,6 +207,10 @@ class MainWindow(QtWidgets.QMainWindow):
         bl.addWidget(self.ingest_all_btn)
 
         self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.setToolTip(
+            "Stop what is running. A check stops within a moment. An ingest stops "
+            "copying; rows not started are left alone, and the files of a row that "
+            "was part-way are removed again (nothing is recorded in Kitsu for it).")
         self.cancel_btn.setVisible(False)
         self.cancel_btn.clicked.connect(self._on_cancel)
         bl.addWidget(self.cancel_btn)
@@ -362,23 +370,26 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.controller:
             QtWidgets.QMessageBox.information(self, "Load", "Choose a project first.")
             return
+        busy = BusyProgress(self, "Loading", "Reading folders…", cancellable=True)
         try:
             if mapper and mapper.has_map():
                 # only what a Path Pattern matched -- under the whole root
                 # when nothing is picked, under a picked folder otherwise;
-                # rows picked one by one always load, matched or not. A plain set (no `.explicit`) means every path
-                # in it was picked by hand.
+                # rows picked one by one always load, matched or not. A plain
+                # set (no `.explicit`) means every path in it was picked by hand.
                 if selected_paths is not None and not hasattr(selected_paths, "explicit"):
                     explicit = selected_paths
                 else:
                     explicit = getattr(selected_paths, "explicit", None)
                 scan_items = mapper.build_items(
                     filter_paths=selected_paths, tagged_only=not include_untagged,
-                    explicit_paths=explicit)
+                    explicit_paths=explicit,
+                    progress=busy.update, should_stop=lambda: busy.cancelled)
                 self._path_patterns = [p.to_dict() if hasattr(p, "to_dict") else p
                                        for p in mapper.get_path_patterns()]
             else:
-                scan_items = PlateScanner(root_path).scan()
+                scan_items = PlateScanner(root_path).scan(
+                    progress=busy.update, should_stop=lambda: busy.cancelled)
                 if selected_paths:
                     scan_items = [
                         s for s in scan_items
@@ -386,6 +397,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ]
             self._delivery_root = root_path
             if not scan_items and mapper and mapper.has_map():
+                busy.close()
                 where = "under the selected folder(s)" if selected_paths else "yet"
                 QtWidgets.QMessageBox.information(
                     self, "Load",
@@ -393,12 +405,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     "(right-click it in the tree), or select individual rows in the tree to "
                     "load them as they are, then Load again.")
                 return
+            busy.update("Adding to the table", 0, 0)
             added = self.controller.load(scan_items, replace=not is_update)
+            busy.close()
             if added:
                 self.bridge.preflight([i.key for i in added])
+        except ScanCancelled:
+            self.statusBar().showMessage("Load cancelled.", 8000)
         except Exception as e:
             logger.exception("[IngestMainUI] load failed")
+            busy.close()
             QtWidgets.QMessageBox.critical(self, "Load", f"Could not load media:\n{e}")
+        finally:
+            busy.close()
 
     # ------------------------------------------------------------------
     # Controller events
@@ -420,6 +439,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._update_summary()
 
     def _on_job_started(self, kind):
+        self.cancel_btn.setText("Cancel")
+        self.cancel_btn.setEnabled(True)
         self.cancel_btn.setVisible(True)
         self._set_ingest_enabled(False)
         self.summary_lbl.setText(f"{kind.title()} running…")
@@ -430,10 +451,21 @@ class MainWindow(QtWidgets.QMainWindow):
         if error:
             QtWidgets.QMessageBox.warning(self, kind.title(), f"{kind} error:\n{error}")
         if kind == "ingest" and not error:
-            self._show_results()
+            if self._ingest_cancelled:
+                self.statusBar().showMessage(
+                    "Ingest cancelled -- rows that hadn't finished were not ingested "
+                    "(anything part-copied was removed). Ingest again to run them.", 20000)
+            else:
+                self._show_results()
+        self._ingest_cancelled = False
 
     def _on_cancel(self):
         if self.bridge:
+            self._ingest_cancelled = True
+            # feedback: the stop is cooperative (a copy stops at its next safe
+            # point), so say it was heard rather than leaving a live button
+            self.cancel_btn.setText("Cancelling…")
+            self.cancel_btn.setEnabled(False)
             self.bridge.cancel()
 
     # ------------------------------------------------------------------

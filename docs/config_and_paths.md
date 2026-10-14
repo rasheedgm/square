@@ -118,6 +118,7 @@ every tool; never snapshotted. Every key is described in
   "version_pad": 3,
   "frame_pad": 4,
   "copy_workers": 4,                 // parallel file copies for any media.publish transfer
+  "copy_verify": "size",             // "size" (byte count, free) | "full" (re-read + hash both ends)
   "slugify": { "spaces_to": "_", "strip": "<>:\"/\\|?*", "collapse": "_" },
 
   // roots may reference each other with {<name>_root}; resolved in dependency order

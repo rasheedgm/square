@@ -173,12 +173,36 @@ class TestPreflight(unittest.TestCase):
             controller.run_preflight()
             self.assertEqual(controller.items[0].status.value, "Needs Info")
 
-    def test_known_media_types_uses_delivery_source_filter(self):
+    def test_known_media_types_are_the_ones_with_a_destination_template(self):
+        """A type with its own `dir` has a template whatever its `source`
+        says -- `source` is which tool stage OFFERS it, not whether it has a
+        path (a type left on the default source=publish was flagged "no
+        destination template" even though one was configured)."""
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)
+            pctx.config.data["media_types"] = {
+                **pctx.config.media_types,
+                "CCC": {"dir": "input/{media_type}/{name}_v{version}"},     # source left as default
+                "Bare": {"previewable": False},                              # no path of its own
+            }
             controller = _controller(pctx, work)
             self.assertIn("Plate", controller.known_media_types)
-            self.assertNotIn("CompRender", controller.known_media_types)   # source=publish
+            self.assertIn("CompRender", controller.known_media_types)
+            self.assertIn("CCC", controller.known_media_types)
+            self.assertNotIn("Bare", controller.known_media_types)
+            self.assertNotIn("_default", controller.known_media_types)
+
+    def test_a_configured_type_does_not_get_the_no_template_warning(self):
+        from tools.ingest_tool.core.item import IssueKind
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
+            pctx = _pctx(work)
+            pctx.config.data["media_types"] = {
+                **pctx.config.media_types, "CCC": {"dir": "input/CCC/{name}_v{version}"}}
+            controller = _controller(pctx, work)
+            _load(controller, [_make_item(src, media_type="CCC")])
+            controller.run_preflight()
+            kinds = [i.kind for i in controller.items[0].issues]
+            self.assertNotIn(IssueKind.NO_DEST_TEMPLATE, kinds)
 
 
 class TestIngest(unittest.TestCase):
@@ -205,6 +229,7 @@ class TestIngest(unittest.TestCase):
     def test_ledger_records_the_ingested_files(self):
         with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
             pctx = _pctx(work)
+            pctx.config.data["copy_verify"] = "full"      # the copy hashes what it writes
             controller = _controller(pctx, work)
             _load(controller, [_make_item(src)])
             controller.run_preflight()
@@ -1032,10 +1057,13 @@ class TestCheckRun(unittest.TestCase):
             self.assertTrue(detail.startswith("Identical content"), detail)
 
     def test_ledger_is_still_populated_when_the_check_skipped_hashing(self):
-        """The copy hashes what it writes either way -- the ledger must not
-        end up empty just because the (opt-in) pre-flight hash was off."""
+        """With the copy verifying by content (copy_verify="full") it hashes
+        what it writes -- the ledger must not end up empty just because the
+        (opt-in) pre-flight hash was off."""
         src, work = self._env()
-        controller = _controller(_pctx(work), work)
+        pctx = _pctx(work)
+        pctx.config.data["copy_verify"] = "full"
+        controller = _controller(pctx, work)
         _load(controller, [_make_item(src)])
         controller.run_preflight()
         controller.run_ingest()
@@ -1376,3 +1404,120 @@ class TestIngestTaskTypes(unittest.TestCase):
         self.assertEqual(it.status.value, "Failed")
         self.assertIn("Task Types", it.ingest_error)
         self.assertIn("SH0100", it.ingest_error)
+
+
+class TestCancelAndSkipDuringIngest(unittest.TestCase):
+    """A row skipped (or the whole ingest cancelled) after the run began must
+    not start; one already copying stops and gives back what it wrote."""
+
+    def _env(self):
+        src = tempfile.TemporaryDirectory()
+        work = tempfile.TemporaryDirectory()
+        self.addCleanup(src.cleanup)
+        self.addCleanup(work.cleanup)
+        return src.name, work.name
+
+    def _published(self, work):
+        return [p for p in Path(work).rglob("*.exr")]
+
+    def test_a_row_skipped_before_its_turn_is_not_ingested(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        a = _make_item(src, name="a")
+        b = _make_item(src, name="b", shot="SH0200")
+        _load(controller, [a, b])
+        controller.run_preflight()
+        controller.skip_many([b.key])               # skipped after the check, before Ingest All
+        result = controller.run_ingest()
+        self.assertTrue(controller.get(a.key).ingested)
+        self.assertFalse(controller.get(b.key).ingested)
+        self.assertEqual(controller.get(b.key).status.value, "Skipped")
+        self.assertEqual(result["done"], 1)
+
+    def test_a_row_skipped_while_the_run_is_going_is_stopped_and_cleaned_up(self):
+        src, work = self._env()
+        controller = _controller(_pctx(work), work)
+        item = _make_item(src, name="a", n_frames=6)
+        _load(controller, [item])
+        controller.run_preflight()
+
+        import square_core.storage.transfer as tr
+        real = tr.copy_file
+        seen = []
+
+        def skip_after_two(s, d, **kw):
+            out = real(s, d, **kw)
+            seen.append(d)
+            if len(seen) == 2:
+                controller.skip_many([item.key])    # the user clicks Skip mid-copy
+            return out
+
+        from unittest.mock import patch
+        with patch.object(tr, "copy_file", side_effect=skip_after_two):
+            result = controller.run_ingest()
+        self.assertFalse(item.ingested)
+        self.assertEqual(item.status.value, "Skipped")
+        self.assertEqual(result["stopped"], 1)
+        self.assertEqual(self._published(work), [])            # nothing half-copied left behind
+        self.assertEqual(controller.ledger.count(), 0)         # and nothing recorded
+
+    def test_cancel_stops_a_running_ingest_and_the_rows_can_be_run_again(self):
+        src, work = self._env()
+        pctx = _pctx(work)
+        controller = _controller(pctx, work)
+        item = _make_item(src, name="a", n_frames=6)
+        _load(controller, [item])
+        controller.run_preflight()
+
+        import square_core.storage.transfer as tr
+        real = tr.copy_file
+        n = []
+
+        def cancel_after_one(s, d, **kw):
+            out = real(s, d, **kw)
+            n.append(1)
+            if len(n) == 1:
+                controller.cancel()
+            return out
+
+        from unittest.mock import patch
+        with patch.object(tr, "copy_file", side_effect=cancel_after_one):
+            result = controller.run_ingest()
+        self.assertFalse(item.ingested)
+        self.assertEqual(result["stopped"], 1)
+        self.assertEqual(self._published(work), [])
+        self.assertNotIn(item.status.value, ("Ingesting", "Failed"))   # back to something runnable
+        # ...and a fresh run does the job
+        result = controller.run_ingest()
+        self.assertTrue(item.ingested)
+        self.assertEqual(len(self._published(work)), 6)
+
+    def test_a_pre_existing_file_in_the_slot_survives_a_cancelled_copy(self):
+        from square_core.services import media as media_mod
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / "out"
+            dest.mkdir()
+            keep = dest / "keep.exr"
+            keep.write_bytes(b"old")
+            pairs = [("s1", str(dest / "new.exr")), ("s2", str(keep))]
+            Path(dest / "new.exr").write_bytes(b"partial")
+            media_mod._rollback_partial(pairs, {str(keep)}, str(dest), True)
+            self.assertTrue(keep.exists())
+            self.assertFalse((dest / "new.exr").exists())
+
+
+class TestPatternOwnedMetadata(unittest.TestCase):
+    def test_editing_a_pattern_supplied_value_is_refused_and_not_undoable(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
+            controller = _controller(_pctx(work), work)
+            item = _make_item(src)
+            item.metadata_from_path = ["resolution"]
+            item.resolution = "2048x1152"
+            _load(controller, [item])
+            undo_before = len(controller._undo)
+            controller.set_field(item.key, "resolution", "1x1")
+            self.assertEqual(item.resolution, "2048x1152")
+            self.assertEqual(len(controller._undo), undo_before)
+            controller.set_field(item.key, "fps", 30.0)          # not pattern-owned -> editable
+            self.assertEqual(item.fps, 30.0)
+

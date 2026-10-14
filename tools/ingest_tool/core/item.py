@@ -203,6 +203,11 @@ class IngestItem:
     height: int = 0
     metadata_verified: dict = field(default_factory=dict)   # {field: bool}
     metadata_backend: str = ""
+    # fps / resolution / colorspace whose CURRENT value came from the Path
+    # Pattern (a tagged piece of the path, or the pattern's typed fallback).
+    # Such a value is the pattern's to change, not a per-row edit -- and it
+    # drops out of this list the moment the file itself yields a real one.
+    metadata_from_path: list = field(default_factory=list)
 
     # derived (filled by the controller from templates)
     dest_dir: str = ""
@@ -282,6 +287,15 @@ class IngestItem:
             else:
                 setattr(item, f, value)
             item.metadata_verified[f] = True
+            if f not in item.metadata_from_path:
+                item.metadata_from_path.append(f)
+        if not item.carries_media_metadata:
+            # a grade / LUT / note has no resolution, frame rate or colorspace --
+            # the scanner's built-in 1920x1080 / 24 / ACEScg are placeholders,
+            # not facts to show or ship to Kitsu
+            item.fps, item.resolution, item.colorspace = None, "", ""
+            item.width = item.height = 0
+            item.metadata_from_path = []
         return item
 
     # ------------------------------------------------------------------
@@ -306,6 +320,8 @@ class IngestItem:
             if f in found and found[f] not in (None, ""):
                 setattr(self, f, found[f])
                 self.metadata_verified[f] = True
+                if f in self.metadata_from_path:       # the file spoke -- it wins
+                    self.metadata_from_path.remove(f)
             else:
                 self.metadata_verified.setdefault(f, False)
 
@@ -364,6 +380,14 @@ class IngestItem:
         ext = (self.ext or "").lower()
         return (self.is_video or not ext
                 or ext in SUPPORTED_IMAGE_EXTS or ext in SUPPORTED_VIDEO_EXTS)
+
+    def metadata_locked(self, field_name: str) -> bool:
+        """True when `field_name` (fps / resolution / colorspace) is not a
+        per-row edit: the media type carries none (a .cdl), or the Path
+        Pattern supplied it."""
+        if field_name not in REQUIRED_METADATA:
+            return False
+        return (not self.carries_media_metadata) or field_name in self.metadata_from_path
 
     def missing_fields(self) -> list[str]:
         out = [f for f in REQUIRED_FIELDS if not (getattr(self, f) or "").strip()]

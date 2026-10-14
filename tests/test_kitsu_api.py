@@ -545,5 +545,54 @@ class TestConnect(unittest.TestCase):
         self.assertIsInstance(result, KitsuApi)
 
 
+class TestProjectTaskTypesFallback(unittest.TestCase):
+    """Some Zou versions don't answer GET .../settings/task-types (or refuse a
+    non-manager): the project record's own task_types ids are used instead."""
+
+    def _backend(self, route_raises, record):
+        from square_core.kitsu._gazu import GazuBackend
+
+        class _Project:
+            @staticmethod
+            def get_project_task_types(ref):
+                if route_raises:
+                    raise RuntimeError("data/projects/p1/settings/task-types")
+                return [{"id": "tt-route"}]
+
+        class _Raw:
+            @staticmethod
+            def fetch_one(model, ident):
+                if record is None:
+                    raise RuntimeError("no record")
+                return record
+
+        class _G:
+            project = _Project()
+            raw = _Raw()
+
+        b = GazuBackend.__new__(GazuBackend)
+        b._gazu = _G()
+        return b
+
+    def test_the_settings_route_is_used_when_it_works(self):
+        b = self._backend(False, {"task_types": ["x"]})
+        self.assertEqual(b.project_task_types({"id": "p1"}), [{"id": "tt-route"}])
+
+    def test_falls_back_to_the_project_record(self):
+        b = self._backend(True, {"task_types": ["tt-1", "tt-2"]})
+        self.assertEqual(b.project_task_types({"id": "p1"}), [{"id": "tt-1"}, {"id": "tt-2"}])
+
+    def test_raises_the_original_error_when_neither_is_available(self):
+        b = self._backend(True, None)
+        with self.assertRaises(RuntimeError) as cm:
+            b.project_task_types({"id": "p1"})
+        self.assertIn("settings/task-types", str(cm.exception))
+
+    def test_a_record_without_task_types_is_not_read_as_none_enabled(self):
+        b = self._backend(True, {"name": "P"})
+        with self.assertRaises(RuntimeError):
+            b.project_task_types({"id": "p1"})
+
+
 if __name__ == "__main__":
     unittest.main()

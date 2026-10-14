@@ -317,6 +317,12 @@ def _register_builtins() -> None:
              description="zero-pad width for {frame}")
     register("copy_workers", "int", scope="both", default=4, minimum=1, maximum=32,
              description="parallel file copies for a media.publish transfer")
+    register("copy_verify", "enum", scope="both", default="size",
+             choices=("size", "full"),
+             description="how a media.publish copy is verified: 'size' compares "
+                         "byte counts (free -- catches a short copy), 'full' hashes "
+                         "the destination and the source and compares (exact, but "
+                         "reads every file back, which is slow over a network)")
 
     register("colorspace.ocio", "path", scope="both", default="",
              description="path to an OCIO config, or empty for the studio default")

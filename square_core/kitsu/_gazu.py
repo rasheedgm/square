@@ -221,8 +221,27 @@ class GazuBackend:
 
     def project_task_types(self, project) -> list:
         """The task types enabled on a project (its Task Types settings) --
-        a task can only be created for one of these."""
-        return self.g.project.get_project_task_types(_ref(project)) or []
+        a task can only be created for one of these.
+
+        Not every Zou version answers GET .../settings/task-types (or it
+        answers 403 for a non-manager). The project record itself lists the
+        ids of its task types, so use that when the dedicated route fails;
+        only if neither works is the error raised (the caller treats that as
+        "can't verify", not "none enabled")."""
+        ref = _ref(project)
+        try:
+            return self.g.project.get_project_task_types(ref) or []
+        except Exception as first:
+            try:
+                rec = self.g.raw.fetch_one("projects", ref["id"]) or {}
+            except Exception:
+                raise first
+            ids = rec.get("task_types")
+            if ids is None:
+                raise first
+            logger.info("task-types route unavailable (%s: %s); read them from the project record",
+                        type(first).__name__, first)
+            return [{"id": (t.get("id") if isinstance(t, dict) else t)} for t in ids]
 
     def add_project_task_type(self, project, task_type, priority: int) -> dict:
         return self.g.project.add_task_type(_ref(project), _ref(task_type), priority)

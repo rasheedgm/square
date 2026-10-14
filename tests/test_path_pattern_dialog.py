@@ -493,16 +493,44 @@ class TestPathPatternManagerDialog(unittest.TestCase):
         self.assertTrue(dlg.changed)
         self.assertEqual(len(self.mapper.get_path_patterns()), 1)
 
+    def _edit_with(self, name=None, template=None):
+        """Drive the Edit… dialog without showing it."""
+        from tools.ingest_tool.widgets import path_pattern_dialog as mod
+
+        class _Fake(mod._PatternEditDialog):
+            def exec(self_inner):
+                if name is not None:
+                    self_inner._name.setText(name)
+                if template is not None:
+                    self_inner._template.setText(template)
+                return 1
+
+        with patch.object(mod, "_PatternEditDialog", _Fake):
+            self_dlg = self._dlg_under_test
+            self_dlg._on_edit()
+
     def test_edit_does_not_crash_and_preserves_defaults(self):
-        dlg = PathPatternManagerDialog(self.mapper)
+        self._dlg_under_test = dlg = PathPatternManagerDialog(self.mapper)
         dlg.table.selectRow(0)
-        with patch.object(QtWidgets.QInputDialog, "getText",
-                          return_value=("<sequence>/<shot>/renamed.####.exr", True)):
-            dlg._on_edit()
+        self._edit_with(template="<sequence>/<shot>/renamed.####.exr")
         self.assertTrue(dlg.changed)
         edited = self.mapper.get_path_patterns()[0]
         self.assertEqual(edited.template, "<sequence>/<shot>/renamed.####.exr")
         self.assertEqual(edited.defaults, {"media_type": "Plate"})   # not dropped
+
+    def test_the_name_is_shown_and_can_be_renamed(self):
+        self._dlg_under_test = dlg = PathPatternManagerDialog(self.mapper)
+        self.assertEqual(dlg.table.item(0, 1).text(), "A")           # the Name column
+        self.assertEqual(dlg.table.item(0, 2).text(), "<sequence>/<shot>/plate.####.exr")
+        dlg.table.selectRow(0)
+        self._edit_with(name="Vendor plates")
+        self.assertEqual(self.mapper.get_path_patterns()[0].name, "Vendor plates")
+        self.assertEqual(dlg.table.item(0, 1).text(), "Vendor plates")
+
+    def test_an_unnamed_pattern_shows_a_blank_name_not_its_template_twice(self):
+        self.mapper.add_path_pattern(PathPattern(template="<sequence>/<shot>/c.####.exr"))
+        dlg = PathPatternManagerDialog(self.mapper)
+        self.assertEqual(dlg.table.item(2, 1).text(), "")
 
     def test_closing_without_changes_leaves_changed_false(self):
         dlg = PathPatternManagerDialog(self.mapper)

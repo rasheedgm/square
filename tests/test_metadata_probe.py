@@ -43,5 +43,43 @@ class TestProbe(unittest.TestCase):
         self.assertEqual(meta, DEFAULT_METADATA)
 
 
+class TestRunFfmpeg(unittest.TestCase):
+    """ffmpeg now reports progress (and can be stopped) instead of running
+    silent until it ends."""
+
+    def _cmd(self, out):
+        from square_core.media.proxy import ffmpeg_bin
+        return [ffmpeg_bin(), "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=64x64:rate=10",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(out)]
+
+    def test_progress_is_reported_and_reaches_100(self):
+        import tempfile
+        from square_core.media.proxy import run_ffmpeg
+        seen = []
+        with tempfile.TemporaryDirectory() as d:
+            run_ffmpeg(self._cmd(Path(d) / "o.mp4"), total_frames=20, progress=seen.append,
+                       echo=False)
+            self.assertTrue((Path(d) / "o.mp4").exists())
+        self.assertEqual(seen[-1], 100)
+        self.assertEqual(seen, sorted(seen))                    # only ever moves forward
+
+    def test_a_failing_ffmpeg_raises_with_its_message(self):
+        import tempfile
+        from square_core.media.proxy import run_ffmpeg, ProxyError, ffmpeg_bin
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ProxyError) as cm:
+                run_ffmpeg([ffmpeg_bin(), "-y", "-i", str(Path(d) / "missing.mov"),
+                            str(Path(d) / "o.mp4")], echo=False)
+        self.assertIn("missing.mov", str(cm.exception))
+
+    def test_should_stop_terminates_it(self):
+        import tempfile
+        from square_core.media.proxy import run_ffmpeg, ProxyError
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(ProxyError) as cm:
+                run_ffmpeg(self._cmd(Path(d) / "o.mp4"), should_stop=lambda: True, echo=False)
+        self.assertIn("cancelled", str(cm.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

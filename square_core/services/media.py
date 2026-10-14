@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import os
 from pathlib import Path
 
 from square_core.model import MediaResult, Provenance
@@ -70,7 +71,8 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
             transfer_mode: str = "copy", make_review_proxy: bool | None = None,
             proxy_dry_run: bool = False, comment: str = "",
             source_workfile_id: str = "", dry_run: bool = False,
-            pool=None, progress=None, preview_pool=None) -> MediaResult:
+            pool=None, progress=None, preview_pool=None,
+            source_hashes: dict | None = None, should_stop=None) -> MediaResult:
     files = [str(f) for f in files]
     if not files:
         raise ValueError("media.publish: no files")
@@ -108,13 +110,31 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         # item's transfer -- cap total concurrent file copies at `workers`
         # instead of each publish() call spinning up its own -- and get
         # per-file progress for its UI.
-        rs = transfer.transfer_sequence(pairs, mode=transfer_mode, workers=workers,
-                                        pool=pool, progress=progress)
+        # What was already there before this call touched it -- if the copy
+        # is cancelled (a skipped row, Cancel) or fails part-way, only what
+        # THIS call wrote is removed again, so the slot is left as it was and
+        # nothing is recorded in Kitsu / the ledger for a half-done copy.
+        pre_existing = {d for _s, d in pairs if os.path.lexists(d)}
+        dir_pre_existed = Path(dest_dir).exists()
+        try:
+            rs = transfer.transfer_sequence(
+                pairs, mode=transfer_mode, workers=workers, pool=pool, progress=progress,
+                verify=pctx.config.copy_verify, should_stop=should_stop,
+                source_hashes=source_hashes)
+        except BaseException:
+            _rollback_partial(pairs, pre_existing, dest_dir, dir_pre_existed)
+            raise
         # keyed by the OS-normalized path on both sides: TransferResult.dest
         # is str(Path(...)) (native separators), but dest_files[i] above was
         # built with a literal "/" join -- a plain string-equality lookup
         # would silently miss on Windows and leave checksum "" forever.
         result.checksums = {str(Path(r.dest)): r.hash for r in rs if r.hash}
+        # A "size"-verified copy computes no hash of its own; where the caller
+        # already has the source's hash (the check hashed it) that IS the
+        # content hash of what was copied -- record it rather than nothing.
+        for s, d in pairs:
+            if str(Path(d)) not in result.checksums and (source_hashes or {}).get(s):
+                result.checksums[str(Path(d))] = source_hashes[s]
         result.copied = True
 
     prov = Provenance(
@@ -184,6 +204,25 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
 
 
 # --------------------------------------------------------------------------
+
+def _rollback_partial(pairs, pre_existing, dest_dir, dir_pre_existed) -> None:
+    """Remove what a failed / cancelled transfer wrote -- never a file that
+    was there before it started, and the folder only if it didn't exist
+    before and is now empty."""
+    for _s, d in pairs:
+        if d in pre_existing:
+            continue
+        try:
+            if os.path.lexists(d):
+                os.unlink(d)
+        except OSError as e:
+            logger.warning("could not remove partial file %s: %s", d, e)
+    if not dir_pre_existed:
+        try:
+            os.rmdir(dest_dir)              # only succeeds if empty
+        except OSError:
+            pass
+
 
 def _task_name(task) -> str:
     return (getattr(task, "task_type_name", "") or "").lower() or "task"

@@ -786,6 +786,47 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         self.accept()
 
 
+class _PatternEditDialog(QtWidgets.QDialog):
+    """Name + template of one pattern as plain text. The name is only a label
+    for finding the pattern in the list; the template is what matches."""
+
+    def __init__(self, pattern, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Pattern")
+        self.setMinimumWidth(560)
+        form = QtWidgets.QFormLayout(self)
+        self._name = QtWidgets.QLineEdit(
+            pattern.name if pattern.name and pattern.name != pattern.template else "")
+        self._name.setPlaceholderText("a label, e.g. 'ACME grade CDLs' (optional)")
+        self._template = QtWidgets.QLineEdit(pattern.template)
+        form.addRow("Name:", self._name)
+        form.addRow("Template:", self._template)
+        hint = QtWidgets.QLabel(
+            "Template: one path relative to the delivery root, folders separated by /. "
+            "<sequence> <shot> <media_type> <media_name> <version> (or any <custom_tag>) "
+            "capture that piece; * matches anything without capturing; #### is the frame "
+            "number. Everything else must match exactly.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#94A3B8; font-size:10px;")
+        form.addRow(hint)
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch()
+        cancel = QtWidgets.QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = QtWidgets.QPushButton("Save")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        form.addRow(buttons)
+
+    def name(self) -> str:
+        return self._name.text().strip()
+
+    def template(self) -> str:
+        return self._template.text().strip()
+
+
 class PathPatternManagerDialog(QtWidgets.QDialog):
     """Lists, reorders, quick-edits, and removes the Path Patterns saved for
     the current root, and saves/imports the whole list as a plain .json file."""
@@ -810,9 +851,10 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         layout.addWidget(hdr)
 
         self.table = QtWidgets.QTableWidget()
-        self.table.setColumnCount(3)
-        self.table.setHorizontalHeaderLabels(["#", "Template", "Matches"])
-        self.table.horizontalHeader().setSectionResizeMode(1, HEADER_RESIZE_STRETCH)
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["#", "Name", "Template", "Matches"])
+        self.table.horizontalHeader().setSectionResizeMode(2, HEADER_RESIZE_STRETCH)
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(SELECT_ROWS)
         layout.addWidget(self.table, stretch=1)
 
@@ -821,8 +863,11 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         up_btn.clicked.connect(self._on_move_up)
         down_btn = QtWidgets.QPushButton("▼ Move Down")
         down_btn.clicked.connect(self._on_move_down)
-        edit_btn = QtWidgets.QPushButton("Edit Text…")
+        edit_btn = QtWidgets.QPushButton("Edit…")
+        edit_btn.setToolTip("Rename the pattern or change its template text directly "
+                            "(to re-tag pieces of a path, add a new pattern from the tree instead)")
         edit_btn.clicked.connect(self._on_edit)
+        self.table.cellDoubleClicked.connect(lambda *_: self._on_edit())
         remove_btn = QtWidgets.QPushButton("Remove")
         remove_btn.setStyleSheet("background:#7F1D1D; color:white;")
         remove_btn.clicked.connect(self._on_remove)
@@ -862,7 +907,8 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         self.table.setRowCount(len(patterns))
         for row, pattern in enumerate(patterns):
             count, total, _ = self.mapper.preview_pattern(pattern.template, limit=0)
-            for col, text in enumerate([str(row + 1), pattern.template, f"{count} / {total}"]):
+            name = pattern.name if pattern.name and pattern.name != pattern.template else ""
+            for col, text in enumerate([str(row + 1), name, pattern.template, f"{count} / {total}"]):
                 self.table.setItem(row, col, QtWidgets.QTableWidgetItem(text))
 
     def _selected_row(self):
@@ -890,12 +936,17 @@ class PathPatternManagerDialog(QtWidgets.QDialog):
         if idx is None:
             return
         current = self.mapper.get_path_patterns()[idx]
-        text, ok = QtWidgets.QInputDialog.getText(self, "Edit Pattern", "Template:", text=current.template)
-        if ok and text.strip():
+        dlg = _PatternEditDialog(current, parent=self)
+        if dlg.exec() if hasattr(dlg, "exec") else dlg.exec_():
+            template, name = dlg.template(), dlg.name()
+            if not template:
+                return
             self.mapper.update_path_pattern(
-                idx, PathPattern(template=text.strip(), name=current.name, defaults=current.defaults))
+                idx, PathPattern(template=template, name=name or template,
+                                 defaults=current.defaults))
             self.changed = True
             self._refresh_table()
+            self.table.selectRow(idx)
 
     def _on_remove(self):
         idx = self._selected_row()

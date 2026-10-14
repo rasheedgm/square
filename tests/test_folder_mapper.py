@@ -440,5 +440,50 @@ class TestRootGivenThroughADriveAlias(unittest.TestCase):
         self.assertEqual(self.mapper._to_scan_space(other), other)
 
 
+class TestScanProgressAndCost(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        for shot in ("SH0100", "SH0200", "SH0300"):
+            d = self.tmp / "SQ010" / shot
+            d.mkdir(parents=True)
+            for f in range(1001, 1004):
+                (d / f"plate.{f}.exr").write_text("x")
+
+    def test_a_scan_does_not_read_every_file_header(self):
+        from unittest.mock import patch
+        from square_core.media.scanner import PlateScanner
+        with patch("square_core.media.metadata.MetadataExtractor.extract_metadata") as ex:
+            items = PlateScanner(self.tmp).scan()
+        self.assertEqual(len(items), 3)
+        ex.assert_not_called()
+
+    def test_metadata_reading_is_still_available_on_request(self):
+        from unittest.mock import patch
+        from square_core.media.scanner import PlateScanner
+        with patch("square_core.media.metadata.MetadataExtractor.extract_metadata",
+                   return_value={"resolution": "10x10"}) as ex:
+            PlateScanner(self.tmp, read_metadata=True).scan()
+        self.assertEqual(ex.call_count, 3)
+
+    def test_progress_is_reported(self):
+        from square_core.media.scanner import PlateScanner
+        seen = []
+        PlateScanner(self.tmp).scan(progress=lambda label, done, total: seen.append((label, done)))
+        self.assertTrue(any(label == "Reading folders" for label, _ in seen))
+        self.assertGreaterEqual(max(d for _l, d in seen), 4)       # root + SQ010 + 3 shots
+
+    def test_a_scan_can_be_abandoned(self):
+        from square_core.media.scanner import PlateScanner, ScanCancelled
+        with self.assertRaises(ScanCancelled):
+            PlateScanner(self.tmp).scan(should_stop=lambda: True)
+
+    def test_build_items_can_be_abandoned_too(self):
+        from square_core.media.scanner import ScanCancelled
+        mapper = FolderMapper(self.tmp)
+        with self.assertRaises(ScanCancelled):
+            mapper.build_items(should_stop=lambda: True)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -211,6 +211,23 @@ class MainWindowIngestBugsTest(unittest.TestCase):
         self.assertTrue(old_bridge._closed)
         self.assertIs(self.win.table.bridge, self.win.bridge)
 
+    def test_cancel_says_it_was_heard_and_a_new_job_resets_the_button(self):
+        self.win._on_cancel()
+        self.assertEqual(self.win.cancel_btn.text(), "Cancelling…")
+        self.assertFalse(self.win.cancel_btn.isEnabled())
+        self.assertTrue(self.win._ingest_cancelled)
+        self.win._on_job_started("ingest")
+        self.assertEqual(self.win.cancel_btn.text(), "Cancel")
+        self.assertTrue(self.win.cancel_btn.isEnabled())
+
+    def test_a_cancelled_ingest_says_so_instead_of_showing_results(self):
+        self.win._ingest_cancelled = True
+        with patch.object(self.win, "_show_results") as results:
+            self.win._on_job_finished("ingest", "")
+        results.assert_not_called()
+        self.assertIn("cancelled", self.win.statusBar().currentMessage().lower())
+        self.assertFalse(self.win._ingest_cancelled)
+
     def test_a_warning_event_reaches_the_user(self):
         from tools.ingest_tool.core.controller import ControllerEvent
         with patch("tools.ingest_tool.ui_main.QtWidgets.QMessageBox.warning") as warn:

@@ -114,7 +114,18 @@ def publish(pctx, entity, media_type: str, task, *, files, name: str = "main",
         # is cancelled (a skipped row, Cancel) or fails part-way, only what
         # THIS call wrote is removed again, so the slot is left as it was and
         # nothing is recorded in Kitsu / the ledger for a half-done copy.
-        pre_existing = {d for _s, d in pairs if os.path.lexists(d)}
+        # one directory listing per destination folder, not a stat per file
+        listings: dict = {}
+        pre_existing = set()
+        for _s, d in pairs:
+            folder = os.path.dirname(d)
+            if folder not in listings:
+                try:
+                    listings[folder] = set(os.listdir(folder))
+                except OSError:
+                    listings[folder] = set()
+            if os.path.basename(d) in listings[folder]:
+                pre_existing.add(d)
         dir_pre_existed = Path(dest_dir).exists()
         try:
             rs = transfer.transfer_sequence(

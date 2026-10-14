@@ -35,6 +35,32 @@ class TestSlugify(unittest.TestCase):
         self.assertEqual(slugify('a:b/c*d'), "abcd")
 
 
+class TestRootIsNeverRewritten(unittest.TestCase):
+    """The tidy pass (collapse "__", strip leading/trailing "_-") ran over the
+    NAS root too -- a root with such a segment was silently rewritten, so an
+    ingest wrote into a sibling of the configured folder yet reported success."""
+
+    def setUp(self):
+        self.r = PathResolver(_cfg())
+
+    def test_underscores_and_dots_in_the_root_survive(self):
+        for root in ("D:/_jobs", "/mnt/proj_", "D:/a__b/c", "D:/.hidden/x", "D:/tmp_x__"):
+            with self.subTest(root=root):
+                self.assertEqual(self.r.project_root(_ctx(nas_root=root)), f"{root}/ABC")
+
+    def test_a_unc_root_keeps_its_double_slash(self):
+        self.assertEqual(self.r.project_root(_ctx(nas_root="//server/share")),
+                         "//server/share/ABC")
+
+    def test_backslashes_are_still_normalised(self):
+        self.assertEqual(self.r.project_root(_ctx(nas_root="Z:\\jobs")), "Z:/jobs/ABC")
+
+    def test_the_rest_of_the_path_is_still_tidied(self):
+        # an emptied optional token leaves no doubled separators behind
+        self.assertEqual(self.r.shot_dir(_ctx(nas_root="D:/_jobs")),
+                         "D:/_jobs/ABC/shots/SQ010/SH0100")
+
+
 class TestRootsAndSkeleton(unittest.TestCase):
     def setUp(self):
         self.r = PathResolver(_cfg())

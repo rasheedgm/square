@@ -103,6 +103,13 @@ def render_tokens(
     """Substitute every `{token}` in `template` from `ctx`. Raises `PathError`
     for an unknown token or a required token with no value."""
     optional_set = _OPTIONAL | set(optional)
+    # Trusted prefixes (the NAS root) are substituted verbatim -- and must stay
+    # that way through the tidy pass below, which collapses "__", strips
+    # leading "._-" and trailing "_-" from every segment: a root like
+    # `D:/_jobs`, `/mnt/proj_` or `//server/_share` was silently rewritten, so
+    # an ingest "succeeded" into a sibling folder of the configured root.
+    # They go in as placeholders and are put back afterwards.
+    raw_values: list = []
 
     # frame: drop the segment entirely when there is no frame number
     if ctx.frame is None:
@@ -137,11 +144,14 @@ def render_tokens(
                 f"template {template!r} needs {{{raw_name}}} but the context has no value"
             )
         if name in _RAW:
-            return str(value).replace("\\", "/")
+            raw_values.append(str(value).replace("\\", "/"))
+            return f"\x00{len(raw_values) - 1}\x00"
         return slugify(value, slug_rules)
 
-    out = _TOKEN_RE.sub(repl, template)
-    return _cleanup(out)
+    out = _cleanup(_TOKEN_RE.sub(repl, template))
+    for i, raw in enumerate(raw_values):
+        out = out.replace(f"\x00{i}\x00", raw)
+    return out.rstrip("/") if raw_values else out
 
 
 def _cleanup(path: str) -> str:

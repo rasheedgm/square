@@ -107,18 +107,20 @@ def _remove_partial(dest: Path) -> None:
 
 
 def copy_file(src, dest, *, hasher: FileHasher | None = None, should_stop=None,
-              compute_hash: bool = True) -> str:
+              compute_hash: bool = True, ensure_dir: bool = True) -> str:
     """Copy `src` -> `dest`, return the destination's content hash (or "" when
     `compute_hash` is False -- no extra read of the file at all). Creates
     parent dirs. `should_stop` is polled during the copy; when it says stop the
     partial destination is removed and TransferCancelled is raised."""
     src, dest = Path(src), Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    if ensure_dir:
+        dest.parent.mkdir(parents=True, exist_ok=True)
     raw = None
     if compute_hash:
         raw = hasher.new_raw() if hasher is not None else FileHasher().new_raw()
 
-    if sys.platform == "win32" and _win_copyfile(src, dest, should_stop):
+    native = sys.platform == "win32" and _win_copyfile(src, dest, should_stop)
+    if native:
         if raw is not None:
             with open(dest, "rb") as fh:
                 for chunk in iter(lambda: fh.read(_CHUNK), b""):
@@ -137,22 +139,26 @@ def copy_file(src, dest, *, hasher: FileHasher | None = None, should_stop=None,
         except TransferCancelled:
             _remove_partial(dest)
             raise
-    try:
-        shutil.copystat(src, dest)
-    except OSError:
-        pass
+    if not native:
+        # CopyFileEx already carries the timestamps and attributes across;
+        # copystat on a share is three more round trips per file for nothing
+        try:
+            shutil.copystat(src, dest)
+        except OSError:
+            pass
     return raw.hexdigest() if raw is not None else ""
 
 
 def transfer_file(src, dest, *, mode: str = "copy", hasher: FileHasher | None = None,
                   expected_hash: str = "", verify: str = "full",
-                  should_stop=None) -> TransferResult:
+                  should_stop=None, ensure_dir: bool = True) -> TransferResult:
     """Transfer one file. symlink/hardlink fall back to copy on failure
     (cross-volume, no privilege). A real copy is verified per `verify`:
     "size" compares byte counts only; "full" hashes the destination (and the
     source, unless `expected_hash` is given) and compares."""
     src, dest = Path(src), Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    if ensure_dir:
+        dest.parent.mkdir(parents=True, exist_ok=True)
     m = mode if mode in VALID_MODES else "copy"
     if verify not in VERIFY_MODES:
         raise ValueError(f"unknown verify mode {verify!r}; expected one of {VERIFY_MODES}")
@@ -180,7 +186,7 @@ def transfer_file(src, dest, *, mode: str = "copy", hasher: FileHasher | None = 
             logger.warning("hardlink failed for %s (%s); full copy", dest.name, e)
 
     if verify == "size":
-        copy_file(src, dest, should_stop=should_stop, compute_hash=False)
+        copy_file(src, dest, should_stop=should_stop, compute_hash=False, ensure_dir=False)
         want, got = os.path.getsize(src), os.path.getsize(dest)
         if want != got:
             _remove_partial(dest)
@@ -189,7 +195,7 @@ def transfer_file(src, dest, *, mode: str = "copy", hasher: FileHasher | None = 
         return TransferResult(str(src), str(dest), "copy", hash="", verified=True)
 
     h = hasher or FileHasher()
-    dest_hash = copy_file(src, dest, hasher=h, should_stop=should_stop)
+    dest_hash = copy_file(src, dest, hasher=h, should_stop=should_stop, ensure_dir=False)
     try:
         expected = expected_hash or h.hash_file(str(src), should_stop)
     except HashCancelled:
@@ -219,9 +225,14 @@ def transfer_sequence(pairs, *, mode: str = "copy", workers: int = 4,
     results: list = [None] * len(pairs)
     done = 0
 
+    # one mkdir per destination folder, not two per file -- each is a round
+    # trip on a share, and a sequence is hundreds of files in one folder
+    for parent in {str(Path(d).parent) for _s, d in pairs}:
+        Path(parent).mkdir(parents=True, exist_ok=True)
+
     def one(i, s, d):
         return i, transfer_file(s, d, mode=mode, hasher=h, expected_hash=src_hashes.get(s, ""),
-                                verify=verify, should_stop=should_stop)
+                                verify=verify, should_stop=should_stop, ensure_dir=False)
 
     own_pool = pool is None
     ex = pool or ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="sq-copy")

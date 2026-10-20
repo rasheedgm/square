@@ -137,7 +137,15 @@ QLineEdit:focus, QComboBox:focus {
 
 QComboBox::drop-down {
     border: none;
-    width: 20px;
+    width: 22px;
+}
+
+/* Styling the combo's border drops Qt's own arrow -- without one an editable
+   combo reads as a plain text box and nobody finds the list. Draw one. */
+QComboBox::down-arrow {
+    image: url("{RESOURCES_DIR}/arrow_down.svg");
+    width: 12px;
+    height: 8px;
 }
 
 QComboBox QAbstractItemView {

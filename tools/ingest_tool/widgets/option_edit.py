@@ -13,6 +13,40 @@ from __future__ import annotations
 from Qt import QtCore, QtWidgets
 
 
+class _OpenListOnClick(QtCore.QObject):
+    """Clicking into an editable combo's text part opens its list -- when the
+    field is empty or isn't focused yet. Once it has focus AND holds text, a
+    click just places the caret, so a custom value can still be edited."""
+
+    def __init__(self, combo):
+        super().__init__(combo)
+        self._combo = combo
+
+    def eventFilter(self, obj, ev):
+        if (ev.type() == QtCore.QEvent.Type.MouseButtonPress
+                and (not obj.hasFocus() or not obj.text()) and self._combo.count()):
+            QtCore.QTimer.singleShot(0, self._combo.showPopup)
+        return False
+
+
+def make_choosable(combo: QtWidgets.QComboBox) -> None:
+    """Make an EDITABLE combo behave like a dropdown you can also type into:
+    the field opens the list when first clicked, and what is typed filters the
+    choices in a popup (anywhere in the text, any case) instead of silently
+    completing inline."""
+    if not combo.isEditable() or combo.lineEdit() is None:
+        return
+    combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+    completer = combo.completer()
+    if completer is not None:
+        completer.setCompletionMode(QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        completer.setFilterMode(QtCore.Qt.MatchFlag.MatchContains)
+        completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+    opener = _OpenListOnClick(combo)
+    combo.lineEdit().installEventFilter(opener)
+    combo._open_list_on_click = opener          # keep a reference
+
+
 class OptionEdit(QtWidgets.QComboBox):
     textChanged = QtCore.Signal(str)
     committed = QtCore.Signal(str)        # a pick, or typing finished
@@ -26,6 +60,7 @@ class OptionEdit(QtWidgets.QComboBox):
         self.addItem("")                    # blank = "no value", so a field can be cleared
         self.addItems([str(o) for o in options if str(o)])
         self.setText(text)
+        make_choosable(self)
         self.currentTextChanged.connect(self.textChanged)
         self.activated.connect(lambda _i: self.committed.emit(self.text()))
         if editable and self.lineEdit() is not None:

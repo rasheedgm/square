@@ -12,6 +12,7 @@ from __future__ import annotations
 from Qt import QtCore, QtWidgets, QtGui
 
 from tools.ingest_tool.core.item import Status, Action, Severity
+from tools.ingest_tool.widgets.option_edit import make_choosable
 from tools.ingest_tool.widgets.rename_dialog import RenameCellsDialog
 from tools.qt_compat import ALIGN_CENTER, EXTENDED_SELECTION, SELECT_ITEMS
 
@@ -68,6 +69,7 @@ class _CompactEditDelegate(QtWidgets.QStyledItemDelegate):
             options, editable = spec
             combo = QtWidgets.QComboBox(parent)
             combo.setEditable(editable)
+            make_choosable(combo)
             current = str(index.data() or "")
             values = list(options)
             if current and current != "set…" and current not in values:

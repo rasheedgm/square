@@ -565,6 +565,51 @@ class TestOptionEdit(unittest.TestCase):
         self.assertEqual(strict.text(), "Input")
 
 
+class TestOptionEditShowsItsList(unittest.TestCase):
+    """The pattern window's pickers read as plain text boxes: the app stylesheet
+    removed the combo's arrow, and on an editable combo only the arrow opens
+    the list."""
+
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_the_stylesheet_draws_a_combo_arrow_that_exists(self):
+        qss = (Path(__file__).resolve().parents[1] / "tools" / "ingest_tool" / "style.qss").read_text(
+            encoding="utf-8")
+        self.assertIn("QComboBox::down-arrow", qss)
+        icon = Path(__file__).resolve().parents[1] / "tools" / "ingest_tool" / "resources" / "arrow_down.svg"
+        self.assertTrue(icon.exists())
+        self.assertIn("arrow_down.svg", qss)
+
+    def test_clicking_an_empty_field_opens_the_list(self):
+        from Qt import QtCore, QtGui
+        from tools.ingest_tool.widgets.option_edit import OptionEdit
+        e = OptionEdit(["Plate", "CCC"], "", editable=True)
+        e.show()
+        opened = []
+        e.showPopup = lambda: opened.append(1)
+        press = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseButtonPress, QtCore.QPointF(4, 4), QtCore.QPointF(4, 4),
+            QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.KeyboardModifier.NoModifier)
+        QtWidgets.QApplication.sendEvent(e.lineEdit(), press)
+        QtWidgets.QApplication.processEvents()
+        self.assertTrue(opened)
+
+    def test_typing_filters_the_choices_in_a_popup_anywhere_in_the_text(self):
+        from tools.ingest_tool.widgets.option_edit import OptionEdit
+        from Qt import QtCore
+        e = OptionEdit(["BG Plate", "Plate", "CCC"], "", editable=True)
+        comp = e.completer()
+        self.assertEqual(comp.completionMode(), QtWidgets.QCompleter.CompletionMode.PopupCompletion)
+        self.assertEqual(comp.filterMode(), QtCore.Qt.MatchFlag.MatchContains)
+        self.assertEqual(comp.caseSensitivity(), QtCore.Qt.CaseSensitivity.CaseInsensitive)
+
+    def test_a_strict_combo_is_untouched(self):
+        from tools.ingest_tool.widgets.option_edit import OptionEdit
+        self.assertIsNone(OptionEdit(["Plate"], "Plate", editable=False).lineEdit())
+
+
 class TestPatternDefaultsUseTheConfig(unittest.TestCase):
     def setUp(self):
         QtWidgets.QApplication.instance() or QtWidgets.QApplication([])

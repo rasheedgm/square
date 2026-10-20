@@ -1539,3 +1539,54 @@ class TestRetryAFailedRow(unittest.TestCase):
             self.assertTrue(item.ingestable)
             controller.run_ingest()
             self.assertTrue(item.ingested)
+
+
+class TestFieldOptions(unittest.TestCase):
+    """What the pickers offer: the project's config first, then what the rows carry."""
+
+    def _controller(self, work):
+        pctx = _pctx(work)
+        pctx.config.data["fps"] = 25.0
+        pctx.config.data["resolution"] = "2048x1152"
+        pctx.config.data["colorspace"] = {"working": "ACEScg", "delivery": "Rec.709",
+                                          "plate_assumed": "ACEScg"}
+        pctx.config.data["media_types"] = {
+            "Plate": {"source": "delivery", "dir": "plates/{name}_v{version}", "colorspace": "ACEScg"},
+            "CompRender": {"source": "publish", "dir": "out/{name}"},
+            "CCC": {"dir": "input/ccc"},
+            "Grade": {"source": "delivery", "dir": "g", "colorspace": "ARRI LogC"},
+        }
+        return _controller(pctx, work)
+
+    def test_media_types_are_the_configured_ones_delivery_ones_first(self):
+        with tempfile.TemporaryDirectory() as work:
+            opts = self._controller(work).field_options("media_type")
+        self.assertEqual(set(opts), {"Plate", "CompRender", "CCC", "Grade"})
+        self.assertEqual(opts[:2], ["Plate", "Grade"])           # source=delivery lead
+        self.assertNotIn("_default", opts)
+
+    def test_fps_starts_with_the_projects_then_the_standards(self):
+        with tempfile.TemporaryDirectory() as work:
+            opts = self._controller(work).field_options("fps")
+        self.assertEqual(opts[0], "25")
+        self.assertIn("23.976", opts)
+        self.assertEqual(len(opts), len(set(opts)))             # no duplicate 25
+
+    def test_resolution_and_colorspace_come_from_config_and_rows(self):
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as work:
+            controller = self._controller(work)
+            item = _make_item(src, resolution="5792x3056", colorspace="Acec")
+            _load(controller, [item])
+            res = controller.field_options("resolution")
+            cs = controller.field_options("colorspace")
+        self.assertEqual(res[0], "2048x1152")
+        self.assertIn("5792x3056", res)                          # a delivery's own size is offered
+        self.assertEqual(cs[0], "ACEScg")
+        self.assertIn("Rec.709", cs)
+        self.assertIn("ARRI LogC", cs)                           # a per-media-type colorspace
+        self.assertIn("Acec", cs)
+
+    def test_an_unknown_field_has_no_options(self):
+        with tempfile.TemporaryDirectory() as work:
+            self.assertEqual(self._controller(work).field_options("shot_code"), [])
+

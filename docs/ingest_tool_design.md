@@ -762,4 +762,14 @@ Next: the Phase A port onto `square_core` (`pipeline_architecture.md` §12).
 18. **Task-type lookup falls back to the project record** when Zou's
     `.../settings/task-types` route isn't available to the user, instead of
     logging and carrying on blind.
-
+19. **Pickers instead of bare text where the config has the options.**
+    `IngestController.field_options(field)` offers, for `media_type` /
+    `fps` / `resolution` / `colorspace`, what the project's config says first
+    (configured media types with `source: delivery` leading; the project fps /
+    resolution; the working / delivery / plate-assumed and per-media-type
+    colorspaces) and then what the rows already carry. Used by the review
+    table's in-cell editors (Type is a strict pick-list, the others stay
+    typeable), the detail panel's "Set metadata" boxes, the Rename / Set Value
+    dialog (a "Pick a value" box when every selected cell is one such field)
+    and the Path Pattern dialog's default-value fields (`OptionEdit`, a
+    line-edit-shaped combo). Sequence / shot / media name / version stay text.

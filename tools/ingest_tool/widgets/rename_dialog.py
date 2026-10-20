@@ -15,6 +15,7 @@ from __future__ import annotations
 from Qt import QtWidgets, QtCore
 
 from tools.ingest_tool.core.controller import IngestController
+from tools.ingest_tool.widgets.option_edit import OptionEdit
 from tools.qt_compat import (
     TEXT_SELECTABLE_BY_MOUSE, DIALOG_OK, DIALOG_CANCEL, DIALOG_ACCEPTED, exec_dialog,
     get_qt_enum,
@@ -116,6 +117,9 @@ class RenameCellsDialog(QtWidgets.QDialog):
 
         form = QtWidgets.QFormLayout(self)
         form.addRow(scope)
+        pick = self._value_picker()
+        if pick is not None:
+            form.addRow("Pick a value", pick)
         form.addRow("Template", self.edit)
         form.addRow("Tokens", pal_scroll)
         form.addRow("Preview", prev_scroll)
@@ -125,6 +129,25 @@ class RenameCellsDialog(QtWidgets.QDialog):
         self._refresh_preview()
 
     # ------------------------------------------------------------------
+
+    def _value_picker(self):
+        """When every selected cell is the same configurable field (media type,
+        fps, resolution, colorspace), offer its choices -- picking one fills
+        the template with that literal value."""
+        fields = {a for _, a in self.cell_targets}
+        field = next(iter(fields)) if len(fields) == 1 else None
+        if field not in ("media_type", "fps", "resolution", "colorspace"):
+            return None
+        fn = getattr(getattr(self.bridge, "controller", None), "field_options", None)
+        try:
+            options = fn(field) if fn else []
+        except Exception:
+            options = []
+        if not options:
+            return None
+        combo = OptionEdit(options, editable=False)
+        combo.committed.connect(lambda v: self.edit.setText(v) if v else None)
+        return combo
 
     def _insert(self, token: str) -> None:
         self.edit.insert("{%s}" % token)

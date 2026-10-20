@@ -182,6 +182,7 @@ class FolderTreeWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self._root_path = None
         self._mapper    = None
+        self._field_options = None     # set_field_options(): the config's choices per field
         self.setAcceptDrops(True)
         self.setMinimumWidth(340)
         self._build_ui()
@@ -381,6 +382,12 @@ class FolderTreeWidget(QtWidgets.QWidget):
     @property
     def root_path(self):
         return self._root_path
+
+    def set_field_options(self, fn) -> None:
+        """`fn(field_name)` -> the choices the project's config offers for a
+        field (media_type, fps, resolution, colorspace); used by the Path
+        Pattern dialog's default-value pickers."""
+        self._field_options = fn
 
     def load_path(self, path: str):
         self._root_path = path
@@ -662,7 +669,8 @@ class FolderTreeWidget(QtWidgets.QWidget):
         if item is None or not item.files:
             QtWidgets.QMessageBox.warning(self, "Build Path Pattern", "Could not read this item's files.")
             return
-        dlg = PathPatternBuilderDialog(self._mapper, item, parent=self)
+        dlg = PathPatternBuilderDialog(self._mapper, item, parent=self,
+                                       field_options=self._field_options)
         res = dlg.exec() if hasattr(dlg, "exec") else dlg.exec_()
         if res == DIALOG_ACCEPTED and dlg.result_pattern:
             if dlg.result_replace_index is not None:

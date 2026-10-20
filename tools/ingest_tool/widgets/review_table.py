@@ -52,12 +52,57 @@ _STATUS_STYLE = {
 
 class _CompactEditDelegate(QtWidgets.QStyledItemDelegate):
     """Keeps the in-cell editor exactly the size of the cell (the app-wide
-    QSS gives QLineEdit a 26px min-height + padding, which overflows a 28px row)."""
+    QSS gives QLineEdit a 26px min-height + padding, which overflows a 28px row).
+
+    A column the config has options for (media type, fps, resolution,
+    colorspace) edits through a combo box instead of a bare text field:
+    `option_spec(column)` returns (options, editable) or None for plain text."""
+
+    def __init__(self, parent=None, option_spec=None):
+        super().__init__(parent)
+        self._option_spec = option_spec
 
     def createEditor(self, parent, option, index):
+        spec = self._option_spec(index.column()) if self._option_spec else None
+        if spec:
+            options, editable = spec
+            combo = QtWidgets.QComboBox(parent)
+            combo.setEditable(editable)
+            current = str(index.data() or "")
+            values = list(options)
+            if current and current != "set…" and current not in values:
+                values.insert(0, current)        # what the row has now is always a choice
+            combo.addItems(values)
+            combo.setStyleSheet("min-height:0; padding:0 4px; margin:0;")
+            combo.activated.connect(lambda _i, c=combo: self._commit(c))
+            if not editable:
+                QtCore.QTimer.singleShot(0, combo.showPopup)
+            return combo
         editor = super().createEditor(parent, option, index)
         editor.setStyleSheet("min-height:0; padding:0 4px; margin:0;")
         return editor
+
+    def _commit(self, editor) -> None:
+        self.commitData.emit(editor)
+        self.closeEditor.emit(editor, QtWidgets.QAbstractItemDelegate.EndEditHint.NoHint)
+
+    def setEditorData(self, editor, index):
+        if isinstance(editor, QtWidgets.QComboBox):
+            text = str(index.data() or "")
+            text = "" if text == "set…" else text
+            i = editor.findText(text)
+            if i >= 0:
+                editor.setCurrentIndex(i)
+            elif editor.isEditable():
+                editor.setEditText(text)
+            return
+        super().setEditorData(editor, index)
+
+    def setModelData(self, editor, model, index):
+        if isinstance(editor, QtWidgets.QComboBox):
+            model.setData(index, editor.currentText())
+            return
+        super().setModelData(editor, model, index)
 
     def updateEditorGeometry(self, editor, option, index):
         editor.setGeometry(option.rect)
@@ -86,7 +131,7 @@ class IngestReviewTable(QtWidgets.QWidget):
             self._table.setColumnWidth(i, w)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.setWordWrap(False)
-        self._table.setItemDelegate(_CompactEditDelegate(self._table))
+        self._table.setItemDelegate(_CompactEditDelegate(self._table, self._option_spec))
         self._table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
 
         self._table.itemChanged.connect(self._on_item_changed)
@@ -377,6 +422,23 @@ class IngestReviewTable(QtWidgets.QWidget):
     # ------------------------------------------------------------------
     # Edits
     # ------------------------------------------------------------------
+
+    _OPTION_FIELDS = {C_TYPE: "media_type", C_FPS: "fps", C_RES: "resolution", C_CS: "colorspace"}
+
+    def _option_spec(self, column):
+        """(options, editable) for a column the config can offer choices for;
+        None -> a plain text editor. Media type is a strict pick-list (a typo
+        there only produces a "no destination template" warning); the rest
+        stay typeable -- a delivery's own frame size isn't in any list."""
+        field = self._OPTION_FIELDS.get(column)
+        fn = getattr(getattr(self.bridge, "controller", None), "field_options", None)
+        if not field or fn is None:
+            return None
+        try:
+            options = fn(field)
+        except Exception:
+            return None
+        return (options, field != "media_type") if options else None
 
     def _on_item_changed(self, cell: QtWidgets.QTableWidgetItem) -> None:
         if self._loading:

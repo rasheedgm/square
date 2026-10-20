@@ -15,6 +15,7 @@ import os
 from Qt import QtCore, QtWidgets
 
 from tools.ingest_tool.core.item import Action, Severity, IssueKind
+from tools.ingest_tool.widgets.option_edit import OptionEdit
 from tools.qt_compat import SIZE_EXPANDING
 
 _ACTION_LABEL = {
@@ -221,8 +222,13 @@ class DetailPanel(QtWidgets.QScrollArea):
         g = QtWidgets.QGridLayout(holder)
         g.setContentsMargins(8, 6, 8, 6)
         g.addWidget(QtWidgets.QLabel("Set metadata:"), 0, 0, 1, 3)
+        fn = getattr(getattr(self.bridge, "controller", None), "field_options", None)
         for col, f in enumerate(("resolution", "fps", "colorspace")):
-            edit = QtWidgets.QLineEdit()
+            try:
+                options = fn(f) if fn else []
+            except Exception:
+                options = []
+            edit = OptionEdit(options)
             edit.setPlaceholderText(f)
             def _apply(_=None, field=f, e=edit):
                 val = e.text().strip()
@@ -233,6 +239,6 @@ class DetailPanel(QtWidgets.QScrollArea):
                         self.bridge.set_field(k, field, float(val) if field == "fps" else val)
                     except Exception:
                         pass
-            edit.editingFinished.connect(_apply)
+            edit.committed.connect(_apply)
             g.addWidget(edit, 1, col)
         self._lay.addWidget(holder)

@@ -537,5 +537,69 @@ class TestPathPatternManagerDialog(unittest.TestCase):
         self.assertFalse(dlg.changed)
 
 
+class TestOptionEdit(unittest.TestCase):
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    def test_it_reads_and_writes_like_a_line_edit(self):
+        from tools.ingest_tool.widgets.option_edit import OptionEdit
+        e = OptionEdit(["Plate", "Ref"], "Ref")
+        self.assertEqual(e.text(), "Ref")
+        seen = []
+        e.textChanged.connect(seen.append)
+        e.setText("Plate")
+        self.assertEqual(e.text(), "Plate")
+        self.assertEqual(seen[-1], "Plate")
+
+    def test_a_blank_choice_clears_it(self):
+        from tools.ingest_tool.widgets.option_edit import OptionEdit
+        e = OptionEdit(["Plate"], "Plate")
+        e.setText("")
+        self.assertEqual(e.text(), "")
+
+    def test_editable_keeps_free_typing_strict_keeps_a_current_value(self):
+        from tools.ingest_tool.widgets.option_edit import OptionEdit
+        free = OptionEdit(["24"], "5792x3056", editable=True)
+        self.assertEqual(free.text(), "5792x3056")
+        strict = OptionEdit(["Plate"], "Input", editable=False)
+        self.assertEqual(strict.text(), "Input")
+
+
+class TestPatternDefaultsUseTheConfig(unittest.TestCase):
+    def setUp(self):
+        QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        d = self.tmp / "SQ010" / "SH0100"
+        d.mkdir(parents=True)
+        (d / "plate.1001.exr").write_text("x")
+
+    def _dialog(self, options):
+        from square_core.media.scanner import PlateScanner
+        mapper = FolderMapper(self.tmp)
+        [item] = PlateScanner(self.tmp).scan()
+        return PathPatternBuilderDialog(mapper, item, field_options=options)
+
+    def test_media_type_and_metadata_defaults_are_pickers_when_the_config_has_options(self):
+        from tools.ingest_tool.widgets.option_edit import OptionEdit
+        dlg = self._dialog(lambda name: {"media_type": ["Plate", "CCC"], "fps": ["24", "25"],
+                                          "resolution": ["1920x1080"],
+                                          "colorspace": ["ACEScg"]}.get(name, []))
+        self.assertIsInstance(dlg._default_edits["media_type"], OptionEdit)
+        self.assertNotIsInstance(dlg._default_edits["shot"], OptionEdit)         # free text
+        for f in ("fps", "resolution", "colorspace"):
+            self.assertIsInstance(dlg._metadata_default_edits[f], OptionEdit, f)
+
+    def test_a_picked_default_ends_up_in_the_pattern(self):
+        dlg = self._dialog(lambda name: ["Plate", "CCC"] if name == "media_type" else [])
+        dlg._default_edits["media_type"].setText("CCC")
+        self.assertEqual(dlg._current_defaults("<sequence>/<shot>/plate.####.exr").get("media_type"),
+                         "CCC")
+
+    def test_without_options_the_defaults_stay_plain_text(self):
+        dlg = self._dialog(None)
+        self.assertIsInstance(dlg._default_edits["media_type"], QtWidgets.QLineEdit)
+
+
 if __name__ == "__main__":
     unittest.main()

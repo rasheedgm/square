@@ -49,6 +49,11 @@ logger = logging.getLogger("SquareIngestController")
 
 HASH_MODES = ("off", "first", "first_last", "first_middle_last", "all")
 
+# Industry-standard frame rates / frame sizes offered next to the project's own
+# in a picker -- suggestions only, any value can still be typed.
+STANDARD_FPS = (23.976, 24.0, 25.0, 29.97, 30.0, 48.0, 50.0, 60.0)
+STANDARD_RESOLUTIONS = ("1920x1080", "2048x1080", "2048x858", "3840x2160", "4096x2160")
+
 # what _ingest_core hands back for a row that was skipped / cancelled before it
 # finished -- distinct from None (done, no preview pending)
 _STOPPED = object()
@@ -173,6 +178,35 @@ class IngestController:
         return [name for name, entry in reg.items()
                 if name != "_default" and isinstance(entry, dict)
                 and (entry.get("dir") or entry.get("file"))]
+
+    def field_options(self, field_name: str) -> list:
+        """Values worth offering in a picker for `field_name` (media_type,
+        fps, resolution, colorspace) -- what the project's config says, then
+        what the rows already carry. Empty = nothing to offer (plain text)."""
+        cfg = self.pctx.config
+
+        def uniq(seq):
+            return list(dict.fromkeys(str(x) for x in seq if str(x).strip()))
+
+        if field_name == "media_type":
+            names = cfg.media_type_names()
+            # the types this stage offers first, then any other configured type
+            return sorted(names, key=lambda n: cfg.media_type(n).get("source") != "delivery")
+        if field_name == "fps":
+            def f(v):
+                return f"{float(v):g}"
+            rows = [f(i.fps) for i in self.items if i.fps]
+            return uniq([f(cfg.fps), *rows, *(f(v) for v in STANDARD_FPS)])
+        if field_name == "resolution":
+            rows = [i.resolution for i in self.items if i.resolution]
+            return uniq([cfg.resolution, *rows, *STANDARD_RESOLUTIONS])
+        if field_name == "colorspace":
+            cs = cfg.colorspace
+            per_type = [cfg.media_type(n).get("colorspace", "") for n in cfg.media_type_names()]
+            rows = [i.colorspace for i in self.items if i.colorspace]
+            return uniq([cs.get("working", ""), cs.get("plate_assumed", ""),
+                         cs.get("delivery", ""), *per_type, *rows])
+        return []
 
     # ------------------------------------------------------------------
     # Events

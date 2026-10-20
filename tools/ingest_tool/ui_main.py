@@ -314,6 +314,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _attach_bridge(self) -> None:
         """(Re)wire a fresh ControllerBridge to the table, detail panel and window."""
         self.bridge = ControllerBridge(self.controller, self)
+        self.folder_tree.set_field_options(self.controller.field_options)
         self.bridge.event.connect(self._on_controller_event)
         self.bridge.job_started.connect(self._on_job_started)
         self.bridge.job_finished.connect(self._on_job_finished)

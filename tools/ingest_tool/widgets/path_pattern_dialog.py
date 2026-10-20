@@ -34,6 +34,7 @@ from square_core.paths.token_parser import (
     DEFAULT_DELIMITER_CHARS, tokenize_with_separators, merge_token_indices,
 )
 from tools.ingest_tool.core.folder_mapper import METADATA_DEFAULT_FIELDS
+from tools.ingest_tool.widgets.option_edit import OptionEdit
 from tools.qt_compat import (
     HEADER_RESIZE_STRETCH, SELECT_ROWS, TEXT_SELECTABLE_BY_MOUSE, get_qt_enum,
     DIALOG_OK, DIALOG_CANCEL, exec_dialog,
@@ -334,8 +335,10 @@ class SplitChipDialog(QtWidgets.QDialog):
 class PathPatternBuilderDialog(QtWidgets.QDialog):
     """Builds one Path Pattern by tagging a real example item's whole path."""
 
-    def __init__(self, mapper, item, parent=None):
+    def __init__(self, mapper, item, parent=None, field_options=None):
         super().__init__(parent)
+        # field_options(name) -> the config's choices for a field, or []
+        self._field_options = field_options or (lambda _name: [])
         self.setWindowTitle("Build Path Pattern")
         self.setMinimumSize(780, 460)
         # Restored tagging (drilled filename + several folder chips) is wide,
@@ -433,6 +436,17 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
             "padding:8px; color:#D1FAE5; font-size:11px;"
         )
         layout.addWidget(banner)
+
+    def _default_edit(self, field: str, text: str):
+        """A default-value editor: a combo of the config's choices where it has
+        any for this field (media type, fps, resolution, colorspace), otherwise
+        a plain text edit. Same `.text()` / `.textChanged` either way."""
+        name = {"media_type": "media_type", "fps": "fps", "resolution": "resolution",
+                "colorspace": "colorspace"}.get(field)
+        options = self._field_options(name) if name else []
+        if options:
+            return OptionEdit(options, text, editable=True)
+        return QtWidgets.QLineEdit(text)
 
     def _build_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -542,7 +556,7 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         defaults_form = QtWidgets.QFormLayout()
         existing_defaults = self._existing_pattern.defaults if self._existing_pattern else {}
         for field in CANONICAL_DISPLAY_NAMES:
-            edit = QtWidgets.QLineEdit(str(existing_defaults.get(field, "")))
+            edit = self._default_edit(field, str(existing_defaults.get(field, "")))
             edit.setPlaceholderText(f"(not used unless {field!r} isn't tagged anywhere above)")
             edit.textChanged.connect(self._update_preview)
             self._default_edits[field] = edit
@@ -559,7 +573,7 @@ class PathPatternBuilderDialog(QtWidgets.QDialog):
         defaults_v.addWidget(meta_hint)
         meta_form = QtWidgets.QFormLayout()
         for field in METADATA_DEFAULT_FIELDS:
-            edit = QtWidgets.QLineEdit(str(existing_defaults.get(field, "")))
+            edit = self._default_edit(field, str(existing_defaults.get(field, "")))
             edit.setPlaceholderText("e.g. 24" if field == "fps" else
                                      "e.g. 1920x1080" if field == "resolution" else "e.g. ACEScg")
             edit.textChanged.connect(self._update_preview)

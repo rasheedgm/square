@@ -229,5 +229,68 @@ class PatternOwnedCellsTest(unittest.TestCase):
         self.assertTrue(bool(fps.flags() & QtCore.Qt.ItemFlag.ItemIsEditable))
 
 
+class OptionEditorsTest(unittest.TestCase):
+    """The in-cell editor for Type / FPS / Res / CS is a combo of the config's
+    choices, not a bare text field."""
+    setUp = ReviewTableTest.setUp
+    _item = ReviewTableTest._item
+    _load = ReviewTableTest._load
+    _t = ReviewTableTest._t
+
+    def _editor(self, column, row=0):
+        index = self._t().model().index(row, column)
+        delegate = self._t().itemDelegate()
+        editor = delegate.createEditor(self._t().viewport(), QtWidgets.QStyleOptionViewItem(), index)
+        delegate.setEditorData(editor, index)
+        return delegate, editor, index
+
+    def test_media_type_is_a_strict_pick_list_of_the_configured_types(self):
+        from tools.ingest_tool.widgets.review_table import C_TYPE
+        self._load(self._item("a"))
+        _d, ed, _i = self._editor(C_TYPE)
+        self.assertIsInstance(ed, QtWidgets.QComboBox)
+        self.assertFalse(ed.isEditable())
+        items = [ed.itemText(i) for i in range(ed.count())]
+        self.assertIn("Plate", items)
+        self.assertEqual(ed.currentText(), "Plate")             # the row's current value selected
+
+    def test_a_value_not_in_the_config_is_still_shown_not_lost(self):
+        from tools.ingest_tool.widgets.review_table import C_TYPE
+        self._load(self._item("a", media_type="Input"))
+        _d, ed, _i = self._editor(C_TYPE)
+        self.assertEqual(ed.currentText(), "Input")
+
+    def test_fps_res_and_colorspace_are_editable_combos(self):
+        from tools.ingest_tool.widgets.review_table import C_FPS, C_RES, C_CS
+        self._load(self._item("a"))
+        for col in (C_FPS, C_RES, C_CS):
+            _d, ed, _i = self._editor(col)
+            self.assertIsInstance(ed, QtWidgets.QComboBox, col)
+            self.assertTrue(ed.isEditable(), col)
+
+    def test_other_columns_stay_plain_text(self):
+        from tools.ingest_tool.widgets.review_table import C_SHOT
+        self._load(self._item("a"))
+        _d, ed, _i = self._editor(C_SHOT)
+        self.assertNotIsInstance(ed, QtWidgets.QComboBox)
+
+    def test_picking_a_type_writes_it_to_the_row(self):
+        from tools.ingest_tool.widgets.review_table import C_TYPE
+        [it] = self._load(self._item("a"))
+        self.pctx.config.data["media_types"] = {
+            **self.pctx.config.media_types, "Ref": {"source": "delivery", "dir": "ref/{name}"}}
+        d, ed, index = self._editor(C_TYPE)
+        ed.setCurrentIndex(ed.findText("Ref"))
+        d.setModelData(ed, self._t().model(), index)
+        self.assertEqual(self.ctrl.get(it.key).media_type, "Ref")
+
+    def test_without_options_it_falls_back_to_text(self):
+        from tools.ingest_tool.widgets.review_table import C_TYPE
+        self._load(self._item("a"))
+        self.pctx.config.data["media_types"] = {}               # nothing configured
+        _d, ed, _i = self._editor(C_TYPE)
+        self.assertNotIsInstance(ed, QtWidgets.QComboBox)
+
+
 if __name__ == "__main__":
     unittest.main()
